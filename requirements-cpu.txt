@@ -1,0 +1,23 @@
+# macOS / CPU-only development subset.
+# Excludes CUDA-only packages: mamba_ssm, causal-conv1d, bitsandbytes.
+# All non-LM-loading code (config, cache I/O, SAE math, eval) is fully testable with this subset.
+
+torch>=2.5,<2.7
+transformers>=4.57.3,<5.0
+safetensors>=0.4.5
+einops>=0.8
+
+nnsight>=0.6,<0.7
+
+datasets>=3.0
+tokenizers>=0.20
+huggingface-hub>=0.25
+
+pydantic>=2.7,<3
+pyyaml>=6
+tqdm>=4.66
+numpy>=1.26,<3
+typing_extensions>=4.10
+
+pytest>=8
+pytest-xdist>=3

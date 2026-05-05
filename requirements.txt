@@ -1,0 +1,37 @@
+# Full requirements for the SAE training pipeline (Linux + CUDA target).
+# On macOS, install requirements-cpu.txt instead (skips mamba_ssm + causal-conv1d + bitsandbytes).
+# Pin to known-working versions consistent with the Nemotron 3 model card and Gemma Scope 2 recipes.
+
+# --- Core deep learning ---
+torch>=2.5,<2.7
+transformers>=4.57.3,<5.0
+safetensors>=0.4.5
+accelerate>=1.0
+einops>=0.8
+
+# --- Required to load Nemotron 3 Nano (Mamba-2 blocks) ---
+mamba_ssm>=2.2.0
+causal-conv1d>=1.4.0
+
+# --- Activation hooking ---
+nnsight>=0.6,<0.7
+
+# --- Data ---
+datasets>=3.0
+tokenizers>=0.20
+huggingface-hub>=0.25
+
+# --- Config + utilities ---
+pydantic>=2.7,<3
+pyyaml>=6
+tqdm>=4.66
+numpy>=1.26,<3
+typing_extensions>=4.10
+
+# --- Optional but useful ---
+wandb>=0.18           # logging (optional; set WANDB_DISABLED=true to skip)
+bitsandbytes>=0.44    # 4-bit quantization for ≤24 GB GPUs (Linux/CUDA only)
+
+# --- Dev / test ---
+pytest>=8
+pytest-xdist>=3
