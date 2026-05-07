@@ -10,10 +10,12 @@ model:
   device_map: auto
 
 data:
-  # Open-access educational web crawl (ODC-BY). 350BT subset comfortably covers
-  # the 200B-token prod budget; flip to `default` (~1.3T tokens) if you want more.
-  source: HuggingFaceFW/fineweb-edu
-  name: sample-350BT
+  # Pretraining-distribution match for Nemotron 3 Nano. Gated behind an NVIDIA
+  # data agreement on HF — accept it on the dataset page before running prod.
+  # Pick a quality-bucket subset via `name` (e.g. High-Quality, Medium-High-Quality,
+  # High-Quality-Synthetic). Leave null to use the default config.
+  source: nvidia/Nemotron-CC-v2.1
+  name: High-Quality
   split: train
   streaming: true
   total_tokens: 200000000000     # 200B tokens

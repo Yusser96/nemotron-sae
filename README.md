@@ -63,8 +63,11 @@ The dev smoke test caches activations from
 [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
 (`sample-10BT` subset, ODC-BY, fully open) at layer 25 component `resid_post`,
 trains a tiny `d_sae=4096` JumpReLU SAE for 1 000 steps, and evaluates it.
-Prod uses the same dataset (`sample-350BT` subset, 200 B-token budget) so dev
-is a faithful smoke test of prod.
+Prod uses
+[`nvidia/Nemotron-CC-v2.1`](https://huggingface.co/datasets/nvidia/Nemotron-CC-v2.1)
+(`High-Quality` subset) to match the model's pretraining distribution — that
+dataset is gated behind an NVIDIA agreement, which is why dev uses the open
+FineWeb-Edu analog.
 
 ## Per-(layer, component) jobs
 
@@ -143,11 +146,12 @@ data-induced bug surfaces in dev too.
   The activation function is pluggable; `topk`, `batchtopk`, and `matryoshka`
   are reserved as future drop-ins.
 - **Cache**: `safetensors` shards + a JSON manifest.
-- **Data**: HF `datasets` streaming from
-  [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
-  (ODC-BY, no gating). The original Nemotron-3 pretraining corpus
-  [`nvidia/Nemotron-CC-v2.1`](https://huggingface.co/datasets/nvidia/Nemotron-CC-v2.1)
-  is gated behind an NVIDIA agreement; FineWeb-Edu is the canonical open-access analog.
+- **Data**: HF `datasets` streaming.
+  - **Dev**: [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
+    `sample-10BT` (ODC-BY, no gating) — for fast smoke-test iteration.
+  - **Prod**: [`nvidia/Nemotron-CC-v2.1`](https://huggingface.co/datasets/nvidia/Nemotron-CC-v2.1)
+    `High-Quality` — matches the model's pretraining distribution (gated behind an
+    NVIDIA data agreement; accept it on the dataset page before running prod).
 
 ## Memory & GPU efficiency
 
