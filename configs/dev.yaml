@@ -10,7 +10,11 @@ model:
   device_map: auto
 
 data:
-  source: nvidia/Nemotron-CC-v2.1
+  # Open-access educational web crawl (ODC-BY). Dev streams only 100 docs;
+  # prod uses the same dataset (different subset / token budget) so dev is a
+  # faithful smoke test of prod.
+  source: HuggingFaceFW/fineweb-edu
+  name: sample-10BT
   split: train
   streaming: true
   n_documents: 100

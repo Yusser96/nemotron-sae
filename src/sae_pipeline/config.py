@@ -26,7 +26,8 @@ class ModelCfg(BaseModel):
 
 
 class DataCfg(BaseModel):
-    source: str = "nvidia/Nemotron-CC-v2.1"
+    source: str = "HuggingFaceFW/fineweb-edu"
+    name: str | None = "sample-10BT"   # HF dataset config / subset name; None = default
     split: str = "train"
     streaming: bool = True
     n_documents: int | None = None  # dev: 100; prod: None means use total_tokens

@@ -10,7 +10,10 @@ model:
   device_map: auto
 
 data:
-  source: nvidia/Nemotron-CC-v2.1
+  # Open-access educational web crawl (ODC-BY). 350BT subset comfortably covers
+  # the 200B-token prod budget; flip to `default` (~1.3T tokens) if you want more.
+  source: HuggingFaceFW/fineweb-edu
+  name: sample-350BT
   split: train
   streaming: true
   total_tokens: 200000000000     # 200B tokens

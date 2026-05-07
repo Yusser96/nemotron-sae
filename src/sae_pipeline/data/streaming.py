@@ -21,8 +21,14 @@ log = logging.getLogger(__name__)
 
 def stream_documents(cfg: DataCfg) -> Iterator[str]:
     """Yield raw document strings from `cfg.source`. Honors `n_documents` if set."""
-    log.info("Streaming dataset %s split=%s streaming=%s", cfg.source, cfg.split, cfg.streaming)
-    ds = load_dataset(cfg.source, split=cfg.split, streaming=cfg.streaming)
+    log.info(
+        "Streaming dataset %s name=%s split=%s streaming=%s",
+        cfg.source, cfg.name, cfg.split, cfg.streaming,
+    )
+    load_kwargs: dict[str, Any] = {"split": cfg.split, "streaming": cfg.streaming}
+    if cfg.name is not None:
+        load_kwargs["name"] = cfg.name
+    ds = load_dataset(cfg.source, **load_kwargs)
 
     if cfg.streaming and cfg.shuffle_buffer:
         ds = ds.shuffle(seed=cfg.seed, buffer_size=cfg.shuffle_buffer)

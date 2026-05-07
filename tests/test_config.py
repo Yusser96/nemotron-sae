@@ -9,7 +9,8 @@ def test_dev_config_loads():
     cfg = PipelineCfg.from_yaml("configs/dev.yaml")
     assert cfg.run_id == "dev_smoke"
     assert cfg.data.n_documents == 100
-    assert cfg.data.source.startswith("nvidia/")
+    assert cfg.data.source == "HuggingFaceFW/fineweb-edu"
+    assert cfg.data.name == "sample-10BT"
     assert cfg.target.layer == 25
     assert cfg.target.component == "resid_post"
     assert cfg.sae.arch == "jumprelu"
