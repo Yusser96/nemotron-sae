@@ -15,6 +15,7 @@ import logging
 from dataclasses import asdict
 from pathlib import Path
 
+import numpy as np
 import torch
 from safetensors.torch import load_file
 
@@ -22,6 +23,7 @@ from sae_pipeline.cache.manifest import CacheManifest, manifest_path_for
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.eval.metrics import reconstruction_metrics
+from sae_pipeline.eval.plots import plot_eval_summary
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.train import build_sae
 
@@ -83,20 +85,50 @@ def main() -> None:
             break
     activations = torch.cat(sample, dim=0)[:target].to(device, dtype=torch.float32)
 
-    metrics = reconstruction_metrics(sae, activations,
-                                     dead_threshold_tokens=cfg.eval.dead_n_tokens)
+    metrics, arrays = reconstruction_metrics(
+        sae, activations,
+        dead_threshold_tokens=cfg.eval.dead_n_tokens,
+        return_arrays=True,
+    )
     log.info("Eval: %s", metrics)
 
-    out_path = Path(cfg.log.log_dir) / cfg.run_id / spec.slug / f"{arch}_w{width}_l0_{l0_target}_eval.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(cfg.log.log_dir) / cfg.run_id / spec.slug
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{arch}_w{width}_l0_{l0_target}"
+
+    summary_path = out_dir / f"{stem}_eval.json"
     payload = {
         "checkpoint": str(ckpt),
         "manifest": str(manifest_path),
+        "arch": arch,
+        "d_sae": width,
+        "l0_target": l0_target,
         **asdict(metrics),
     }
-    with open(out_path, "w") as f:
+    with open(summary_path, "w") as f:
         json.dump(payload, f, indent=2)
-    log.info("Wrote eval to %s", out_path)
+    log.info("Wrote eval summary to %s", summary_path)
+
+    arrays_path = out_dir / f"{stem}_eval_arrays.npz"
+    np.savez_compressed(
+        arrays_path,
+        firing_frequency=arrays.firing_frequency,
+        l0_per_token=arrays.l0_per_token,
+        recon_err_per_token=arrays.recon_err_per_token,
+    )
+    log.info("Wrote eval arrays to %s", arrays_path)
+
+    plot_dir = out_dir / f"{stem}_plots"
+    try:
+        plot_eval_summary(
+            eval_json_path=summary_path,
+            arrays_npz_path=arrays_path,
+            out_dir=plot_dir,
+            target_l0=l0_target,
+            title_prefix=f"{arch}  d_sae={width}  L0*={l0_target}",
+        )
+    except Exception as e:
+        log.warning("Failed to generate eval plots: %s", e)
 
 
 if __name__ == "__main__":

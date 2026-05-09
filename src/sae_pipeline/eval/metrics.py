@@ -4,12 +4,17 @@
 - FVU: fraction of variance unexplained = MSE(x, x̂) / Var(x)
 - Dead-feature %: latents that never fire over a sample of N tokens
 - ΔCE: cross-entropy increase when SAE reconstruction is patched into the LM forward
+- Distributions for plotting:
+    * firing_frequency: shape (d_sae,) — per-latent firing fraction
+    * l0_per_token:     shape (n_tokens,) — int latent count per token
+    * recon_err_per_token: shape (n_tokens,) — squared L2 error per token
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 
 from sae_pipeline.sae.base import SparseAutoencoder
@@ -23,30 +28,56 @@ class ReconMetrics:
     n_tokens: int
 
 
+@dataclass
+class ReconArrays:
+    """Distributions used for plotting (saved to .npz alongside the JSON summary)."""
+    firing_frequency: np.ndarray   # (d_sae,) float32
+    l0_per_token: np.ndarray       # (n_tokens,) int32
+    recon_err_per_token: np.ndarray  # (n_tokens,) float32
+
+
 @torch.no_grad()
 def reconstruction_metrics(
     sae: SparseAutoencoder,
     activations: torch.Tensor,
     dead_threshold_tokens: int = 50_000,
-) -> ReconMetrics:
-    """Compute L0, FVU, and dead-% on a tensor of activations (n_tokens, d_in)."""
+    return_arrays: bool = False,
+) -> ReconMetrics | tuple[ReconMetrics, ReconArrays]:
+    """Compute L0, FVU, and dead-% on a tensor of activations (n_tokens, d_in).
+
+    With `return_arrays=True`, additionally return per-latent firing frequency,
+    per-token L0, and per-token reconstruction error — all consumed by the
+    plotting module to draw histograms.
+    """
     sae.eval()
     f = sae.encode(activations)
     x_hat = sae.decode(f)
 
-    l0 = (f > 0).to(activations.dtype).sum(dim=-1).mean().item()
+    active = (f > 0).to(activations.dtype)
+    l0_per_token = active.sum(dim=-1)
+    l0 = l0_per_token.mean().item()
 
-    mse = (activations - x_hat).pow(2).mean().item()
+    err_per_token = (activations - x_hat).pow(2).sum(dim=-1)
+    mse = err_per_token.mean().item() / activations.shape[-1]
     var = activations.var(dim=0).mean().item()
     fvu = mse / max(var, 1e-12)
 
     # Dead-feature percentage: count latents that never fired across the sample.
     n = activations.shape[0]
     sample_n = min(n, dead_threshold_tokens)
-    fired_any = (f[:sample_n] > 0).any(dim=0)
+    firing_frequency = active[:sample_n].mean(dim=0)
+    fired_any = firing_frequency > 0
     dead_pct = 100.0 * (1.0 - fired_any.float().mean().item())
 
-    return ReconMetrics(l0=l0, fvu=fvu, dead_pct=dead_pct, n_tokens=n)
+    metrics = ReconMetrics(l0=l0, fvu=fvu, dead_pct=dead_pct, n_tokens=n)
+    if not return_arrays:
+        return metrics
+    arrays = ReconArrays(
+        firing_frequency=firing_frequency.detach().cpu().float().numpy(),
+        l0_per_token=l0_per_token.detach().cpu().to(torch.int32).numpy(),
+        recon_err_per_token=err_per_token.detach().cpu().float().numpy(),
+    )
+    return metrics, arrays
 
 
 @torch.no_grad()

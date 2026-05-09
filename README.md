@@ -38,6 +38,9 @@ runs without reloading the LM.
 - **Eval**: L0, FVU, dead-feature %, ΔCE (cross-entropy increase when the SAE
   reconstruction is patched into the LM forward pass).
 
+- **Plots**: training and evaluation plots are auto-generated as PNGs after
+  every train + evaluate run; see "Plots" below.
+
 - **Job launcher**: materializes the cartesian product of
   `layers × components × archs × widths × L0 targets` into shell commands and
   runs them in parallel via a `ProcessPoolExecutor`, pinning each job to one GPU
@@ -102,6 +105,37 @@ python -m sae_pipeline.cli.launch --config configs/prod.yaml --executor dry
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
   python -m sae_pipeline.cli.launch --config configs/prod.yaml --executor local
 ```
+
+## Plots
+
+Every `train_sae` run writes `train_log.jsonl` and emits an 8-panel PNG to
+`<ckpt_dir>/plots/training_overview.png`:
+
+- total loss · MSE · L0-penalty · hard L0 vs. target line
+- dead-feature % · LR schedule · sparsity coefficient λ schedule
+- MSE-vs-L0 trajectory (color-coded by step, shows the path training took
+  through the sparsity-fidelity plane — invaluable for spotting collapse,
+  oscillation, or "stuck at high L0" failure modes)
+
+Every `evaluate` run writes a `*_eval.json` summary and an `*_eval_arrays.npz`
+companion (per-latent firing frequency, per-token L0, per-token recon error),
+then emits a 3-panel PNG to `<log_dir>/.../<arch_w_l0>_plots/eval_histograms.png`:
+
+- latent firing frequency histogram (log-log, Gemma Scope 2 Fig. 2 style)
+- L0 distribution per token (with target-L0 reference line)
+- reconstruction error per token (auto-detects log-x for fat-tailed runs)
+
+Re-plot existing artifacts without retraining:
+
+```bash
+python -m sae_pipeline.cli.plot \
+    --config configs/dev.yaml \
+    --layer 25 --component resid_post \
+    --arch jumprelu --width 4096 --l0 30
+```
+
+`matplotlib` runs on the headless `Agg` backend, so plots are produced even on
+training boxes with no display.
 
 ## Configs
 

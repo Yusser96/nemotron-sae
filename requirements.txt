@@ -28,6 +28,9 @@ tqdm>=4.66
 numpy>=1.26,<3
 typing_extensions>=4.10
 
+# --- Plotting ---
+matplotlib>=3.8
+
 # --- Optional but useful ---
 wandb>=0.18           # logging (optional; set WANDB_DISABLED=true to skip)
 bitsandbytes>=0.44    # 4-bit quantization for ≤24 GB GPUs (Linux/CUDA only)

@@ -18,6 +18,7 @@ from safetensors.torch import save_file
 
 from sae_pipeline.cache.reader import ActivationBuffer
 from sae_pipeline.config import SAECfg
+from sae_pipeline.eval.plots import plot_training_curves
 from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
@@ -158,4 +159,18 @@ def train_sae(
     log_f.close()
     elapsed = time.time() - t_start
     log.info("Training done in %.1fs", elapsed)
+
+    # Auto-generate training plots so the user has something to look at without
+    # remembering to run a separate command.
+    try:
+        plot_dir = Path(out_dir) / "plots"
+        plot_training_curves(
+            jsonl_path=log_path,
+            out_dir=plot_dir,
+            target_l0=l0_target,
+            title_prefix=f"{arch}  d_sae={d_sae}  L0*={l0_target}",
+        )
+    except Exception as e:  # plotting is non-load-bearing; never fail training over it
+        log.warning("Failed to generate training plots: %s", e)
+
     return out_dir / f"sae_step_{cfg.n_steps:07d}.safetensors"
