@@ -64,7 +64,7 @@ That script:
 1. Verifies CUDA (`nvidia-smi`, `nvcc`)
 2. Clones / fast-forwards the repo to `~/nemotron-sae` (override with `WORK_DIR=...`)
 3. Materializes `env.sh` from your inherited tokens
-4. Runs `setup_venv.sh` — installs `mamba_ssm` + `causal-conv1d` (compiles CUDA kernels; first-run takes 10–30 min)
+4. Runs `setup_venv.sh` — installs the PyPI `virtualenv` package (so the venv works on minimal containers without `pythonX.Y-venv`), creates `.venv`, then installs `mamba_ssm` + `causal-conv1d` and friends (first-run takes 10–30 min while CUDA kernels compile)
 5. Runs `sanity_check.sh` — confirms torch sees CUDA, `mamba_ssm` imports, `transformers` can read the model config
 6. Dumps `model_topology.json` — catches `trust_remote_code` module-naming drift before any forward pass
 7. Runs `dev_smoke_test.sh` — caches 100 docs at `(layer 25, resid_post)`, trains a `d_sae=4096` JumpReLU SAE for 1 000 steps, evaluates it, generates plots

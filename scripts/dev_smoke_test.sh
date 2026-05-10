@@ -11,9 +11,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # shellcheck disable=SC1091
-source .venv/bin/activate
+source "$REPO_ROOT/.venv/bin/activate"
 # shellcheck disable=SC1091
-source env.sh   # HF_TOKEN, OPENAI_API_KEY
+source "$REPO_ROOT/env.sh"   # HF_TOKEN, OPENAI_API_KEY
 
 CONFIG="${CONFIG:-configs/dev.yaml}"
 LAYER="${LAYER:-25}"

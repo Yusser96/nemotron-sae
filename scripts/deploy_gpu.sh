@@ -114,9 +114,9 @@ else
 fi
 
 # shellcheck disable=SC1091
-source .venv/bin/activate
+source "$WORK_DIR/.venv/bin/activate"
 # shellcheck disable=SC1091
-source env.sh
+source "$WORK_DIR/env.sh"
 
 # ----- 5. Sanity check -------------------------------------------------------
 echo

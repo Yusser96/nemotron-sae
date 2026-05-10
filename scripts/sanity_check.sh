@@ -12,7 +12,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # shellcheck disable=SC1091
-source .venv/bin/activate
+source "$REPO_ROOT/.venv/bin/activate"
 
 echo ">>> torch + CUDA"
 python - <<'PY'
