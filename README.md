@@ -46,6 +46,32 @@ runs without reloading the LM.
   runs them in parallel via a `ProcessPoolExecutor`, pinning each job to one GPU
   via `CUDA_VISIBLE_DEVICES`. `--executor dry` just prints the commands.
 
+## Running on a GPU host (one-shot deploy)
+
+```bash
+# On the GPU box (CUDA toolkit + nvcc + git + Python ≥ 3.10 required)
+export HF_TOKEN="hf_..."             # required
+export OPENAI_API_KEY="sk-..."       # optional, for auto-interp
+export GH_TOKEN="ghp_..."            # only if you haven't run `gh auth login`
+
+curl -fsSL https://raw.githubusercontent.com/Yusser96/nemotron-sae/main/scripts/deploy_gpu.sh | bash
+# or, if already cloned:
+#   bash scripts/deploy_gpu.sh
+```
+
+That script:
+
+1. Verifies CUDA (`nvidia-smi`, `nvcc`)
+2. Clones / fast-forwards the repo to `~/nemotron-sae` (override with `WORK_DIR=...`)
+3. Materializes `env.sh` from your inherited tokens
+4. Runs `setup_venv.sh` — installs `mamba_ssm` + `causal-conv1d` (compiles CUDA kernels; first-run takes 10–30 min)
+5. Runs `sanity_check.sh` — confirms torch sees CUDA, `mamba_ssm` imports, `transformers` can read the model config
+6. Dumps `model_topology.json` — catches `trust_remote_code` module-naming drift before any forward pass
+7. Runs `dev_smoke_test.sh` — caches 100 docs at `(layer 25, resid_post)`, trains a `d_sae=4096` JumpReLU SAE for 1 000 steps, evaluates it, generates plots
+8. Packs `outputs/` into `smoke_artifacts_<ts>.tar.gz` so you can rsync results back
+
+Set `SKIP_SETUP=1` to reuse an already-built venv on a re-run; `SKIP_TOPOLOGY=1` to skip the model load in step 6.
+
 ## Quick start
 
 ```bash
