@@ -24,12 +24,9 @@
 #                           `gh auth login` once on this host beforehand and the
 #                           default git credential helper will pick it up)
 #   REPO_URL              — override (default: https://github.com/Yusser96/nemotron-sae.git)
-#   WORK_DIR              — override. Default behaviour:
-#                             • if the current directory is inside an existing
-#                               clone of this repo, use that clone's root;
-#                             • otherwise use $(pwd) — the directory you ran
-#                               the script from. The clone (or fast-forward)
-#                               happens *there*, never silently in $HOME.
+#   WORK_DIR              — override. Default is $(pwd) — the directory you
+#                           ran the script from. The clone / fast-forward /
+#                           in-place init happens *there*, never elsewhere.
 #   BRANCH                — override (default: main)
 #   SKIP_SETUP=1          — re-use an already-built .venv
 #   SKIP_TOPOLOGY=1       — skip model topology dump (saves a model load if you
@@ -46,17 +43,10 @@ set -euo pipefail
 REPO_URL="${REPO_URL:-https://github.com/Yusser96/nemotron-sae.git}"
 BRANCH="${BRANCH:-main}"
 
-# WORK_DIR defaults to the directory you ran the script from. If that
-# directory happens to be inside an existing git checkout, we use the repo
-# root so you can run the script equally well from `…/clone/`,
-# `…/clone/scripts/`, or anywhere else under the tree.
-if [ -z "${WORK_DIR:-}" ]; then
-    if existing_root=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
-        WORK_DIR="$existing_root"
-    else
-        WORK_DIR="$(pwd)"
-    fi
-fi
+# WORK_DIR defaults to the directory you ran the script from. Period — no
+# auto-detection of enclosing git repos, no $HOME fallback. cd to where you
+# want the project to live before invoking the script.
+WORK_DIR="${WORK_DIR:-$(pwd)}"
 
 # ----- 1. CUDA check ---------------------------------------------------------
 echo "============================================================"

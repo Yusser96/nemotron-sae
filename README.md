@@ -61,9 +61,8 @@ curl -fsSL https://raw.githubusercontent.com/Yusser96/nemotron-sae/main/scripts/
 #   bash scripts/deploy_gpu.sh
 ```
 
-`WORK_DIR` defaults to the directory you ran the script from (or the repo
-root if you're inside an existing clone). Override with `WORK_DIR=/foo/bar`
-if you want a specific location.
+`WORK_DIR` defaults to `$(pwd)` — exactly the directory you ran the script
+from. Override with `WORK_DIR=/foo/bar` if you want a specific location.
 
 That script:
 
