@@ -54,10 +54,16 @@ export HF_TOKEN="hf_..."             # required
 export OPENAI_API_KEY="sk-..."       # optional, for auto-interp
 export GH_TOKEN="ghp_..."            # only if you haven't run `gh auth login`
 
+# cd to wherever you want the project to live, then run:
+cd /netscratch/you/sae_work          # example — pick any writable directory
 curl -fsSL https://raw.githubusercontent.com/Yusser96/nemotron-sae/main/scripts/deploy_gpu.sh | bash
 # or, if already cloned:
 #   bash scripts/deploy_gpu.sh
 ```
+
+`WORK_DIR` defaults to the directory you ran the script from (or the repo
+root if you're inside an existing clone). Override with `WORK_DIR=/foo/bar`
+if you want a specific location.
 
 That script:
 
