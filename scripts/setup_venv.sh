@@ -72,15 +72,31 @@ if [ "$(uname)" = "Darwin" ]; then
     echo ">>> macOS detected — using requirements-cpu.txt (skips CUDA-only packages)"
     python -m pip install -r "$REPO_ROOT/requirements-cpu.txt"
 else
-    # Linux / CUDA path. mamba_ssm and causal-conv1d both `import torch` at the
-    # top of their setup.py, but pip's PEP 517 build isolation creates a clean
-    # env without torch — so installing them straight from requirements.txt
-    # fails with "No module named 'torch'" even though torch is listed.
-    # Fix: pre-install torch + ninja + packaging into THIS venv, then run the
-    # full requirements with --no-build-isolation so the source builds inherit
-    # the outer env (which now has torch).
-    echo ">>> Linux/CUDA path — pre-installing torch + ninja so mamba_ssm can build"
-    python -m pip install "torch>=2.5,<2.7" ninja packaging
+    # Linux / CUDA path. Two complications resolved here:
+    #
+    # 1. Default mirrors (incl. pypi-cache and pypi.ngc.nvidia.com) ship the
+    #    cu124 torch wheel, which has no Blackwell (sm_100) kernels. On a B200
+    #    that wheel "loads" but every CUDA op fails with "no kernel image
+    #    available". The cu128 wheels on PyTorch's official index include
+    #    sm_100 prebuilt — install torch from there explicitly.
+    #
+    # 2. mamba_ssm and causal-conv1d both `import torch` at the top of
+    #    setup.py, but pip's PEP 517 build isolation hides torch from the
+    #    build env, so they fail with "No module named 'torch'" even though
+    #    torch is listed earlier. Fix is --no-build-isolation after torch is
+    #    in place.
+    #
+    # 3. Their CUDA kernels need to be compiled with sm_100 in the arch list,
+    #    so we set TORCH_CUDA_ARCH_LIST. nvcc ≥ 12.4 supports sm_100.
+    echo ">>> Linux/CUDA — installing torch (cu128, includes Blackwell sm_100)"
+    python -m pip install --index-url https://download.pytorch.org/whl/cu128 \
+        "torch>=2.7,<2.9"
+
+    echo ">>> Installing build helpers (ninja, packaging)"
+    python -m pip install ninja packaging
+
+    export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;9.0;10.0+PTX}"
+    echo ">>> Building source extensions with TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
 
     echo ">>> Installing full requirements.txt with --no-build-isolation"
     python -m pip install --no-build-isolation -r "$REPO_ROOT/requirements.txt"

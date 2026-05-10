@@ -2,7 +2,7 @@
 # Excludes CUDA-only packages: mamba_ssm, causal-conv1d, bitsandbytes.
 # All non-LM-loading code (config, cache I/O, SAE math, eval) is fully testable with this subset.
 
-torch>=2.5,<2.7
+torch>=2.5,<2.9
 transformers>=4.57.3,<5.0
 safetensors>=0.4.5
 einops>=0.8

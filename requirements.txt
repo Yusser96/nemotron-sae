@@ -3,7 +3,11 @@
 # Pin to known-working versions consistent with the Nemotron 3 model card and Gemma Scope 2 recipes.
 
 # --- Core deep learning ---
-torch>=2.5,<2.7
+# torch is installed explicitly from PyTorch's cu128 index by setup_venv.sh on
+# Linux/CUDA so the wheel includes Blackwell (sm_100) kernels — pypi mirrors
+# tend to ship cu124 builds that fail on B200 with "no kernel image available".
+# We pin a compatible range here for documentation / pip resolution.
+torch>=2.7,<2.9
 transformers>=4.57.3,<5.0
 safetensors>=0.4.5
 accelerate>=1.0
