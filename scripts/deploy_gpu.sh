@@ -94,13 +94,34 @@ if [ -n "${GH_TOKEN:-}" ]; then
     clone_url="https://x-access-token:${GH_TOKEN}@${no_scheme}"
 fi
 
-if [ ! -d "$WORK_DIR/.git" ]; then
-    git clone --branch "$BRANCH" "$clone_url" "$WORK_DIR"
-else
-    echo "Existing checkout found; fetching latest..."
+if [ -d "$WORK_DIR/.git" ]; then
+    # Path A: existing clone — fast-forward.
+    echo "Existing checkout found at $WORK_DIR; fetching latest..."
     git -C "$WORK_DIR" fetch origin "$BRANCH"
     git -C "$WORK_DIR" checkout "$BRANCH"
     git -C "$WORK_DIR" pull --ff-only origin "$BRANCH"
+elif [ -d "$WORK_DIR" ] && [ -n "$(ls -A "$WORK_DIR" 2>/dev/null)" ]; then
+    # Path B: WORK_DIR exists with content but no .git (e.g. previous extraction
+    # without git, or somebody removed .git). Initialize a repo in place rather
+    # than fail on `git clone` (which insists the target be empty). After this:
+    #   - tracked repo files are written/overwritten to match origin/$BRANCH
+    #   - anything gitignored (.venv, outputs/, env.sh) survives untouched
+    echo "INFO: $WORK_DIR exists without .git/. Initializing git in place."
+    echo "      Files matching the repo will be overwritten with origin/$BRANCH;"
+    echo "      anything else (.venv, outputs/, env.sh, ...) stays."
+    git -C "$WORK_DIR" init -q -b "$BRANCH"
+    if git -C "$WORK_DIR" remote get-url origin >/dev/null 2>&1; then
+        git -C "$WORK_DIR" remote set-url origin "$clone_url"
+    else
+        git -C "$WORK_DIR" remote add origin "$clone_url"
+    fi
+    git -C "$WORK_DIR" fetch origin "$BRANCH"
+    git -C "$WORK_DIR" reset --hard FETCH_HEAD
+    git -C "$WORK_DIR" branch --set-upstream-to=origin/"$BRANCH" "$BRANCH" 2>/dev/null || true
+else
+    # Path C: WORK_DIR doesn't exist or is empty — clean clone.
+    mkdir -p "$(dirname "$WORK_DIR")"
+    git clone --branch "$BRANCH" "$clone_url" "$WORK_DIR"
 fi
 cd "$WORK_DIR"
 
