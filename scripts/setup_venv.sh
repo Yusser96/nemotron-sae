@@ -19,9 +19,30 @@ if [ -z "${PY:-}" ]; then
 fi
 echo ">>> Using Python interpreter: $PY ($($PY --version))"
 
+# If a previous run left an incomplete .venv (no bin/activate), wipe and retry —
+# this happens on Debian/Ubuntu when the matching pythonX.Y-venv package is
+# missing: `python -m venv` exits with a partially-built directory.
+if [ -d ".venv" ] && [ ! -f ".venv/bin/activate" ]; then
+    echo ">>> Removing broken .venv (no bin/activate)"
+    rm -rf .venv
+fi
+
 if [ ! -d ".venv" ]; then
     echo ">>> Creating .venv with $PY"
-    "$PY" -m venv .venv
+    if ! "$PY" -m venv .venv; then
+        echo "FATAL: '$PY -m venv .venv' failed." >&2
+        echo "On Debian/Ubuntu install the matching venv package, e.g.:" >&2
+        echo "    apt install -y ${PY##*/}-venv python3-pip" >&2
+        exit 4
+    fi
+fi
+
+if [ ! -f ".venv/bin/activate" ]; then
+    echo "FATAL: .venv/bin/activate missing after venv creation." >&2
+    echo "Likely the ${PY##*/}-venv package is not installed. On Debian/Ubuntu:" >&2
+    echo "    apt install -y ${PY##*/}-venv python3-pip" >&2
+    echo "Then re-run this script (it will rebuild .venv)." >&2
+    exit 4
 fi
 
 # shellcheck disable=SC1091
