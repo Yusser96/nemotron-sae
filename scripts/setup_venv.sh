@@ -104,15 +104,28 @@ else
     # Build mamba_ssm + causal-conv1d from GitHub main against the current torch.
     # PyPI/NGC mamba_ssm 2.3.x has a c10::Warning constructor mismatch with
     # torch 2.8 (Blackwell-aware). Main branches carry the torch 2.8 fixes.
-    # `--force-reinstall` purges any stale binary that may have been pulled
-    # in transitively by something else.
-    echo ">>> Building causal-conv1d from GitHub main (torch 2.8 ABI)"
-    python -m pip install --no-build-isolation --force-reinstall \
+    #
+    # IMPORTANT: --no-deps (not --force-reinstall). --force-reinstall treats
+    # the declared `torch` dependency as a top-level requirement and re-pulls
+    # whatever torch the user's pypi mirror serves (e.g. 2.11.0+cu130), which
+    # then mismatches the system nvcc and fails compile. --no-deps preserves
+    # the cu128 wheel we just installed.
+    echo ">>> Pre-build sanity: which torch will mamba/causal-conv1d compile against?"
+    python -c "import torch; print(f'torch={torch.__version__}  CUDA={torch.version.cuda}')"
+
+    echo ">>> Removing any stale mamba_ssm / causal-conv1d binaries"
+    python -m pip uninstall -y mamba_ssm causal-conv1d 2>/dev/null || true
+
+    echo ">>> Building causal-conv1d from GitHub main (torch 2.8 ABI, --no-deps)"
+    python -m pip install --no-build-isolation --no-deps \
         "git+https://github.com/Dao-AILab/causal-conv1d.git"
 
-    echo ">>> Building mamba_ssm from GitHub main (torch 2.8 ABI)"
-    python -m pip install --no-build-isolation --force-reinstall \
+    echo ">>> Building mamba_ssm from GitHub main (torch 2.8 ABI, --no-deps)"
+    python -m pip install --no-build-isolation --no-deps \
         "git+https://github.com/state-spaces/mamba.git"
+
+    echo ">>> Post-build sanity: did torch survive intact?"
+    python -c "import torch; print(f'torch={torch.__version__}  CUDA={torch.version.cuda}')"
 fi
 
 # Editable install of the project itself.
