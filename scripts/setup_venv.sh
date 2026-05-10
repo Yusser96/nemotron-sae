@@ -100,6 +100,19 @@ else
 
     echo ">>> Installing full requirements.txt with --no-build-isolation"
     python -m pip install --no-build-isolation -r "$REPO_ROOT/requirements.txt"
+
+    # Build mamba_ssm + causal-conv1d from GitHub main against the current torch.
+    # PyPI/NGC mamba_ssm 2.3.x has a c10::Warning constructor mismatch with
+    # torch 2.8 (Blackwell-aware). Main branches carry the torch 2.8 fixes.
+    # `--force-reinstall` purges any stale binary that may have been pulled
+    # in transitively by something else.
+    echo ">>> Building causal-conv1d from GitHub main (torch 2.8 ABI)"
+    python -m pip install --no-build-isolation --force-reinstall \
+        "git+https://github.com/Dao-AILab/causal-conv1d.git"
+
+    echo ">>> Building mamba_ssm from GitHub main (torch 2.8 ABI)"
+    python -m pip install --no-build-isolation --force-reinstall \
+        "git+https://github.com/state-spaces/mamba.git"
 fi
 
 # Editable install of the project itself.

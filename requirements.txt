@@ -14,8 +14,12 @@ accelerate>=1.0
 einops>=0.8
 
 # --- Required to load Nemotron 3 Nano (Mamba-2 blocks) ---
-mamba_ssm>=2.2.0
-causal-conv1d>=1.4.0
+# NOTE: PyPI / NGC mamba_ssm 2.3.x has a C++ ABI incompatibility with torch 2.8
+# (the c10::Warning constructor signature changed). setup_venv.sh on the
+# Linux/CUDA path installs these from GitHub main instead — leaving them here
+# is a documentation hint only.
+# mamba_ssm>=2.2.0
+# causal-conv1d>=1.4.0
 
 # --- Activation hooking ---
 nnsight>=0.6,<0.7
