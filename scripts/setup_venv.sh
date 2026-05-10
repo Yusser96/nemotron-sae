@@ -68,13 +68,23 @@ source "$VENV/bin/activate"
 
 python -m pip install --upgrade pip wheel setuptools
 
-REQ_FILE="$REPO_ROOT/requirements.txt"
 if [ "$(uname)" = "Darwin" ]; then
     echo ">>> macOS detected — using requirements-cpu.txt (skips CUDA-only packages)"
-    REQ_FILE="$REPO_ROOT/requirements-cpu.txt"
-fi
+    python -m pip install -r "$REPO_ROOT/requirements-cpu.txt"
+else
+    # Linux / CUDA path. mamba_ssm and causal-conv1d both `import torch` at the
+    # top of their setup.py, but pip's PEP 517 build isolation creates a clean
+    # env without torch — so installing them straight from requirements.txt
+    # fails with "No module named 'torch'" even though torch is listed.
+    # Fix: pre-install torch + ninja + packaging into THIS venv, then run the
+    # full requirements with --no-build-isolation so the source builds inherit
+    # the outer env (which now has torch).
+    echo ">>> Linux/CUDA path — pre-installing torch + ninja so mamba_ssm can build"
+    python -m pip install "torch>=2.5,<2.7" ninja packaging
 
-python -m pip install -r "$REQ_FILE"
+    echo ">>> Installing full requirements.txt with --no-build-isolation"
+    python -m pip install --no-build-isolation -r "$REPO_ROOT/requirements.txt"
+fi
 
 # Editable install of the project itself.
 python -m pip install -e "$REPO_ROOT"
