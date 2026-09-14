@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 Quant = Literal["auto", "bf16", "fp8", "nf4"]
 SAEArch = Literal["jumprelu", "topk", "batchtopk", "matryoshka"]
+CheckpointMode = Literal["finetune", "resume"]
 
 
 class ModelCfg(BaseModel):
@@ -71,6 +72,11 @@ class SAECfg(BaseModel):
     ckpt_every: int = 5_000
     log_every: int = 100
     ckpt_dir: Path = Path("outputs/checkpoints")
+    checkpoint_source: str | Path | None = None
+    checkpoint_mode: CheckpointMode = "finetune"
+    checkpoint_filename: str | None = None
+    checkpoint_revision: str = "main"
+    keep_last_checkpoints: int = 2
 
     @field_validator("d_sae")
     @classmethod
@@ -79,6 +85,13 @@ class SAECfg(BaseModel):
         for w in widths:
             if w <= 0:
                 raise ValueError(f"d_sae must be positive, got {w}")
+        return v
+
+    @field_validator("keep_last_checkpoints")
+    @classmethod
+    def _keep_last_checkpoints_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("keep_last_checkpoints must be positive")
         return v
 
 

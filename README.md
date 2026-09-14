@@ -126,6 +126,38 @@ python -m sae_pipeline.cli.evaluate \
 Components: `resid_pre`, `resid_post`, `mamba_out`, `attn_out_prelinear`,
 `moe_out`, `expert.<e>`, `shared_expert.<s>`, `attn_head.<h>`.
 
+## Fine-tuning and exact resume
+
+Set an optional checkpoint source under `sae`. Sources may be a local
+`.safetensors` file, a directory containing checkpoints, a Hugging Face repo ID,
+or a standard Hugging Face repository URL. A directory/repository selects its
+latest checkpoint automatically; `checkpoint_filename` selects an older one.
+The same local-path, repo-ID, and repository-URL forms are accepted by
+`model.name` for the source LLM.
+
+```yaml
+sae:
+  checkpoint_source: org/my-sae                 # path, repo ID, or repo URL
+  checkpoint_mode: finetune                     # finetune (default) or resume
+  checkpoint_filename: sae_step_0050000.safetensors  # optional
+  checkpoint_revision: main
+  keep_last_checkpoints: 2
+```
+
+`finetune` imports only tensor-compatible SAE weights. Dictionary input and
+width dimensions must match, but the source may come from a different model,
+layer, component, or architecture provenance. Optimizer state, schedules,
+logging, dead-feature tracking, activation iteration, and step numbering all
+start afresh.
+
+`resume` requires a complete checkpoint pair and restores the optimizer, random
+state, dead-feature tracking, and activation-buffer position. Here `n_steps` is
+the final global-step target, not a number of additional steps. Each save writes
+portable weights as `sae_step_<step>.safetensors` and exact-resume data as
+`trainer_state_step_<step>.pt`. After a complete new pair is committed, only the
+newest `keep_last_checkpoints` complete pairs are retained; unpaired legacy or
+fine-tuning source weights are left untouched.
+
 ## Sweep launcher
 
 ```bash

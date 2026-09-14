@@ -17,7 +17,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from safetensors.torch import load_file
 
 from sae_pipeline.cache.manifest import CacheManifest, manifest_path_for
 from sae_pipeline.cache.reader import ShardReader
@@ -25,16 +24,10 @@ from sae_pipeline.config import PipelineCfg
 from sae_pipeline.eval.metrics import reconstruction_metrics
 from sae_pipeline.eval.plots import plot_eval_summary
 from sae_pipeline.hooks.components import ComponentSpec
+from sae_pipeline.sae.checkpoint import load_sae_weights, resolve_checkpoint
 from sae_pipeline.sae.train import build_sae
 
 log = logging.getLogger(__name__)
-
-
-def latest_checkpoint(ckpt_dir: Path) -> Path:
-    ckpts = sorted(ckpt_dir.glob("sae_step_*.safetensors"))
-    if not ckpts:
-        raise FileNotFoundError(f"No checkpoints under {ckpt_dir}")
-    return ckpts[-1]
 
 
 def main() -> None:
@@ -65,12 +58,16 @@ def main() -> None:
     ckpt_dir = (
         Path(cfg.sae.ckpt_dir) / cfg.run_id / spec.slug / f"{arch}_w{width}_l0_{l0_target}"
     )
-    ckpt = Path(args.checkpoint) if args.checkpoint else latest_checkpoint(ckpt_dir)
+    checkpoint_source = args.checkpoint or ckpt_dir
+    resolved = resolve_checkpoint(
+        checkpoint_source,
+        revision=cfg.sae.checkpoint_revision,
+    )
+    ckpt = resolved.weights_path
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     sae = build_sae(arch, d_in=manifest.d_activation, d_sae=width, bandwidth=cfg.sae.bandwidth).to(device)
-    sd = load_file(str(ckpt))
-    sae.load_state_dict(sd)
+    load_sae_weights(sae, ckpt)
     sae.eval()
     log.info("Loaded SAE from %s", ckpt)
 

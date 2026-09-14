@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from sae_pipeline.config import PipelineCfg
+from sae_pipeline.config import PipelineCfg, SAECfg
 
 
 def test_dev_config_loads():
@@ -40,3 +40,17 @@ def test_overrides_overlay_dotted_fields():
     assert new.sae.d_sae == 8192
     # Original untouched.
     assert cfg.sae.d_sae == 4096
+
+
+def test_checkpoint_defaults_and_retention_validation():
+    cfg = SAECfg()
+    assert cfg.checkpoint_source is None
+    assert cfg.checkpoint_mode == "finetune"
+    assert cfg.checkpoint_filename is None
+    assert cfg.checkpoint_revision == "main"
+    assert cfg.keep_last_checkpoints == 2
+
+    with pytest.raises(ValueError, match="keep_last_checkpoints"):
+        SAECfg(keep_last_checkpoints=0)
+    with pytest.raises(ValueError, match="keep_last_checkpoints"):
+        SAECfg(keep_last_checkpoints=-1)

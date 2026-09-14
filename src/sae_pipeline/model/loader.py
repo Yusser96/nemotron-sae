@@ -14,6 +14,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from sae_pipeline.config import ModelCfg
+from sae_pipeline.sae.checkpoint import normalize_hf_source
 
 log = logging.getLogger(__name__)
 
@@ -53,17 +54,18 @@ def load_model_and_tokenizer(cfg: ModelCfg):
     """Load the LM and its tokenizer. The model is left in eval mode; weights are frozen
     (we never train the LM, only SAEs that read its activations)."""
     quant_kwargs = _resolve_quantization_kwargs(cfg)
+    model_source = normalize_hf_source(cfg.name)
 
-    log.info("Loading tokenizer for %s", cfg.name)
+    log.info("Loading tokenizer for %s", model_source)
     tokenizer = AutoTokenizer.from_pretrained(
-        cfg.name, trust_remote_code=cfg.trust_remote_code
+        model_source, trust_remote_code=cfg.trust_remote_code
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    log.info("Loading model %s with %s", cfg.name, quant_kwargs)
+    log.info("Loading model %s with %s", model_source, quant_kwargs)
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.name,
+        model_source,
         device_map=cfg.device_map,
         trust_remote_code=cfg.trust_remote_code,
         **quant_kwargs,
