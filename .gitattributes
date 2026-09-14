@@ -1,0 +1,3 @@
+# Normalize text files to LF so CRLF checkouts do not create false diffs and
+# Bash scripts remain usable from WSL or other POSIX shells.
+* text=auto eol=lf
