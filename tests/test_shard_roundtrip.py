@@ -7,7 +7,7 @@ import torch
 
 from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.reader import ActivationBuffer, ShardReader
-from sae_pipeline.cache.writer import ShardWriter
+from sae_pipeline.cache.writer import CacheBudget, ShardWriter
 
 
 def test_shard_roundtrip_basic(tmp_path: Path):
@@ -66,3 +66,33 @@ def test_activation_buffer_yields_correct_shape(tmp_path: Path):
     for _ in range(20):
         b = buf.next_batch()
         assert b.shape == (128, d)
+
+
+def test_cache_budget_rejects_a_shard_beyond_its_limit(tmp_path: Path):
+    manifest = CacheManifest(
+        run_id="t", model="m", dtype="float32", layer=0,
+        component="x", d_activation=4,
+    )
+    writer = ShardWriter(
+        out_dir=tmp_path / "cache", d_activation=4, shard_size_bytes=16,
+        dtype=torch.float32, manifest=manifest,
+        cache_budget=CacheBudget(tmp_path, limit_bytes=32),
+    )
+    import pytest
+    with pytest.raises(RuntimeError, match="limit"):
+        writer.add(torch.ones(12, 4))
+
+
+def test_shards_can_align_to_whole_forwards(tmp_path: Path):
+    manifest = CacheManifest(
+        run_id="t", model="m", dtype="float32", layer=0,
+        component="x", d_activation=4,
+    )
+    writer = ShardWriter(
+        out_dir=tmp_path / "cache", d_activation=4, shard_size_bytes=100,
+        dtype=torch.float32, manifest=manifest, flush_token_multiple=4,
+    )
+    writer.add(torch.ones(20, 4))
+    final = writer.close()
+    assert all(shard.shape[0] % 4 == 0 for shard in ShardReader(tmp_path / "cache").iter_shards())
+    assert final.total_tokens == 20

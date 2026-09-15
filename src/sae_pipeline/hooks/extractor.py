@@ -69,6 +69,36 @@ class _BufferList:
         return out
 
 
+def _capture_handle(
+    model: nn.Module,
+    spec: ComponentSpec,
+    site: HookSite,
+    buffer: _BufferList,
+) -> torch.utils.hooks.RemovableHandle:
+    """Register one capture hook and return its removable handle."""
+    if spec.kind in {"resid_pre", "resid_post"}:
+        block = _resolve_block(model, spec.layer)
+        if spec.kind == "resid_pre":
+            def pre_hook(_mod, args, _kwargs, buffer=buffer):
+                # First positional arg is hidden_states for most HF blocks.
+                if args:
+                    buffer.add(args[0])
+                return None
+            return block.register_forward_pre_hook(pre_hook, with_kwargs=True)
+        else:
+            def post_hook(_mod, _args, output, buffer=buffer):
+                # Output is usually a tensor or (tensor, ...) tuple.
+                hs = output[0] if isinstance(output, tuple) else output
+                buffer.add(hs)
+            return block.register_forward_hook(post_hook)
+    else:
+        mod = _resolve_module(model, site.module_path)
+        def fwd_hook(_mod, _args, output, buffer=buffer):
+            t = output[0] if isinstance(output, tuple) else output
+            buffer.add(t)
+        return mod.register_forward_hook(fwd_hook)
+
+
 @contextmanager
 def capture(model: nn.Module, spec: ComponentSpec, site: HookSite) -> Iterator[_BufferList]:
     """Register a forward hook for `spec` (resolved to `site`) and yield a buffer.
@@ -77,39 +107,26 @@ def capture(model: nn.Module, spec: ComponentSpec, site: HookSite) -> Iterator[_
     to retrieve the (n_tokens, d) tensor.
     """
     buf = _BufferList()
-    handles: list[torch.utils.hooks.RemovableHandle] = []
-
-    if spec.kind in {"resid_pre", "resid_post"}:
-        block = _resolve_block(model, spec.layer)
-        if spec.kind == "resid_pre":
-            def pre_hook(_mod, args, _kwargs):
-                # First positional arg is hidden_states for most HF blocks.
-                if args:
-                    buf.add(args[0])
-                return None
-            handles.append(block.register_forward_pre_hook(pre_hook, with_kwargs=True))
-        else:
-            def post_hook(_mod, _args, output):
-                # Output is usually a tensor or (tensor, ...) tuple.
-                hs = output[0] if isinstance(output, tuple) else output
-                buf.add(hs)
-            handles.append(block.register_forward_hook(post_hook))
-    elif spec.kind == "expert":
-        mod = _resolve_module(model, site.module_path)
-        def fwd_hook(_mod, _args, output):
-            t = output[0] if isinstance(output, tuple) else output
-            buf.add(t)
-        handles.append(mod.register_forward_hook(fwd_hook))
-    else:
-        # Generic case: hook the resolved module's forward output.
-        mod = _resolve_module(model, site.module_path)
-        def fwd_hook(_mod, _args, output):
-            t = output[0] if isinstance(output, tuple) else output
-            buf.add(t)
-        handles.append(mod.register_forward_hook(fwd_hook))
+    handle = _capture_handle(model, spec, site, buf)
 
     try:
         yield buf
     finally:
-        for h in handles:
-            h.remove()
+        handle.remove()
+
+
+@contextmanager
+def capture_many(
+    model: nn.Module,
+    requests: dict[str, tuple[ComponentSpec, HookSite]],
+) -> Iterator[dict[str, _BufferList]]:
+    """Capture several sites during one frozen-model forward pass."""
+    buffers = {slug: _BufferList() for slug in requests}
+    handles: list[torch.utils.hooks.RemovableHandle] = []
+    for slug, (spec, site) in requests.items():
+        handles.append(_capture_handle(model, spec, site, buffers[slug]))
+    try:
+        yield buffers
+    finally:
+        for handle in handles:
+            handle.remove()

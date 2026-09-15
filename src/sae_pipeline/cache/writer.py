@@ -21,6 +21,23 @@ from sae_pipeline.cache.manifest import CacheManifest
 log = logging.getLogger(__name__)
 
 
+class CacheBudget:
+    """Shared, process-local byte budget for one cache-materialisation run."""
+
+    def __init__(self, root: Path | str, limit_bytes: int | None) -> None:
+        self.root = Path(root)
+        self.limit_bytes = limit_bytes
+        self.used_bytes = sum(path.stat().st_size for path in self.root.rglob("*") if path.is_file()) if self.root.exists() else 0
+
+    def reserve(self, n_bytes: int, target: Path) -> None:
+        if self.limit_bytes is not None and self.used_bytes + n_bytes > self.limit_bytes:
+            raise RuntimeError(
+                f"Activation-cache limit of {self.limit_bytes} bytes would be exceeded "
+                f"while writing {target}; currently using {self.used_bytes} bytes"
+            )
+        self.used_bytes += n_bytes
+
+
 class ShardWriter:
     """Buffer activations in CPU memory; flush a shard when buffer crosses size threshold."""
 
@@ -32,6 +49,8 @@ class ShardWriter:
         dtype: torch.dtype = torch.bfloat16,
         shuffle_seed: int = 42,
         manifest: CacheManifest | None = None,
+        cache_budget: CacheBudget | None = None,
+        flush_token_multiple: int = 1,
     ) -> None:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -44,6 +63,10 @@ class ShardWriter:
             layer=-1, component="unknown", d_activation=d_activation,
             shuffle_seed=shuffle_seed,
         )
+        self.cache_budget = cache_budget
+        if flush_token_multiple <= 0:
+            raise ValueError("flush_token_multiple must be positive")
+        self.flush_token_multiple = flush_token_multiple
         self._buf: list[torch.Tensor] = []
         self._buf_tokens = 0
         self._element_size = torch.tensor([], dtype=dtype).element_size()
@@ -64,7 +87,11 @@ class ShardWriter:
         self._buf.append(x)
         self._buf_tokens += x.shape[0]
         while self._buf_tokens * self._bytes_per_token >= self.shard_size_bytes:
-            self._flush(target_tokens=self.shard_size_bytes // self._bytes_per_token)
+            target_tokens = self.shard_size_bytes // self._bytes_per_token
+            target_tokens -= target_tokens % self.flush_token_multiple
+            if target_tokens == 0:
+                raise ValueError("shard_size_bytes is smaller than flush_token_multiple activations")
+            self._flush(target_tokens=target_tokens)
 
     def _flush(self, target_tokens: int | None = None) -> None:
         if self._buf_tokens == 0:
@@ -85,10 +112,15 @@ class ShardWriter:
 
         n = self.manifest.n_shards
         shard_path = self.out_dir / f"shard_{n:05d}.safetensors"
+        if self.cache_budget is not None:
+            self.cache_budget.reserve(all_x.numel() * all_x.element_size(), shard_path)
         save_file({"x": all_x.contiguous()}, str(shard_path))
         self.manifest.shard_paths.append(shard_path.name)
         self.manifest.n_shards += 1
         self.manifest.total_tokens += all_x.shape[0]
+        # Persist after every completed shard so an interrupted extraction can
+        # safely append rather than overwrite cached activations.
+        self.manifest.write(self.out_dir / "manifest.json")
         log.info("Wrote %s (%d tokens)", shard_path.name, all_x.shape[0])
 
     def close(self) -> CacheManifest:

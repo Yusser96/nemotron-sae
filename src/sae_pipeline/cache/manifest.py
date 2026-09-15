@@ -7,6 +7,8 @@ shards that belong to the cache so readers don't have to glob.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -24,6 +26,9 @@ class CacheManifest:
     shard_paths: list[str] = field(default_factory=list)
     shuffle_seed: int = 42
     dataset_fingerprint: str = ""
+    partition: str = "train"
+    language: str | None = None
+    complete: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -31,8 +36,19 @@ class CacheManifest:
     def write(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
-            f.write(self.to_json())
+        fd, temporary = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
+        temporary_path = Path(temporary)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(self.to_json())
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, path)
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
 
     @classmethod
     def read(cls, path: str | Path) -> "CacheManifest":
