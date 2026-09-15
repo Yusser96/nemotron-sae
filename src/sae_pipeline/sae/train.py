@@ -157,11 +157,37 @@ def train_sae(
                 source_checkpoint.weights_path,
             )
 
+    def write_checkpoint(step: int) -> Path:
+        saved = save_checkpoint_pair(
+            out_dir=out_dir,
+            step=step,
+            model_state=sae.state_dict(),
+            trainer_state={
+                "version": 1,
+                "global_step": step,
+                "optimizer": optim.state_dict(),
+                "random_state": capture_random_state(),
+                "ever_fired": ever_fired.detach().cpu(),
+                "activation_buffer": buffer.state_dict(),
+            },
+            keep_last=cfg.keep_last_checkpoints,
+        )
+        log.info(
+            "Wrote checkpoint pair %s and %s", saved.weights_path, saved.trainer_state_path
+        )
+        return saved.weights_path
+
     log_path = out_dir / "train_log.jsonl"
     log_mode = "a" if cfg.checkpoint_source is not None and cfg.checkpoint_mode == "resume" else "w"
 
     t_start = time.time()
     final_checkpoint = source_checkpoint.weights_path if source_checkpoint is not None else None
+    if source_checkpoint is not None and cfg.checkpoint_mode == "resume" and start_step == cfg.n_steps:
+        log.info(
+            "Resume checkpoint is already at target step %d; writing it into %s",
+            cfg.n_steps, out_dir,
+        )
+        final_checkpoint = write_checkpoint(start_step)
     with open(log_path, log_mode) as log_f:
         for step in range(start_step + 1, cfg.n_steps + 1):
             x = buffer.next_batch().to(device, dtype=torch.float32)
@@ -206,26 +232,7 @@ def train_sae(
                 )
 
             if step % cfg.ckpt_every == 0 or step == cfg.n_steps:
-                saved = save_checkpoint_pair(
-                    out_dir=out_dir,
-                    step=step,
-                    model_state=sae.state_dict(),
-                    trainer_state={
-                        "version": 1,
-                        "global_step": step,
-                        "optimizer": optim.state_dict(),
-                        "random_state": capture_random_state(),
-                        "ever_fired": ever_fired.detach().cpu(),
-                        "activation_buffer": buffer.state_dict(),
-                    },
-                    keep_last=cfg.keep_last_checkpoints,
-                )
-                final_checkpoint = saved.weights_path
-                log.info(
-                    "Wrote checkpoint pair %s and %s",
-                    saved.weights_path,
-                    saved.trainer_state_path,
-                )
+                final_checkpoint = write_checkpoint(step)
 
     elapsed = time.time() - t_start
     log.info("Training done in %.1fs", elapsed)

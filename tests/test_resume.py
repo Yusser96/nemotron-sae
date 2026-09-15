@@ -123,3 +123,42 @@ def test_weight_only_finetune_starts_at_one_and_preserves_source(
     assert result.name == "sae_step_0000001.safetensors"
     assert source.read_bytes() == original_source
     assert (tmp_path / "finetuned" / "trainer_state_step_0000001.pt").exists()
+
+
+def test_resume_already_at_target_step_writes_into_out_dir(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("sae_pipeline.sae.train.plot_training_curves", lambda **_: None)
+    cache = tmp_path / "cache"
+    _make_cache(cache)
+    common = dict(
+        d_sae=7,
+        l0_target=2,
+        batch_size=5,
+        n_steps=2,
+        warmup_steps=1,
+        l0_warmup_steps=1,
+        ckpt_every=1,
+        log_every=1,
+        n_batches_in_buffer=2,
+        keep_last_checkpoints=3,
+    )
+    full = train_sae(SAECfg(**common), cache, 4, "jumprelu", 7, 2, tmp_path / "full", "cpu")
+
+    resumed = train_sae(
+        SAECfg(
+            **common,
+            checkpoint_source=tmp_path / "full",
+            checkpoint_mode="resume",
+        ),
+        cache,
+        4,
+        "jumprelu",
+        7,
+        2,
+        tmp_path / "resumed",
+        "cpu",
+    )
+
+    assert resumed.parent == tmp_path / "resumed"
+    assert resumed.exists()
+    assert (tmp_path / "resumed" / "trainer_state_step_0000002.pt").exists()
+    assert load_file(str(resumed)).keys() == load_file(str(full)).keys()

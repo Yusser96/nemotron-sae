@@ -177,7 +177,20 @@ def resolve_checkpoint(
             if filename is not None:
                 raise ValueError("checkpoint_filename cannot be used when source is a file")
             weights_path = local
-            checkpoint_step(weights_path)
+            match = _WEIGHTS_RE.match(weights_path.name)
+            if match is None:
+                if require_trainer_state:
+                    raise ValueError(
+                        "Resume requires a checkpoint named sae_step_<step>.safetensors "
+                        f"with a companion trainer state file, got {weights_path.name!r}"
+                    )
+                return ResolvedCheckpoint(
+                    weights_path=weights_path,
+                    trainer_state_path=None,
+                    step=-1,
+                    source=str(local),
+                )
+            step = int(match.group(1))
             state_path = companion_state_path(weights_path)
             if not state_path.exists():
                 if require_trainer_state:
@@ -188,15 +201,13 @@ def resolve_checkpoint(
             return ResolvedCheckpoint(
                 weights_path=weights_path,
                 trainer_state_path=state_path,
-                step=checkpoint_step(weights_path),
+                step=step,
                 source=str(local),
             )
 
-        relative_names = [
-            str(path.relative_to(local).as_posix())
-            for path in local.rglob("*")
-            if path.is_file()
-        ]
+        # Top-level only, matching prune_checkpoints(); a checkpoint directory
+        # is never expected to contain nested subdirectories of checkpoints.
+        relative_names = [path.name for path in local.iterdir() if path.is_file()]
         selected, state_name = _select_name(
             relative_names, filename, require_trainer_state
         )
@@ -216,6 +227,10 @@ def resolve_checkpoint(
         state_name = str(
             PurePosixPath(filename).parent / companion_state_name(filename)
         )
+        if require_trainer_state:
+            repo_files = list_repo_files(repo_id=repo_id, revision=revision)
+            if state_name not in repo_files:
+                raise FileNotFoundError(f"Resume requires companion state {state_name!r}")
     else:
         repo_files = list_repo_files(repo_id=repo_id, revision=revision)
         selected, state_name = _select_name(
@@ -291,13 +306,31 @@ def restore_random_state(state: Mapping[str, Any]) -> None:
         torch.cuda.set_rng_state_all([rng.cpu() for rng in saved])
 
 
-def load_trainer_state(path: str | Path) -> dict[str, Any]:
-    """Load trusted state needed for exact resume."""
+def _numpy_rng_safe_globals() -> list[Any]:
+    """Globals needed to unpickle the tuple returned by ``np.random.get_state()``."""
 
-    try:
-        state = torch.load(path, map_location="cpu", weights_only=False)
-    except TypeError:  # PyTorch versions predating the weights_only argument.
-        state = torch.load(path, map_location="cpu")
+    core = getattr(np, "_core", None) or np.core  # numpy >= 2.0 vs < 2.0 layout
+    globals_: list[Any] = [
+        core.multiarray._reconstruct,
+        np.ndarray,
+        np.dtype,
+        type(np.dtype(np.uint32)),
+    ]
+    return globals_
+
+
+def load_trainer_state(path: str | Path) -> dict[str, Any]:
+    """Load trusted state needed for exact resume.
+
+    ``checkpoint_source`` may point at an arbitrary Hugging Face repo, so this
+    loads with ``weights_only=True`` to prevent arbitrary code execution from a
+    malicious or compromised checkpoint: only tensors, plain Python
+    containers/scalars, and the numpy RNG-state types this file actually
+    writes are unpickled.
+    """
+
+    torch.serialization.add_safe_globals(_numpy_rng_safe_globals())
+    state = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(state, dict):
         raise ValueError(f"Invalid trainer state in {path}: expected a dictionary")
     return state
