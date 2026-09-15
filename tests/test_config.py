@@ -25,6 +25,20 @@ def test_prod_config_loads():
     assert isinstance(cfg.sae.d_sae, list)
 
 
+def test_finetuning_config_uses_released_sites_and_bilingual_budget():
+    cfg = PipelineCfg.from_yaml("configs/finetuning.example.yml")
+    assert cfg.data.sources is not None
+    assert cfg.model.name == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+    assert [source.source for source in cfg.data.sources] == ["nvidia/Nemotron-CC-v2.1"]
+    assert [source.language for source in cfg.data.sources] == ["en"]
+    assert cfg.data.total_tokens == 59_998_208
+    assert cfg.data.validation_tokens_per_language == 65_536
+    assert cfg.cache.max_total_bytes == 5_000_000_000_000
+    assert cfg.target.sites is not None
+    assert len(cfg.target.sites) == 14
+    assert cfg.target.sites[0].hook_name == "backbone.layers.2"
+
+
 def test_data_cfg_requires_exactly_one_budget():
     from sae_pipeline.config import DataCfg
 
@@ -32,6 +46,14 @@ def test_data_cfg_requires_exactly_one_budget():
         DataCfg(source="x", n_documents=10, total_tokens=1000)
     with pytest.raises(ValueError):
         DataCfg(source="x")
+
+
+def test_target_sites_require_unique_slugs():
+    from sae_pipeline.config import HookTargetCfg, TargetCfg
+
+    site = HookTargetCfg(slug="same", layer=0, component="resid_post", hook_name="layers.0")
+    with pytest.raises(ValueError, match="unique"):
+        TargetCfg(sites=[site, site])
 
 
 def test_overrides_overlay_dotted_fields():

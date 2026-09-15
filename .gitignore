@@ -20,3 +20,9 @@ wandb/
 env.sh
 .env
 .claude/
+
+# Local/private experiment configurations.
+configs/finetuning.yml
+configs/*.local.yml
+configs/*.local.yaml
+configs/private/

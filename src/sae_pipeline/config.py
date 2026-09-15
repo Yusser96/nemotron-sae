@@ -26,6 +26,15 @@ class ModelCfg(BaseModel):
     device_map: str = "auto"
 
 
+class DataSourceCfg(BaseModel):
+    """One independently streamed corpus in a multilingual activation mix."""
+
+    source: str
+    name: str | None = None
+    text_field: str = "text"
+    language: str | None = None
+
+
 class DataCfg(BaseModel):
     source: str = "HuggingFaceFW/fineweb-edu"
     name: str | None = "sample-10BT"   # HF dataset config / subset name; None = default
@@ -37,11 +46,22 @@ class DataCfg(BaseModel):
     text_field: str = "text"
     shuffle_buffer: int = 1000
     seed: int = 42
+    # When present, these sources replace the legacy source/name fields.  Each
+    # source contributes equally by token count.
+    sources: list[DataSourceCfg] | None = None
+    validation_fraction: float = 0.05
+    validation_tokens_per_language: int | None = None
 
     @model_validator(mode="after")
     def _exactly_one_budget(self) -> "DataCfg":
         if (self.n_documents is None) == (self.total_tokens is None):
             raise ValueError("Set exactly one of n_documents or total_tokens.")
+        if self.sources is not None and not self.sources:
+            raise ValueError("sources must not be empty")
+        if not 0.0 < self.validation_fraction < 1.0:
+            raise ValueError("validation_fraction must be between zero and one")
+        if self.validation_tokens_per_language is not None and self.validation_tokens_per_language <= 0:
+            raise ValueError("validation_tokens_per_language must be positive")
         return self
 
 
@@ -50,6 +70,7 @@ class CacheCfg(BaseModel):
     shuffle_seed: int = 42
     tokens_per_fwd: int = 8192
     cache_dir: Path = Path("outputs/caches")
+    max_total_bytes: int | None = None
 
 
 class SAECfg(BaseModel):
@@ -95,10 +116,35 @@ class SAECfg(BaseModel):
         return v
 
 
+class HookTargetCfg(BaseModel):
+    """A released SAE site, addressed by its exact model module path."""
+
+    slug: str
+    layer: int
+    component: str
+    hook_name: str
+
+
 class TargetCfg(BaseModel):
     """What to hook. For prod, lists; CLI/launcher iterates the cartesian product."""
-    layer: int | list[int]
-    component: str | list[str]  # e.g. "resid_post", "moe_out", "expert.42"
+    layer: int | list[int] | None = None
+    component: str | list[str] | None = None  # e.g. "resid_post", "moe_out", "expert.42"
+    sites: list[HookTargetCfg] | None = None
+
+    @model_validator(mode="after")
+    def _targets_are_unambiguous(self) -> "TargetCfg":
+        has_legacy = self.layer is not None or self.component is not None
+        if has_legacy and (self.layer is None or self.component is None):
+            raise ValueError("Set both target.layer and target.component")
+        if self.sites is not None and has_legacy:
+            raise ValueError("Use either target.sites or target.layer/component")
+        if not has_legacy and not self.sites:
+            raise ValueError("Set target.sites or target.layer/component")
+        if self.sites is not None:
+            slugs = [site.slug for site in self.sites]
+            if len(slugs) != len(set(slugs)):
+                raise ValueError("target.sites slugs must be unique")
+        return self
 
 
 class EvalCfg(BaseModel):

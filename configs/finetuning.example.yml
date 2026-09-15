@@ -1,0 +1,85 @@
+# Public example for fine-tuning an SAE on NVIDIA Nemotron activations.
+# Replace checkpoint_source before running. Keep cluster-specific paths in a
+# local ignored config such as configs/finetuning.yml.
+run_id: nemotron_finetuning_example
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  load_quant: auto
+  trust_remote_code: true
+  device_map: auto
+
+data:
+  sources:
+    - source: nvidia/Nemotron-CC-v2.1
+      name: High-Quality
+      language: en
+  split: train
+  streaming: true
+  total_tokens: 59_998_208
+  seq_len: 2048
+  shuffle_buffer: 8192
+  seed: 42
+  validation_fraction: 0.05
+  validation_tokens_per_language: 65_536
+
+cache:
+  shard_size_bytes: 1_073_741_824
+  shuffle_seed: 42
+  tokens_per_fwd: 16_384
+  cache_dir: outputs/caches/nemotron-finetuning
+  max_total_bytes: 5_000_000_000_000
+
+sae:
+  arch: jumprelu
+  d_sae: 16_384
+  l0_target: 10
+  lr: 7.0e-5
+  batch_size: 4096
+  n_steps: 48_828
+  warmup_steps: 1000
+  l0_warmup_steps: 50_000
+  bandwidth: 0.001
+  adam_beta1: 0.0
+  adam_beta2: 0.999
+  adam_eps: 1.0e-8
+  decoder_unit_norm: true
+  pre_encoder_bias: true
+  n_batches_in_buffer: 8
+  ckpt_every: 5000
+  log_every: 100
+  ckpt_dir: outputs/checkpoints
+  checkpoint_source: REPLACE_WITH_MATCHING_NEMOTRON_SAE_CHECKPOINT
+  checkpoint_mode: finetune
+  checkpoint_revision: main
+  keep_last_checkpoints: 2
+
+target:
+  sites:
+    - {slug: L2_resid_post, layer: 2, component: resid_post, hook_name: backbone.layers.2}
+    - {slug: L11_mamba_out, layer: 11, component: mamba_out, hook_name: backbone.layers.11.mixer}
+    - {slug: L12_attn_out_prelinear, layer: 12, component: attn_out_prelinear, hook_name: backbone.layers.12.mixer}
+    - {slug: L12_resid_post, layer: 12, component: resid_post, hook_name: backbone.layers.12}
+    - {slug: L13_moe_out, layer: 13, component: moe_out, hook_name: backbone.layers.13.mixer}
+    - {slug: L25_mamba_out, layer: 25, component: mamba_out, hook_name: backbone.layers.25.mixer}
+    - {slug: L26_attn_out_prelinear, layer: 26, component: attn_out_prelinear, hook_name: backbone.layers.26.mixer}
+    - {slug: L26_resid_post, layer: 26, component: resid_post, hook_name: backbone.layers.26}
+    - {slug: L27_moe_out, layer: 27, component: moe_out, hook_name: backbone.layers.27.mixer}
+    - {slug: L41_mamba_out, layer: 41, component: mamba_out, hook_name: backbone.layers.41.mixer}
+    - {slug: L42_attn_out_prelinear, layer: 42, component: attn_out_prelinear, hook_name: backbone.layers.42.mixer}
+    - {slug: L42_resid_post, layer: 42, component: resid_post, hook_name: backbone.layers.42}
+    - {slug: L43_moe_out, layer: 43, component: moe_out, hook_name: backbone.layers.43.mixer}
+    - {slug: L51_resid_post, layer: 51, component: resid_post, hook_name: backbone.layers.51}
+
+eval:
+  delta_ce_n_seqs: 2048
+  delta_ce_seq_len: 1024
+  fvu_n_tokens: 65_536
+  dead_n_tokens: 50_000
+  interp_enabled: false
+
+log:
+  use_wandb: false
+  wandb_project: nemotron-sae
+  log_dir: outputs/logs
