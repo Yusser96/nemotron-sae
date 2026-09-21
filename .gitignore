@@ -17,6 +17,14 @@ wandb/
 *.pth
 *.ckpt
 
+# Generated reports, results, and local experiment runs.
+reports/
+results/
+experiments/
+**/reports/
+**/results/
+**/experiments/
+
 env.sh
 .env
 .claude/
@@ -26,3 +34,18 @@ configs/finetuning.yml
 configs/*.local.yml
 configs/*.local.yaml
 configs/private/
+
+# Local per-experiment configuration overrides stay untracked.
+configs/finetuning_*.yml
+configs/finetuning_*.yaml
+
+# Project-specific experiment scripts, launchers and internal notes stay local.
+scripts/*soofi*.py
+scripts/*soofi*.sh
+scripts/_bilingual_eval.py
+scripts/select_l26_program.py
+slurm/soofi_*.sbatch
+slurm/soofi_*.sh
+tests/*soofi*.py
+tests/test_select_l26_program.py
+internal_docs/
