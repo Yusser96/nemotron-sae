@@ -26,6 +26,13 @@ class ReconMetrics:
     fvu: float
     dead_pct: float
     n_tokens: int
+    active_features: int
+    top1_activation_mass_pct: float
+    max_firing_frequency: float
+    features_over_5pct: int
+    firing_gini: float
+    firing_entropy_nats: float
+    firing_entropy_normalised: float
 
 
 @dataclass
@@ -34,6 +41,44 @@ class ReconArrays:
     firing_frequency: np.ndarray   # (d_sae,) float32
     l0_per_token: np.ndarray       # (n_tokens,) int32
     recon_err_per_token: np.ndarray  # (n_tokens,) float32
+
+
+@dataclass
+class FiringConcentration:
+    active_features: int
+    top1_activation_mass_pct: float
+    max_firing_frequency: float
+
+
+def dead_pct_from_fired(fired_any: torch.Tensor) -> float:
+    """Percentage of latents with no entry in a "has this ever fired" mask.
+
+    Callers pass different masks on purpose: a cumulative all-time
+    ``ever_fired`` flag and a windowed "fired within this sample" flag are
+    not the same quantity, only the dead-percentage formula is shared.
+    """
+    return 100.0 * (1.0 - fired_any.float().mean().item())
+
+
+def firing_concentration(frequency: torch.Tensor) -> FiringConcentration:
+    """Active-latent count, top-1% activation mass and peak frequency.
+
+    ``frequency`` is any non-negative per-latent tally where zero means the
+    latent never fired (a fired-count, an EMA frequency, or a firing
+    fraction all give the same result since only relative magnitude within
+    the tensor matters).
+    """
+    fired_any = frequency > 0
+    total = float(frequency.sum().item())
+    top_k = max(1, frequency.numel() // 100)
+    top1_mass = 0.0 if total <= 0 else 100.0 * float(
+        torch.topk(frequency, top_k).values.sum().item() / total
+    )
+    return FiringConcentration(
+        active_features=int(fired_any.sum().item()),
+        top1_activation_mass_pct=top1_mass,
+        max_firing_frequency=float(frequency.max().item()),
+    )
 
 
 @torch.no_grad()
@@ -49,33 +94,114 @@ def reconstruction_metrics(
     per-token L0, and per-token reconstruction error — all consumed by the
     plotting module to draw histograms.
     """
+    return streaming_reconstruction_metrics(
+        sae,
+        (activations,),
+        dead_threshold_tokens=dead_threshold_tokens,
+        return_arrays=return_arrays,
+    )
+
+
+def _gini(values: torch.Tensor) -> float:
+    values = values.detach().to(torch.float64).flatten().clamp_min(0)
+    if values.numel() == 0 or float(values.sum()) <= 0:
+        return 0.0
+    ordered = torch.sort(values).values
+    n = ordered.numel()
+    index = torch.arange(1, n + 1, device=ordered.device, dtype=ordered.dtype)
+    numerator = (2 * index - n - 1) @ ordered
+    return float((numerator / (n * ordered.sum())).item())
+
+
+@torch.no_grad()
+def streaming_reconstruction_metrics(
+    sae: SparseAutoencoder,
+    activation_batches,
+    *,
+    dead_threshold_tokens: int = 50_000,
+    return_arrays: bool = False,
+) -> ReconMetrics | tuple[ReconMetrics, ReconArrays]:
+    """Evaluate without materialising the full latent matrix.
+
+    ``activation_batches`` yields CPU or device tensors of shape ``(N, d_in)``.
+    Reconstruction, support counts and moments are accumulated batch by batch,
+    which makes million-token support evaluation practical for wide SAEs.
+    """
     sae.eval()
-    f = sae.encode(activations)
-    x_hat = sae.decode(f)
+    device = next(sae.parameters()).device
+    n_total = 0
+    support_seen = 0
+    l0_sum = 0.0
+    err_sum = 0.0
+    x_sum = None
+    x_sq_sum = None
+    support_counts = torch.zeros(sae.d_sae, dtype=torch.float64, device=device)
+    l0_parts: list[torch.Tensor] = []
+    err_parts: list[torch.Tensor] = []
 
-    active = (f > 0).to(activations.dtype)
-    l0_per_token = active.sum(dim=-1)
-    l0 = l0_per_token.mean().item()
+    for batch in activation_batches:
+        if batch.numel() == 0:
+            continue
+        activations = batch.to(device, dtype=torch.float32, non_blocking=True)
+        f = sae.encode(activations)
+        x_hat = sae.decode(f)
+        active = f > 0
+        l0_per_token = active.sum(dim=-1)
+        err_per_token = (activations - x_hat).pow(2).sum(dim=-1)
 
-    err_per_token = (activations - x_hat).pow(2).sum(dim=-1)
-    mse = err_per_token.mean().item() / activations.shape[-1]
-    var = activations.var(dim=0).mean().item()
-    fvu = mse / max(var, 1e-12)
+        n_batch = activations.shape[0]
+        n_total += n_batch
+        l0_sum += float(l0_per_token.sum().item())
+        err_sum += float(err_per_token.sum().item())
+        batch_sum = activations.sum(dim=0, dtype=torch.float64)
+        batch_sq_sum = activations.square().sum(dim=0, dtype=torch.float64)
+        x_sum = batch_sum if x_sum is None else x_sum + batch_sum
+        x_sq_sum = batch_sq_sum if x_sq_sum is None else x_sq_sum + batch_sq_sum
 
-    # Dead-feature percentage: count latents that never fired across the sample.
-    n = activations.shape[0]
-    sample_n = min(n, dead_threshold_tokens)
-    firing_frequency = active[:sample_n].mean(dim=0)
-    fired_any = firing_frequency > 0
-    dead_pct = 100.0 * (1.0 - fired_any.float().mean().item())
+        take = min(n_batch, max(0, dead_threshold_tokens - support_seen))
+        if take:
+            support_counts.add_(active[:take].sum(dim=0, dtype=torch.float64))
+            support_seen += take
+        if return_arrays:
+            l0_parts.append(l0_per_token.detach().cpu().to(torch.int32))
+            err_parts.append(err_per_token.detach().cpu().float())
 
-    metrics = ReconMetrics(l0=l0, fvu=fvu, dead_pct=dead_pct, n_tokens=n)
+    if n_total == 0 or x_sum is None or x_sq_sum is None:
+        raise ValueError("Cannot evaluate an empty activation stream")
+    n_float = float(n_total)
+    firing_frequency = support_counts / max(1, support_seen)
+    concentration = firing_concentration(firing_frequency)
+    total_frequency = float(firing_frequency.sum().item())
+    probabilities = firing_frequency / max(total_frequency, 1.0e-12)
+    positive = probabilities > 0
+    entropy_nats = float(
+        (-(probabilities[positive] * probabilities[positive].log()).sum()).item()
+    )
+    entropy_normalised = entropy_nats / max(1.0e-12, float(torch.log(torch.tensor(float(sae.d_sae))).item()))
+    # FVU = sum_t ||x_t - x_hat_t||^2 / sum_t ||x_t - x_bar||^2 (a ratio of
+    # sums over the same token set, so n_total cancels -- do not renormalise
+    # the numerator and denominator by different divisors here).
+    variance_sum = x_sq_sum.sum() - x_sum.square().sum() / n_float
+    fvu = err_sum / max(float(variance_sum.item()), 1.0e-12)
+    metrics = ReconMetrics(
+        l0=l0_sum / n_float,
+        fvu=fvu,
+        dead_pct=dead_pct_from_fired(firing_frequency > 0),
+        n_tokens=n_total,
+        active_features=concentration.active_features,
+        top1_activation_mass_pct=concentration.top1_activation_mass_pct,
+        max_firing_frequency=concentration.max_firing_frequency,
+        features_over_5pct=int((firing_frequency > 0.05).sum().item()),
+        firing_gini=_gini(firing_frequency),
+        firing_entropy_nats=entropy_nats,
+        firing_entropy_normalised=entropy_normalised,
+    )
     if not return_arrays:
         return metrics
     arrays = ReconArrays(
         firing_frequency=firing_frequency.detach().cpu().float().numpy(),
-        l0_per_token=l0_per_token.detach().cpu().to(torch.int32).numpy(),
-        recon_err_per_token=err_per_token.detach().cpu().float().numpy(),
+        l0_per_token=torch.cat(l0_parts).numpy(),
+        recon_err_per_token=torch.cat(err_parts).numpy(),
     )
     return metrics, arrays
 

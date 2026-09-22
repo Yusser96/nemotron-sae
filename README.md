@@ -12,16 +12,14 @@ runs without reloading the LM.
 
 ## What it implements
 
-- **JumpReLU SAE** with the exact recipe from
-  [Gemma Scope 2](https://storage.googleapis.com/deepmind-media/DeepMind.com/Blog/gemma-scope-2-helping-the-ai-safety-community-deepen-understanding-of-complex-language-model-behavior/Gemma_Scope_2_Technical_Paper.pdf):
-  quadratic L0 penalty around a target `L0*`, learnable per-latent threshold,
-  rectangular-kernel STE for the Heaviside / L0 derivatives (bandwidth `ε = 0.001`),
-  decoder columns renormalized to unit norm after every Adam step,
-  decoder gradient projected orthogonal to those columns,
-  pre-encoder bias subtracted, `W_enc` tied at init then untied,
-  Adam `(β₁, β₂) = (0, 0.999)`, peak LR `7e-5`, batch 4096 tokens,
-  cosine warmup `0.1 LR → LR` over 1 000 steps,
-  L0 coefficient λ linearly warmed up over 50 000 steps.
+- **JumpReLU SAE**: a quadratic target-`L0` penalty, positive
+  log-parameterised thresholds, a ReLU guard before the gate, and a fused
+  rectangular-kernel STE whose encoder gradient is the hard gate. Decoder
+  columns are unit-normalised after every step, with gradients projected
+  orthogonally to the columns; the encoder is tied to the decoder only at
+  initialisation. Optional whole-vector input normalisation, a configurable
+  LR schedule (cosine-decay or warmup-then-constant), and gradient-norm
+  clipping are available for recipe-aligned fine-tuning.
 
 - **Hookable components** (per layer, where applicable):
   `resid_pre`, `resid_post`, `mamba_out`, `attn_out_prelinear`,
@@ -35,8 +33,9 @@ runs without reloading the LM.
   `ActivationBuffer` keeps a rolling `n_batches_in_buffer × batch_size` buffer
   that refills when half-empty.
 
-- **Eval**: L0, FVU, dead-feature %, ΔCE (cross-entropy increase when the SAE
-  reconstruction is patched into the LM forward pass).
+- **Eval**: held-out reconstruction metrics — L0, FVU and dead-feature rate —
+  plus distributions for plotting. The library exposes a `delta_ce` helper for
+  downstream patching evaluations; it is not run by the cache-only evaluator.
 
 - **Plots**: training and evaluation plots are auto-generated as PNGs after
   every train + evaluate run; see "Plots" below.
@@ -158,6 +157,21 @@ portable weights as `sae_step_<step>.safetensors` and exact-resume data as
 newest `keep_last_checkpoints` complete pairs are retained; unpaired legacy or
 fine-tuning source weights are left untouched.
 
+### Raw-activation checkpoint transfer
+
+A checkpoint released in raw-activation coordinates (`checkpoint_format:
+raw_export`) can be unfolded into normalised training coordinates before
+optimisation via `input_normalization: whole_vector`, then folded back on
+export so downstream inference still runs on raw activations:
+
+```yaml
+sae:
+  input_normalization: whole_vector  # c = 1 / sqrt(E[||x||²]) per site
+  checkpoint_format: raw_export      # released SAE-Lens-style input
+  lr_schedule: warmup_constant
+  gradient_clip_norm: 1.0
+```
+
 ## Sweep launcher
 
 ```bash
@@ -199,6 +213,9 @@ python -m sae_pipeline.cli.plot \
 
 `matplotlib` runs on the headless `Agg` backend, so plots are produced even on
 training boxes with no display.
+
+The packed-sweep workers write a `worker_manifest.json` containing job, GPU,
+site, timing, exit-code, checkpoint, and log metadata.
 
 ## Configs
 

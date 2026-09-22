@@ -77,6 +77,41 @@ def test_legacy_weights_load_and_dimension_mismatch(tmp_path: Path):
         load_sae_weights(incompatible, weights)
 
 
+def test_sae_lens_jumprelu_weights_are_adapted(tmp_path: Path):
+    model = build_sae("jumprelu", d_in=3, d_sae=5)
+    state = {key: value.detach().contiguous() for key, value in model.state_dict().items()}
+    state["W_dec"] = state["W_dec"].T.contiguous()
+    state["threshold"] = state.pop("log_theta").exp()
+    weights = tmp_path / "sae_weights.safetensors"
+    save_file(state, str(weights))
+
+    loaded = build_sae("jumprelu", d_in=3, d_sae=5)
+    load_sae_weights(loaded, weights)
+    assert torch.equal(loaded.W_dec, state["W_dec"].T)
+    assert torch.equal(loaded.theta, state["threshold"])
+
+
+def test_hf_explicit_arbitrary_filename_is_allowed_for_finetuning(monkeypatch, tmp_path: Path):
+    downloaded = tmp_path / "sae_weights.safetensors"
+    _write_weights(downloaded)
+    calls = []
+
+    def fake_download(*, repo_id, filename, revision):
+        calls.append((repo_id, filename, revision))
+        return str(downloaded)
+
+    monkeypatch.setattr(checkpoint_module, "hf_hub_download", fake_download)
+    resolved = resolve_checkpoint(
+        "example/sae-repo",
+        filename="L2_resid_post/w16384_l0_10/sae_weights.safetensors",
+    )
+
+    assert resolved.step == -1
+    assert calls == [
+        ("example/sae-repo", "L2_resid_post/w16384_l0_10/sae_weights.safetensors", "main")
+    ]
+
+
 def test_retention_only_removes_old_complete_pairs(tmp_path: Path):
     orphan = tmp_path / "sae_step_0000000.safetensors"
     _write_weights(orphan)

@@ -25,6 +25,11 @@ def test_prod_config_loads():
     assert isinstance(cfg.sae.d_sae, list)
 
 
+def test_validation_run_id_defaults_to_none():
+    cfg = PipelineCfg.from_yaml("configs/dev.yaml")
+    assert cfg.validation_run_id is None
+
+
 def test_finetuning_config_uses_released_sites_and_bilingual_budget():
     cfg = PipelineCfg.from_yaml("configs/finetuning.example.yml")
     assert cfg.data.sources is not None
@@ -76,3 +81,15 @@ def test_checkpoint_defaults_and_retention_validation():
         SAECfg(keep_last_checkpoints=0)
     with pytest.raises(ValueError, match="keep_last_checkpoints"):
         SAECfg(keep_last_checkpoints=-1)
+
+
+def test_combined_feature_use_strategy_is_valid():
+    cfg = SAECfg(feature_use_strategy="frequency_residual_reset")
+    assert cfg.feature_use_strategy == "frequency_residual_reset"
+
+
+def test_unsupported_sae_architectures_are_rejected_by_config():
+    """Do not let schema-valid configs fail later inside build_sae."""
+    for arch in ("topk", "batchtopk", "matryoshka"):
+        with pytest.raises(ValueError):
+            SAECfg(arch=arch)

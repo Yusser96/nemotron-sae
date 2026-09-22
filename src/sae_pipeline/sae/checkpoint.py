@@ -131,11 +131,18 @@ def _select_name(
         selected = filename
         if selected not in available:
             raise FileNotFoundError(f"Checkpoint {selected!r} was not found")
-        checkpoint_step(PurePosixPath(selected).name)
+        basename = PurePosixPath(selected).name
         parent = PurePosixPath(selected).parent
-        state_name = str(parent / companion_state_name(selected))
+        if _WEIGHTS_RE.match(basename):
+            state_name = str(parent / companion_state_name(selected))
+        else:
+            state_name = None
         if state_name not in available:
             if require_trainer_state:
+                if state_name is None:
+                    raise ValueError(
+                        "Resume requires a checkpoint named sae_step_<step>.safetensors"
+                    )
                 raise FileNotFoundError(
                     f"Resume requires companion state {state_name!r}"
                 )
@@ -190,7 +197,7 @@ def resolve_checkpoint(
                     step=-1,
                     source=str(local),
                 )
-            step = int(match.group(1))
+            step = int(match.group(1)) if match is not None else -1
             state_path = companion_state_path(weights_path)
             if not state_path.exists():
                 if require_trainer_state:
@@ -222,12 +229,19 @@ def resolve_checkpoint(
 
     repo_id = normalize_hf_source(source)
     if filename is not None:
-        checkpoint_step(PurePosixPath(filename).name)
         selected = filename
-        state_name = str(
-            PurePosixPath(filename).parent / companion_state_name(filename)
-        )
+        basename = PurePosixPath(filename).name
+        if _WEIGHTS_RE.match(basename):
+            state_name = str(
+                PurePosixPath(filename).parent / companion_state_name(filename)
+            )
+        else:
+            state_name = None
         if require_trainer_state:
+            if state_name is None:
+                raise ValueError(
+                    "Resume requires a checkpoint named sae_step_<step>.safetensors"
+                )
             repo_files = list_repo_files(repo_id=repo_id, revision=revision)
             if state_name not in repo_files:
                 raise FileNotFoundError(f"Resume requires companion state {state_name!r}")
@@ -248,7 +262,7 @@ def resolve_checkpoint(
     return ResolvedCheckpoint(
         weights_path=weights_path,
         trainer_state_path=state_path,
-        step=checkpoint_step(weights_path),
+        step=checkpoint_step(weights_path) if _WEIGHTS_RE.match(weights_path.name) else -1,
         source=repo_id,
     )
 
@@ -256,8 +270,18 @@ def resolve_checkpoint(
 def load_sae_weights(model: torch.nn.Module, checkpoint: str | Path) -> None:
     """Load a tensor-compatible, dimension-compatible SAE state dictionary."""
 
-    state = load_file(str(checkpoint), device="cpu")
+    state = dict(load_file(str(checkpoint), device="cpu"))
     expected = model.state_dict()
+    # SAE-Lens JumpReLU releases use `threshold` and store W_dec as
+    # (d_sae, d_in).  The trainer keeps thresholds in log space so positivity
+    # is structural; adapt the public format at this boundary.
+    if "threshold" in state and "log_theta" in expected and "log_theta" not in state:
+        state["log_theta"] = state.pop("threshold").clamp_min(1e-12).log()
+    if "theta" in state and "log_theta" in expected and "log_theta" not in state:
+        state["log_theta"] = state.pop("theta").clamp_min(1e-12).log()
+    if "W_dec" in state and "W_dec" in expected:
+        if state["W_dec"].shape != expected["W_dec"].shape and state["W_dec"].T.shape == expected["W_dec"].shape:
+            state["W_dec"] = state["W_dec"].T.contiguous()
     missing = sorted(set(expected) - set(state))
     unexpected = sorted(set(state) - set(expected))
     incompatible = {

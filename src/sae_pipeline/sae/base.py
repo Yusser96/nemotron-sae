@@ -1,4 +1,4 @@
-"""Abstract SAE interface common to JumpReLU / TopK / BatchTopK / Matryoshka.
+"""Abstract SAE interface for implemented and future SAE architectures.
 
 All variants share the encoder/decoder shape and the conventions:
 - decoder columns unit-norm after every step

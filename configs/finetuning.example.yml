@@ -1,6 +1,6 @@
-# Public example for fine-tuning an SAE on NVIDIA Nemotron activations.
-# Replace checkpoint_source before running. Keep cluster-specific paths in a
-# local ignored config such as configs/finetuning.yml.
+# Public example for recipe-aligned fine-tuning of a raw-activation JumpReLU
+# SAE. Replace checkpoint_source before running. Keep cluster-specific paths
+# in a local ignored config such as configs/finetuning.yml.
 run_id: nemotron_finetuning_example
 
 model:
@@ -37,7 +37,7 @@ sae:
   l0_target: 10
   lr: 7.0e-5
   batch_size: 4096
-  n_steps: 48_828
+  n_steps: 120_000
   warmup_steps: 1000
   l0_warmup_steps: 50_000
   bandwidth: 0.001
@@ -46,6 +46,10 @@ sae:
   adam_eps: 1.0e-8
   decoder_unit_norm: true
   pre_encoder_bias: true
+  input_normalization: whole_vector
+  checkpoint_format: raw_export
+  lr_schedule: warmup_constant
+  gradient_clip_norm: 1.0
   n_batches_in_buffer: 8
   ckpt_every: 5000
   log_every: 100

@@ -25,6 +25,40 @@ _DTYPE_MAP = {
 }
 
 
+def _normalise_time_step_limit(value: Any) -> Any:
+    """Decode Transformers' JSON sentinel for an infinite Mamba time-step bound."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return value
+
+    decoded = []
+    for bound in value:
+        if isinstance(bound, dict) and bound.get("__float__") == "Infinity":
+            bound = float("inf")
+        elif isinstance(bound, dict) and bound.get("__float__") == "-Infinity":
+            bound = float("-inf")
+        decoded.append(bound)
+    if all(isinstance(bound, (int, float)) for bound in decoded):
+        return tuple(float(bound) for bound in decoded)
+    return value
+
+
+def _normalise_model_runtime_config(model: torch.nn.Module) -> None:
+    """Repair JSON-decoded Mamba limits before the first CUDA forward pass."""
+    config = getattr(model, "config", None)
+    if config is not None and hasattr(config, "time_step_limit"):
+        config.time_step_limit = _normalise_time_step_limit(config.time_step_limit)
+
+    repaired = 0
+    for module in model.modules():
+        if hasattr(module, "time_step_limit"):
+            normalised = _normalise_time_step_limit(module.time_step_limit)
+            if normalised != module.time_step_limit:
+                module.time_step_limit = normalised
+                repaired += 1
+    if repaired:
+        log.info("Normalised Mamba time-step limits in %d mixer modules", repaired)
+
+
 def _resolve_quantization_kwargs(cfg: ModelCfg) -> dict[str, Any]:
     """Decide whether to apply BF16, FP8 (sibling repo), or 4-bit quantization."""
     if cfg.load_quant == "bf16":
@@ -70,6 +104,7 @@ def load_model_and_tokenizer(cfg: ModelCfg):
         trust_remote_code=cfg.trust_remote_code,
         **quant_kwargs,
     )
+    _normalise_model_runtime_config(model)
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)

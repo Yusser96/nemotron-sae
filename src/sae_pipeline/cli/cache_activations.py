@@ -12,9 +12,14 @@ import argparse
 import hashlib
 import json
 import logging
+import os
+import signal
+import sys
+import time
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
 from tqdm import tqdm
 
 from sae_pipeline.cache.manifest import CacheManifest
@@ -27,6 +32,81 @@ from sae_pipeline.model.loader import load_model_and_tokenizer
 from sae_pipeline.model.topology import HookSite, dump_topology, enumerate_hooks
 
 log = logging.getLogger(__name__)
+
+
+def _repair_misaligned_manifests(
+    *,
+    cache_root: Path,
+    base_dir: Path,
+    manifests: dict[str, CacheManifest],
+    token_multiple: int,
+) -> int:
+    """Roll back interrupted multi-site writes to their common valid prefix.
+
+    Each site writes its manifest independently.  If Slurm terminates the job
+    while the sites are being flushed, a few manifests can contain one or more
+    extra complete shards.  The common prefix is valid because all sites were
+    captured by the same forwards.  Extra files are moved outside the cache
+    root for recovery rather than removed.
+    """
+    counts = [manifest.total_tokens for manifest in manifests.values()]
+    common_tokens = min(counts)
+    if common_tokens % token_multiple:
+        raise RuntimeError(
+            "Misaligned cache manifests do not share a tokens_per_fwd boundary: "
+            f"counts={counts}, tokens_per_fwd={token_multiple}"
+        )
+
+    recovery_root = cache_root.parent / (
+        f".{cache_root.name}.recovery-{os.getpid()}-{time.time_ns()}"
+    )
+    for slug, manifest in manifests.items():
+        site_dir = base_dir / slug
+        keep: list[str] = []
+        kept_tokens = 0
+        for name in manifest.shard_paths:
+            shard_path = site_dir / name
+            if not shard_path.exists():
+                raise RuntimeError(f"Manifest references missing shard {shard_path}")
+            with safe_open(str(shard_path), framework="pt", device="cpu") as shard:
+                shard_tokens = int(shard.get_tensor("x").shape[0])
+            if kept_tokens + shard_tokens > common_tokens:
+                if kept_tokens != common_tokens:
+                    raise RuntimeError(
+                        f"Cannot safely align {shard_path}: shard crosses common "
+                        f"boundary at {common_tokens} tokens"
+                    )
+                break
+            keep.append(name)
+            kept_tokens += shard_tokens
+
+        if kept_tokens != common_tokens:
+            raise RuntimeError(
+                f"Could not align {slug} to {common_tokens} tokens; "
+                f"its shard prefix contains {kept_tokens}"
+            )
+
+        keep_set = set(keep)
+        for shard_path in site_dir.glob("shard_*.safetensors"):
+            if shard_path.name in keep_set:
+                continue
+            destination = recovery_root / slug / shard_path.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(shard_path, destination)
+
+        manifest.shard_paths = keep
+        manifest.n_shards = len(keep)
+        manifest.total_tokens = kept_tokens
+        manifest.complete = False
+        manifest.write(site_dir / "manifest.json")
+
+    log.warning(
+        "Recovered interrupted multi-site cache to common prefix %d tokens; "
+        "extra shards moved to %s",
+        common_tokens,
+        recovery_root,
+    )
+    return common_tokens
 
 
 def main() -> None:
@@ -52,6 +132,18 @@ def main() -> None:
         p.error("--language is only valid with --partition validation")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    # Slurm sends TERM shortly before a one-hour allocation expires.  Defer
+    # stopping until the current full forward has been written for every hook,
+    # preserving equal, forward-aligned manifests across the whole SAE suite.
+    stop_requested = False
+
+    def request_stop(signum: int, _frame: object) -> None:
+        nonlocal stop_requested
+        stop_requested = True
+        log.warning("Received signal %s; finishing the current forward before checkpointing the cache", signum)
+
+    signal.signal(signal.SIGTERM, request_stop)
 
     cfg = PipelineCfg.from_yaml(args.config)
     if cfg.cache.tokens_per_fwd <= 0:
@@ -86,7 +178,6 @@ def main() -> None:
 
     cache_root = Path(cfg.cache.cache_dir) / cfg.run_id
     base_dir = cache_root if args.partition == "train" else cache_root / "validation" / args.language
-    budget = CacheBudget(cache_root, cfg.cache.max_total_bytes)
     fingerprint = hashlib.sha256(json.dumps(cfg.data.model_dump(), sort_keys=True).encode()).hexdigest()
     manifests: dict[str, CacheManifest] = {}
     writers: dict[str, ShardWriter] = {}
@@ -133,6 +224,19 @@ def main() -> None:
 
     existing_counts = {manifest.total_tokens for manifest in manifests.values()}
     if len(existing_counts) != 1:
+        if any(manifest.complete for manifest in manifests.values()):
+            raise RuntimeError(
+                "Cannot repair cache manifests when only some sites are marked complete"
+            )
+        _repair_misaligned_manifests(
+            cache_root=cache_root,
+            base_dir=base_dir,
+            manifests=manifests,
+            token_multiple=cfg.cache.tokens_per_fwd,
+        )
+        existing_counts = {manifest.total_tokens for manifest in manifests.values()}
+    budget = CacheBudget(cache_root, cfg.cache.max_total_bytes)
+    if len(existing_counts) != 1:
         raise RuntimeError("All sites in a multi-site cache must resume from the same token count")
     already_cached = existing_counts.pop()
     complete_states = {manifest.complete for manifest in manifests.values()}
@@ -154,12 +258,23 @@ def main() -> None:
     resume_batches = already_cached // cfg.cache.tokens_per_fwd
     log.info("Resuming after %d cached tokens (%d forward passes)", already_cached, resume_batches)
     device = next(model.parameters()).device
+    stop_after_seconds = float(os.environ.get("CACHE_STOP_AFTER_SECONDS", "0"))
+    if stop_after_seconds < 0:
+        raise RuntimeError("CACHE_STOP_AFTER_SECONDS must be non-negative")
+    loop_started = time.monotonic()
 
     for i, batch in enumerate(tqdm(loader, desc="forward")):
         if args.max_batches is not None and i >= args.max_batches:
             break
         if i < resume_batches:
             continue
+        if stop_after_seconds and time.monotonic() - loop_started >= stop_after_seconds:
+            stop_requested = True
+            log.info(
+                "Stopping at the configured self-managed time boundary after %.0fs",
+                stop_after_seconds,
+            )
+            break
         batch = batch.to(device)
         with capture_many(model, requests) as buffers:
             with torch.no_grad():
@@ -187,7 +302,14 @@ def main() -> None:
                 )
             writers[slug].add(x)
 
+        if stop_requested:
+            log.info("Stopping cleanly at the next committed cache boundary")
+            break
+
     if len(writers) != len(requests):
+        if stop_requested:
+            log.info("Stopped before a complete forward was captured; cache remains resumable")
+            return
         if target_tokens is None and already_cached > 0 and args.max_batches is None:
             for slug, manifest in manifests.items():
                 manifest.complete = True
@@ -198,12 +320,17 @@ def main() -> None:
         raise RuntimeError(f"Captured zero activations for: {missing}")
     for slug, writer in writers.items():
         final_manifest = writer.close()
-        if target_tokens is not None and final_manifest.total_tokens != target_tokens:
+        if (
+            target_tokens is not None
+            and args.max_batches is None
+            and not stop_requested
+            and final_manifest.total_tokens != target_tokens
+        ):
             raise RuntimeError(
                 f"Cache {slug} ended at {final_manifest.total_tokens} tokens; "
                 f"expected {target_tokens}"
             )
-        if args.max_batches is None:
+        if args.max_batches is None and not stop_requested:
             final_manifest.complete = True
             final_manifest.write(base_dir / slug / "manifest.json")
         log.info("Cache done: %s (%d shards, %d tokens)", slug,
@@ -212,3 +339,11 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # Triton may leave an autotuner worker thread alive after the CUDA work has
+    # completed.  On this model/runtime combination, normal interpreter
+    # finalisation can then abort with PyGILState_Release even though every
+    # cache shard and manifest has been committed.  Flush the CLI output and
+    # bypass that shutdown path only after main() has returned successfully.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

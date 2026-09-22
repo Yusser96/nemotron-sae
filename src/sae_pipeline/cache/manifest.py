@@ -63,3 +63,19 @@ def manifest_path_for(cache_dir: Path | str, run_id: str, slug: str) -> Path:
 
 def shards_dir_for(cache_dir: Path | str, run_id: str, slug: str) -> Path:
     return Path(cache_dir) / run_id / slug
+
+
+def validation_dir_for(cache_dir: Path | str, run_id: str, language: str, slug: str) -> Path:
+    """Directory for one language's validation-partition shards.
+
+    ``run_id`` may differ from the training-partition run_id: some
+    programmes train from one cache but validate against a separately
+    generated, larger diagnostic cache under a different run_id.
+    """
+    return Path(cache_dir) / run_id / "validation" / language / slug
+
+
+def validation_manifest_path_for(
+    cache_dir: Path | str, run_id: str, language: str, slug: str
+) -> Path:
+    return validation_dir_for(cache_dir, run_id, language, slug) / "manifest.json"

@@ -41,6 +41,12 @@ class _TrainSeries:
     lr: np.ndarray
     lambda_l0: np.ndarray
     dead_pct: np.ndarray
+    reconstruction_loss: np.ndarray | None = None
+    feature_use_penalty: np.ndarray | None = None
+    active_features: np.ndarray | None = None
+    top1_activation_mass_pct: np.ndarray | None = None
+    max_firing_frequency: np.ndarray | None = None
+    feature_resets: np.ndarray | None = None
 
 
 def _read_train_log(jsonl_path: Path) -> _TrainSeries | None:
@@ -54,6 +60,19 @@ def _read_train_log(jsonl_path: Path) -> _TrainSeries | None:
         return None
     keys = ["step", "loss", "mse", "l0_penalty", "hard_l0", "lr", "lambda_l0", "dead_pct"]
     series = {k: np.array([r[k] for r in rows], dtype=np.float64) for k in keys}
+    for key in (
+        "reconstruction_loss",
+        "feature_use_penalty",
+        "active_features",
+        "top1_activation_mass_pct",
+        "max_firing_frequency",
+        "feature_resets",
+    ):
+        series[key] = (
+            np.array([r[key] for r in rows], dtype=np.float64)
+            if all(key in row for row in rows)
+            else None
+        )
     return _TrainSeries(**series)
 
 
@@ -160,7 +179,32 @@ def plot_training_curves(
     fig.savefig(overview_path, dpi=110)
     plt.close(fig)
     log.info("Wrote %s", overview_path)
-    return [overview_path]
+    written = [overview_path]
+    if s.active_features is not None:
+        fig, axes = plt.subplots(2, 3, figsize=(16, 8), constrained_layout=True)
+        if title_prefix:
+            fig.suptitle(f"{title_prefix}: feature-use diagnostics", fontsize=14)
+        diagnostics = (
+            (axes[0, 0], s.reconstruction_loss, "Full-vector reconstruction loss", "loss"),
+            (axes[0, 1], s.active_features, "Active features", "features"),
+            (axes[0, 2], s.top1_activation_mass_pct, "Top 1% activation mass", "%"),
+            (axes[1, 0], s.max_firing_frequency, "Maximum EMA firing frequency", "frequency"),
+            (axes[1, 1], s.feature_use_penalty, "Feature-use penalty", "penalty"),
+            (axes[1, 2], s.feature_resets, "Cumulative feature resets", "resets"),
+        )
+        for axis, values, title, ylabel in diagnostics:
+            if values is not None:
+                axis.plot(s.step, values, linewidth=1.8)
+            axis.set_title(title)
+            axis.set_xlabel("step")
+            axis.set_ylabel(ylabel)
+            axis.grid(alpha=0.3)
+        feature_path = out_dir / "feature_use_diagnostics.png"
+        fig.savefig(feature_path, dpi=110)
+        plt.close(fig)
+        log.info("Wrote %s", feature_path)
+        written.append(feature_path)
+    return written
 
 
 # ---------------------------------------------------------------------------

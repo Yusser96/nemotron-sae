@@ -14,8 +14,22 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 Quant = Literal["auto", "bf16", "fp8", "nf4"]
-SAEArch = Literal["jumprelu", "topk", "batchtopk", "matryoshka"]
+# Only JumpReLU is implemented in the current trainer.  Keep unsupported
+# architectures out of the public configuration schema until their trainers,
+# checkpoint semantics and evaluation paths exist.
+SAEArch = Literal["jumprelu"]
 CheckpointMode = Literal["finetune", "resume"]
+InputNormalization = Literal["none", "whole_vector"]
+CheckpointFormat = Literal["native", "raw_export"]
+LRSchedule = Literal["cosine_decay", "warmup_constant"]
+ReconstructionLoss = Literal["coordinate_mean", "vector_sum"]
+FeatureUseStrategy = Literal[
+    "none",
+    "frequency",
+    "residual_reset",
+    "frequency_residual_reset",
+]
+ActivationCentering = Literal["none", "mean"]
 
 
 class ModelCfg(BaseModel):
@@ -88,6 +102,42 @@ class SAECfg(BaseModel):
     adam_eps: float = 1.0e-8
     decoder_unit_norm: bool = True
     pre_encoder_bias: bool = True
+    input_normalization: InputNormalization = "none"
+    checkpoint_format: CheckpointFormat = "native"
+    lr_schedule: LRSchedule = "cosine_decay"
+    gradient_clip_norm: float | None = None
+    normalization_dir: Path | None = None
+    # ``vector_sum`` matches the per-token ||x - x_hat||_2^2 objective used by
+    # the Gemma Scope recipe.  ``coordinate_mean`` is retained for
+    # compatibility with the original trainer.
+    reconstruction_loss: ReconstructionLoss = "coordinate_mean"
+    l0_penalty_scale: float = 1.0
+    seed: int = 42
+    l0_target_start: float | None = None
+    l0_target_warmup_steps: int = 0
+    decoder_freeze_steps: int = 0
+    activation_centering: ActivationCentering = "none"
+    centering_sample_tokens: int = 1_000_000
+    centering_dir: Path | None = None
+    active_subspace_rank: int | None = None
+    active_subspace_sample_tokens: int = 100_000
+    # Optional controls for the long repair sweep.  They are deliberately
+    # explicit in the config so an intervention is reproducible and auditable.
+    feature_use_strategy: FeatureUseStrategy = "none"
+    feature_frequency_start_step: int = 50_000
+    feature_frequency_ema_decay: float = 0.999
+    feature_frequency_threshold: float = 0.05
+    feature_frequency_penalty_fraction: float = 0.1
+    residual_reset_start_step: int = 50_000
+    residual_reset_every_steps: int = 30_000
+    residual_reset_max_features: int = 512
+    residual_reset_frequency_threshold: float = 1.0e-6
+    residual_reset_pool_size: int = 8_192
+    residual_reset_target_frequency: float = 1.0e-3
+    residual_reset_delta_l0: float = 2.0
+    residual_reset_calibration_tokens: int = 1_048_576
+    residual_reset_anneal_steps: int = 10_000
+    feature_frequency_penalty_multiplier: float = 1.0
     dead_freq_threshold: float = 0.1  # direct frequency penalization on >10% latents
     n_batches_in_buffer: int = 8
     ckpt_every: int = 5_000
@@ -113,6 +163,84 @@ class SAECfg(BaseModel):
     def _keep_last_checkpoints_positive(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("keep_last_checkpoints must be positive")
+        return v
+
+    @field_validator("gradient_clip_norm")
+    @classmethod
+    def _gradient_clip_norm_positive(cls, v: float | None) -> float | None:
+        if v is not None and v <= 0:
+            raise ValueError("gradient_clip_norm must be positive when set")
+        return v
+
+    @field_validator(
+        "l0_penalty_scale",
+        "feature_frequency_penalty_fraction",
+        "residual_reset_delta_l0",
+    )
+    @classmethod
+    def _positive_scales(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("scale values must be positive")
+        return v
+
+    @field_validator("feature_frequency_penalty_multiplier")
+    @classmethod
+    def _frequency_multiplier_nonnegative(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("feature_frequency_penalty_multiplier must be non-negative")
+        return v
+
+    @field_validator("feature_frequency_ema_decay")
+    @classmethod
+    def _ema_decay_valid(cls, v: float) -> float:
+        if not 0.0 <= v < 1.0:
+            raise ValueError("feature_frequency_ema_decay must be in [0, 1)")
+        return v
+
+    @field_validator("feature_frequency_threshold", "residual_reset_target_frequency")
+    @classmethod
+    def _frequency_valid(cls, v: float) -> float:
+        if not 0.0 < v <= 1.0:
+            raise ValueError("feature frequency thresholds must be in (0, 1]")
+        return v
+
+    @field_validator(
+        "feature_frequency_start_step",
+        "residual_reset_start_step",
+        "residual_reset_every_steps",
+        "residual_reset_max_features",
+        "residual_reset_pool_size",
+    )
+    @classmethod
+    def _intervention_counts_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("intervention step and count values must be positive")
+        return v
+
+    @field_validator("l0_target_warmup_steps", "decoder_freeze_steps")
+    @classmethod
+    def _optional_intervention_steps_nonnegative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("intervention step values must be non-negative")
+        return v
+
+    @field_validator(
+        "centering_sample_tokens",
+        "active_subspace_sample_tokens",
+        "residual_reset_calibration_tokens",
+        "residual_reset_anneal_steps",
+    )
+    @classmethod
+    def _sample_counts_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("diagnostic sample counts must be positive")
+        return v
+
+    @field_validator("active_subspace_rank")
+    @classmethod
+    def _subspace_rank_valid(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("active_subspace_rank must be positive when set")
         return v
 
 
@@ -163,6 +291,12 @@ class LogCfg(BaseModel):
 
 class PipelineCfg(BaseModel):
     run_id: str
+    # Training and validation activation caches normally live under the same
+    # run_id.  Some programmes train from one cache but validate against a
+    # separately generated, larger diagnostic cache; set validation_run_id to
+    # point the validation partition at that other run_id while training,
+    # checkpoints and logs keep using run_id.
+    validation_run_id: str | None = None
     model: ModelCfg = Field(default_factory=ModelCfg)
     data: DataCfg
     cache: CacheCfg = Field(default_factory=CacheCfg)
