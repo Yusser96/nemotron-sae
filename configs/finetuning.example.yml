@@ -52,6 +52,7 @@ sae:
   gradient_clip_norm: 1.0
   n_batches_in_buffer: 8
   ckpt_every: 5000
+  eval_interval_steps: 10000
   log_every: 100
   ckpt_dir: outputs/checkpoints
   checkpoint_source: REPLACE_WITH_MATCHING_NEMOTRON_SAE_CHECKPOINT
@@ -81,6 +82,7 @@ eval:
   delta_ce_seq_len: 1024
   fvu_n_tokens: 65_536
   dead_n_tokens: 50_000
+  trajectory_n_tokens: 50_000
   interp_enabled: false
 
 log:

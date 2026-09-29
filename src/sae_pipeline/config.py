@@ -141,10 +141,13 @@ class SAECfg(BaseModel):
     dead_freq_threshold: float = 0.1  # direct frequency penalization on >10% latents
     inverse_simpson_floor: float = 0.0
     inverse_simpson_max_scale: float = 0.0
-    inverse_simpson_warmup_steps: int = 50_000
+    # None follows l0_warmup_steps so both firing-pattern terms ramp together.
+    inverse_simpson_warmup_steps: int | None = None
     n_batches_in_buffer: int = 8
     ckpt_every: int = 5_000
-    eval_interval_steps: int | None = None
+    # Fixed-probe diagnostics cadence. Validation-based stopping has its own
+    # minimum-step and patience settings.
+    eval_interval_steps: int | None = 10_000
     log_every: int = 100
     ckpt_dir: Path = Path("outputs/checkpoints")
     checkpoint_source: str | Path | None = None
@@ -228,10 +231,12 @@ class SAECfg(BaseModel):
             raise ValueError("intervention step and count values must be positive")
         return v
 
-    @field_validator("l0_target_warmup_steps", "decoder_freeze_steps", "inverse_simpson_warmup_steps")
+    @field_validator(
+        "l0_target_warmup_steps", "decoder_freeze_steps", "inverse_simpson_warmup_steps"
+    )
     @classmethod
-    def _optional_intervention_steps_nonnegative(cls, v: int) -> int:
-        if v < 0:
+    def _optional_intervention_steps_nonnegative(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
             raise ValueError("intervention step values must be non-negative")
         return v
 
@@ -298,14 +303,23 @@ class EvalCfg(BaseModel):
     delta_ce_seq_len: int = 1024
     fvu_n_tokens: int = 65_536
     dead_n_tokens: int = 50_000
+    # Training trajectories use one fixed sample for every metric and split.
+    trajectory_n_tokens: int = 50_000
     interp_enabled: bool = False  # auto-interp via OPENAI_API_KEY
+
+    @field_validator("fvu_n_tokens", "dead_n_tokens", "trajectory_n_tokens")
+    @classmethod
+    def _evaluation_token_counts_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("evaluation token counts must be positive")
+        return value
 
 
 class EarlyStoppingCfg(BaseModel):
     """Validation-based stopping for fine-tuning runs."""
 
     enabled: bool = False
-    evaluation_interval_steps: int = 5_000
+    evaluation_interval_steps: int = 10_000
     minimum_steps: int = 50_000
     patience: int = 2
     fvu_relative_tolerance: float = 0.01

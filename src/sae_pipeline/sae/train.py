@@ -16,7 +16,6 @@ from typing import Iterable
 import numpy as np
 import torch
 
-from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.reader import ActivationBuffer, ShardReader
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg
 from sae_pipeline.eval.metrics import (
@@ -128,6 +127,30 @@ class _ValidationEarlyStop:
     previous: dict[str, ReconMetrics] | None = None
     stable_intervals: int = 0
 
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "previous": (
+                None
+                if self.previous is None
+                else {language: asdict(metrics) for language, metrics in self.previous.items()}
+            ),
+            "stable_intervals": self.stable_intervals,
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        previous = state.get("previous")
+        self.previous = (
+            None
+            if previous is None
+            else {
+                str(language): ReconMetrics(**metrics)
+                for language, metrics in dict(previous).items()
+            }
+        )
+        self.stable_intervals = int(state.get("stable_intervals", 0))
+        if self.stable_intervals < 0:
+            raise ValueError("Validation early-stopping state has a negative interval count")
+
     def update(
         self,
         current: dict[str, ReconMetrics],
@@ -200,6 +223,25 @@ def _validation_batches(
         raise ValueError(
             f"Validation cache yielded {seen} vectors, expected {n_tokens}"
         )
+
+
+def _probe_cache_signature(readers: dict[str, ShardReader]) -> dict[str, dict[str, object]]:
+    """Identify the ordered probe datasets used by validation trajectories."""
+    return {
+        language: {
+            "run_id": reader.manifest.run_id,
+            "model": reader.manifest.model,
+            "layer": reader.manifest.layer,
+            "component": reader.manifest.component,
+            "partition": reader.manifest.partition,
+            "language": reader.manifest.language,
+            "d_activation": reader.manifest.d_activation,
+            "total_tokens": reader.manifest.total_tokens,
+            "shard_paths": list(reader.manifest.shard_paths),
+            "dataset_fingerprint": reader.manifest.dataset_fingerprint,
+        }
+        for language, reader in sorted(readers.items())
+    }
 
 
 def _seed_training(seed: int) -> None:
@@ -460,37 +502,89 @@ def train_sae(
         if validation_tokens is None or validation_tokens <= 0:
             raise ValueError("Validation-based early stopping requires a positive token count")
         if len(validation_cache_dirs) < 2:
-            raise ValueError("Bilingual early stopping requires separate DE and EN validation caches")
+            raise ValueError("Bilingual early stopping requires two language validation caches")
     validation_readers = {
         language: ShardReader(path)
         for language, path in sorted(validation_cache_dirs.items())
     }
-    if any(reader.manifest.d_activation != d_in for reader in validation_readers.values()):
-        raise ValueError("Validation activation dimension differs from the training cache")
+    validation_cache_signature = _probe_cache_signature(validation_readers)
     train_probe_reader: ShardReader | None = None
-    try:
-        train_manifest = CacheManifest.read(Path(cache_dir) / "manifest.json")
-        if train_manifest.shard_paths:
-            train_probe_reader = ShardReader(cache_dir)
-            log.info("Initialized fixed train probe from %s (%d tokens)", cache_dir, train_manifest.total_tokens)
-    except Exception as exc:
-        log.warning("Could not initialize train probe reader: %s", exc)
+    probe_tokens = validation_tokens if validation_tokens is not None else validation_dead_tokens
+    if validation_readers:
+        if probe_tokens <= 0:
+            raise ValueError("Validation trajectories require a positive fixed-probe token count")
+        undersized = {
+            language: reader.manifest.total_tokens
+            for language, reader in validation_readers.items()
+            if reader.manifest.total_tokens < probe_tokens
+        }
+        if undersized:
+            raise ValueError(
+                f"Validation caches are smaller than the {probe_tokens}-token probe: {undersized}"
+            )
+        train_probe_reader = ShardReader(cache_dir)
+        train_manifest = train_probe_reader.manifest
+        if not train_manifest.complete or train_manifest.partition != "train":
+            raise ValueError("Training probe must come from a complete training cache")
+        if train_manifest.d_activation != d_in:
+            raise ValueError("Training probe activation dimension differs from the SAE")
+        if train_probe_reader.manifest.total_tokens < probe_tokens:
+            raise ValueError(
+                f"Training cache has {train_probe_reader.manifest.total_tokens} tokens; "
+                f"the fixed probe requires {probe_tokens}"
+            )
+        for language, reader in validation_readers.items():
+            manifest = reader.manifest
+            if not manifest.complete or manifest.partition != "validation":
+                raise ValueError(f"{language} probe must come from a complete validation cache")
+            if manifest.language != language:
+                raise ValueError(
+                    f"Validation cache keyed as {language!r} declares language "
+                    f"{manifest.language!r}"
+                )
+            if (manifest.model, manifest.layer, manifest.component) != (
+                train_manifest.model,
+                train_manifest.layer,
+                train_manifest.component,
+            ):
+                raise ValueError(f"{language} validation cache belongs to a different site/model")
+            if manifest.d_activation != d_in:
+                raise ValueError(f"{language} validation activation dimension differs from the SAE")
+        log.info(
+            "Initialized fixed %d-token train probe from %s",
+            probe_tokens,
+            cache_dir,
+        )
     early_stop_monitor = _ValidationEarlyStop()
     validation_log_path = out_dir / "validation_log.jsonl"
+    eval_interval = cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
+    inverse_simpson_warmup_steps = (
+        cfg.l0_warmup_steps
+        if cfg.inverse_simpson_warmup_steps is None
+        else cfg.inverse_simpson_warmup_steps
+    )
     log.info(
         "Training SAE: arch=%s d_in=%d d_sae=%d l0=%d steps=%d device=%s",
         arch, d_in, d_sae, l0_target, cfg.n_steps, device,
     )
     if early_stopping.enabled:
         log.info(
-            "Validation early stopping: every %d steps after step %d; patience=%d; "
+            "Validation early stopping: evaluate every %d steps after step %d; patience=%d; "
             "FVU relative tolerance=%.3g; EV absolute tolerance=%.3g; L0 tolerance=%.1f%%",
-            early_stopping.evaluation_interval_steps,
+            eval_interval,
             early_stopping.minimum_steps,
             early_stopping.patience,
             early_stopping.fvu_relative_tolerance,
             early_stopping.ev_absolute_tolerance,
             100.0 * early_stopping.l0_relative_tolerance,
+        )
+    if cfg.inverse_simpson_floor > 0 and cfg.inverse_simpson_max_scale > 0:
+        log.info(
+            "Inverse-Simpson regularizer: utilization floor=%.4f, max scale=%.4g, "
+            "warm-up=%d steps",
+            cfg.inverse_simpson_floor,
+            cfg.inverse_simpson_max_scale,
+            inverse_simpson_warmup_steps,
         )
 
     normalization_scale = 1.0
@@ -585,6 +679,27 @@ def train_sae(
             reset_target_step = (
                 None if saved_reset_target_step is None else int(saved_reset_target_step)
             )
+            saved_early_stop = trainer_state.get("validation_early_stop")
+            saved_probe_signature = trainer_state.get("validation_cache_signature")
+            if validation_readers and saved_probe_signature is not None:
+                if saved_probe_signature != validation_cache_signature:
+                    raise ValueError(
+                        "Validation probe caches differ from the resume checkpoint"
+                    )
+            elif validation_readers:
+                log.warning(
+                    "Resume checkpoint has no validation-cache signature; "
+                    "early-stopping patience restarts"
+                )
+            if (
+                isinstance(saved_early_stop, dict)
+                and (not validation_readers or saved_probe_signature == validation_cache_signature)
+            ):
+                early_stop_monitor.load_state_dict(saved_early_stop)
+            elif early_stopping.enabled and saved_probe_signature is not None:
+                log.warning(
+                    "Resume checkpoint has no early-stopping state; stability patience restarts"
+                )
             buffer.load_state_dict(trainer_state["activation_buffer"])
             restore_random_state(trainer_state["random_state"])
             start_step = state_step
@@ -668,6 +783,8 @@ def train_sae(
                 "frequency_penalty_scale": frequency_penalty_scale,
                 "feature_resets": feature_resets,
                 "reset_target_step": reset_target_step,
+                "validation_early_stop": early_stop_monitor.state_dict(),
+                "validation_cache_signature": validation_cache_signature,
                 "activation_buffer": buffer.state_dict(),
             },
             keep_last=cfg.keep_last_checkpoints,
@@ -705,7 +822,7 @@ def train_sae(
         log_f = stack.enter_context(open(log_path, log_mode))
         validation_f = (
             stack.enter_context(open(validation_log_path, validation_log_mode))
-            if validation_readers or train_probe_reader
+            if validation_readers
             else None
         )
         for step in range(start_step + 1, cfg.n_steps + 1):
@@ -797,7 +914,7 @@ def train_sae(
                 lam_is = linear_warmup(
                     step,
                     peak=cfg.inverse_simpson_max_scale,
-                    warmup_steps=cfg.inverse_simpson_warmup_steps,
+                    warmup_steps=inverse_simpson_warmup_steps,
                 )
                 inverse_simpson_penalty = lam_is * loss_is
 
@@ -904,23 +1021,19 @@ def train_sae(
                     entry.dead_pct, entry.d_is, entry.u_is * 100.0, entry.inverse_simpson_penalty, lr, lam,
                 )
 
-            eval_interval = cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
-            validation_due = bool(validation_readers or train_probe_reader) and (
+            validation_due = bool(validation_readers) and (
                 step % eval_interval == 0
                 or step == cfg.n_steps
             )
             checkpoint_due = (
                 step % cfg.ckpt_every == 0 or step == cfg.n_steps or validation_due
             )
-            if checkpoint_due:
-                final_checkpoint = write_checkpoint(step)
 
             if validation_due:
-                assert validation_f is not None
-                n_eval_tokens = validation_tokens or validation_dead_tokens or 50_000
+                assert validation_f is not None and train_probe_reader is not None
+                n_eval_tokens = probe_tokens
                 probe_readers: dict[str, ShardReader] = {}
-                if train_probe_reader is not None:
-                    probe_readers["train"] = train_probe_reader
+                probe_readers["train_probe"] = train_probe_reader
                 probe_readers.update(validation_readers)
 
                 all_eval_metrics: dict[str, ReconMetrics] = {}
@@ -963,9 +1076,9 @@ def train_sae(
                 if val_metrics_only and early_stopping.enabled:
                     stable, l0_ok = early_stop_monitor.update(
                         val_metrics_only,
-                        target_l0=float(l0_target),
+                        target_l0=float(target_l0),
                         cfg=early_stopping,
-                        eligible=step > early_stopping.minimum_steps,
+                        eligible=step >= early_stopping.minimum_steps,
                     )
                     stop_now = (
                         early_stopping.enabled
@@ -982,11 +1095,9 @@ def train_sae(
                         {
                             "step": step,
                             "language": split_name,
-                            "target_l0": float(l0_target),
-                            "validation_sample_tokens": metrics.n_tokens,
-                            "inactive_sample_tokens": min(
-                                validation_dead_tokens, metrics.n_tokens
-                            ),
+                            "target_l0": float(target_l0),
+                            "probe_sample_tokens": metrics.n_tokens,
+                            "inactive_sample_tokens": metrics.n_tokens,
                             "stable_interval": stable,
                             "l0_within_tolerance": l0_ok,
                             "stable_intervals": early_stop_monitor.stable_intervals,
@@ -1002,7 +1113,7 @@ def train_sae(
                         split_name,
                         metrics.fvu,
                         metrics.l0,
-                        min(validation_dead_tokens, metrics.n_tokens),
+                        metrics.n_tokens,
                         metrics.dead_pct,
                         metrics.d_is,
                         metrics.u_is * 100.0,
@@ -1018,15 +1129,18 @@ def train_sae(
                 except Exception as exc:  # plotting is non-load-bearing
                     log.warning("Failed to refresh validation plot at step %d: %s", step, exc)
                 sae.train()
-                if stop_now:
-                    log.info(
-                        "Early stopping at step %d: both-language validation FVU plateaued "
-                        "for %d evaluations and L0 stayed within %.1f%% of target",
-                        step,
-                        early_stop_monitor.stable_intervals,
-                        100.0 * early_stopping.l0_relative_tolerance,
-                    )
-                    break
+            if checkpoint_due:
+                # Save after validation so resume restores the latest patience state.
+                final_checkpoint = write_checkpoint(step)
+            if validation_due and stop_now:
+                log.info(
+                    "Early stopping at step %d: validation FVU plateaued for %d "
+                    "evaluations and L0 stayed within %.1f%% of target",
+                    step,
+                    early_stop_monitor.stable_intervals,
+                    100.0 * early_stopping.l0_relative_tolerance,
+                )
+                break
 
     elapsed = time.time() - t_start
     log.info("Training done in %.1fs", elapsed)

@@ -128,6 +128,7 @@ def main() -> None:
             "Bilingual early stopping requires at least two configured source languages"
         )
     validation_run_id = cfg.validation_run_id or cfg.run_id
+    missing_validation_languages: list[str] = []
     for language in languages:
         validation_manifest_path = validation_manifest_path_for(
             cfg.cache.cache_dir, validation_run_id, language, spec.slug
@@ -135,6 +136,7 @@ def main() -> None:
         if not validation_manifest_path.is_file():
             if cfg.early_stopping.enabled:
                 raise SystemExit(f"Missing validation manifest: {validation_manifest_path}")
+            missing_validation_languages.append(language)
             continue
         validation_manifest = CacheManifest.read(validation_manifest_path)
         mismatches = []
@@ -151,10 +153,10 @@ def main() -> None:
             mismatches.append(f"language={validation_manifest.language!r}")
         if validation_manifest.d_activation != manifest.d_activation:
             mismatches.append(f"d_activation={validation_manifest.d_activation}")
-        if validation_manifest.total_tokens < cfg.eval.fvu_n_tokens:
+        if validation_manifest.total_tokens < cfg.eval.trajectory_n_tokens:
             mismatches.append(
-                f"tokens={validation_manifest.total_tokens} < eval.fvu_n_tokens="
-                f"{cfg.eval.fvu_n_tokens}"
+                f"tokens={validation_manifest.total_tokens} < eval.trajectory_n_tokens="
+                f"{cfg.eval.trajectory_n_tokens}"
             )
         if mismatches:
             raise SystemExit(
@@ -165,10 +167,16 @@ def main() -> None:
             cfg.cache.cache_dir, validation_run_id, language, spec.slug
         )
         log.info(
-            "Validation cache %s: %d tokens (%d evaluation tokens)",
+            "Validation cache %s: %d tokens (%d fixed-probe tokens)",
             validation_cache_dirs[language],
             validation_manifest.total_tokens,
-            cfg.eval.fvu_n_tokens,
+            cfg.eval.trajectory_n_tokens,
+        )
+
+    if validation_cache_dirs and missing_validation_languages:
+        raise SystemExit(
+            "Validation caches are incomplete for configured languages: "
+            + ", ".join(missing_validation_languages)
         )
 
     out_dir = (
@@ -237,8 +245,8 @@ def main() -> None:
             else None
         ),
         validation_cache_dirs=validation_cache_dirs,
-        validation_tokens=cfg.eval.fvu_n_tokens,
-        validation_dead_tokens=cfg.eval.dead_n_tokens,
+        validation_tokens=cfg.eval.trajectory_n_tokens,
+        validation_dead_tokens=cfg.eval.trajectory_n_tokens,
         early_stopping=cfg.early_stopping,
     )
 

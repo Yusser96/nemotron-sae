@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from sae_pipeline.config import EarlyStoppingCfg, PipelineCfg, SAECfg
@@ -44,23 +42,6 @@ def test_finetuning_config_uses_released_sites_and_bilingual_budget():
     assert cfg.target.sites is not None
     assert len(cfg.target.sites) == 14
     assert cfg.target.sites[0].hook_name == "backbone.layers.2"
-
-
-@pytest.mark.skipif(
-    not Path("configs/finetuning_original_early_stop.yml").is_file(),
-    reason="configs/finetuning_original_early_stop.yml is a local-only experiment config",
-)
-def test_original_early_stop_run_config_matches_original_optimizer_recipe():
-    cfg = PipelineCfg.from_yaml("configs/finetuning_original_early_stop.yml")
-    assert cfg.sae.lr_schedule == "cosine_warmup_constant"
-    assert cfg.sae.gradient_clip_norm == 1.0
-    assert cfg.sae.lr == 7.0e-5
-    assert cfg.sae.warmup_steps == 1000
-    assert cfg.sae.adam_beta1 == 0.0
-    assert cfg.sae.adam_beta2 == 0.999
-    assert cfg.sae.adam_eps == 1.0e-8
-    assert cfg.sae.l0_target == 10
-    assert cfg.sae.batch_size == 4096
 
 
 def test_inverse_simpson_config_validation():

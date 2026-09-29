@@ -49,3 +49,4 @@ slurm/soofi_*.sh
 tests/*soofi*.py
 tests/test_select_l26_program.py
 internal_docs/
+internal-docs/
