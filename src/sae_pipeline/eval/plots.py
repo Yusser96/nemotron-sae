@@ -213,7 +213,7 @@ def plot_validation_curves(
     *,
     title_prefix: str = "",
 ) -> list[Path]:
-    """Plot language-separated held-out metrics logged during training."""
+    """Plot the fixed train probe and language-specific validation trajectories."""
     jsonl_path = Path(jsonl_path)
     out_dir = Path(out_dir)
     rows: list[dict] = []
@@ -228,7 +228,7 @@ def plot_validation_curves(
         return []
 
     languages = sorted({str(row["language"]) for row in rows})
-    has_is = any("d_is" in row or "u_is" in row for row in rows)
+    has_is = any("d_is" in row and "u_is" in row for row in rows)
     metric_defs = [
         ("fvu", "FVU (lower is better)", "Ratio"),
         ("l0", "Mean active latents per token", "Latents"),
@@ -238,12 +238,14 @@ def plot_validation_curves(
         metric_defs.append(
             ("d_is", "Effective Dictionary Size ($D_{\\mathrm{IS}}$)", "Active Latents")
         )
+        metric_defs.append(
+            ("u_is", "Dictionary Utilization ($D_{\\mathrm{IS}}/D$)", "Fraction")
+        )
 
-    fig, axes = plt.subplots(1, len(metric_defs), figsize=(5.2 * len(metric_defs), 4.8), constrained_layout=True)
-    if len(metric_defs) == 1:
-        axes = [axes]
+    fig, axes = plt.subplots(2, 3, figsize=(18, 9), constrained_layout=True)
+    axes = list(axes.flat)
     if title_prefix:
-        fig.suptitle(f"{title_prefix}: held-out validation", fontsize=14)
+        fig.suptitle(f"{title_prefix}: fixed-probe trajectories", fontsize=14)
 
     for axis, (key, title, y_label) in zip(axes, metric_defs):
         for language in languages:
@@ -254,7 +256,7 @@ def plot_validation_curves(
             values_key = key
             if key == "inactive_pct" and any(key not in row for row in language_rows):
                 values_key = "dead_pct"
-            y_vals = [float(row[values_key]) for row in language_rows]
+            y_vals = [float(row.get(values_key, math.nan)) for row in language_rows]
             axis.plot(
                 [int(row["step"]) for row in language_rows],
                 y_vals,
@@ -274,6 +276,8 @@ def plot_validation_curves(
         axis.set_ylabel(y_label)
         axis.grid(alpha=0.3)
         axis.legend(loc="best", fontsize=9)
+    for axis in axes[len(metric_defs):]:
+        axis.set_visible(False)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "validation_evolution.png"
     fig.savefig(path, dpi=120)

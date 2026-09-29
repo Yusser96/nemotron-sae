@@ -22,6 +22,22 @@ import torch.nn as nn
 from sae_pipeline.sae.base import SparseAutoencoder, init_encoder_from_decoder
 
 
+def _log_theta_ste_gradient(
+    z: torch.Tensor,
+    theta: torch.Tensor,
+    grad_out: torch.Tensor,
+    bandwidth: float,
+    *,
+    mean_over_batch: bool = False,
+) -> torch.Tensor:
+    in_window = (z - theta).abs() < (bandwidth / 2.0)
+    local_gradient = (theta / bandwidth) * in_window.to(z.dtype)
+    if mean_over_batch:
+        local_gradient = local_gradient.sum(dim=0) / z.shape[0]
+        return -grad_out * local_gradient
+    return -(grad_out * local_gradient).sum(dim=0)
+
+
 class _JumpReLU(torch.autograd.Function):
     """Fused JumpReLU gate with a rectangular-kernel straight-through gradient.
 
@@ -41,12 +57,8 @@ class _JumpReLU(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
         z, theta, active = ctx.saved_tensors
-        eps = ctx.bandwidth
-        in_window = (z - theta).abs() < (eps / 2.0)
         grad_z = grad_out * active.to(grad_out.dtype)
-        grad_log_theta = -(
-            grad_out * (theta / eps) * in_window.to(grad_out.dtype)
-        ).sum(dim=0)
+        grad_log_theta = _log_theta_ste_gradient(z, theta, grad_out, ctx.bandwidth)
         return grad_z, grad_log_theta, None
 
 
@@ -63,10 +75,10 @@ class _L0(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
         z, theta = ctx.saved_tensors
-        eps = ctx.bandwidth
-        in_window = (z - theta).abs() < (eps / 2.0)
-        grad_log_theta = -(theta * in_window.to(z.dtype)).sum(dim=0) / (eps * z.shape[0])
-        return None, grad_out * grad_log_theta, None
+        grad_log_theta = _log_theta_ste_gradient(
+            z, theta, grad_out, ctx.bandwidth, mean_over_batch=True
+        )
+        return None, grad_log_theta, None
 
 
 class _JumpReLUGate(torch.autograd.Function):
@@ -83,9 +95,7 @@ class _JumpReLUGate(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
         z, theta = ctx.saved_tensors
-        eps = ctx.bandwidth
-        in_window = (z - theta).abs() < (eps / 2.0)
-        grad_log_theta = -(grad_out * (theta / eps) * in_window.to(z.dtype)).sum(dim=0)
+        grad_log_theta = _log_theta_ste_gradient(z, theta, grad_out, ctx.bandwidth)
         return None, grad_log_theta, None
 
 
@@ -205,30 +215,29 @@ class JumpReLUSAE(SparseAutoencoder):
         }
 
 
+def inverse_simpson_from_mass(
+    firing_mass: torch.Tensor,
+    d_sae: int,
+    eps: float = 1e-12,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return ``(D_IS, u_IS, pi)`` from firing mass, preserving autograd."""
+    if d_sae <= 0 or firing_mass.ndim != 1 or firing_mass.numel() != d_sae:
+        raise ValueError("firing mass must match a positive dictionary width")
+    total = firing_mass.sum()
+    probabilities = firing_mass / (total + eps)
+    raw_d_is = 1.0 / (probabilities.square().sum() + eps)
+    d_is = torch.where(total > 0, raw_d_is, torch.zeros_like(raw_d_is))
+    return d_is, d_is / float(d_sae), probabilities
+
+
 def compute_inverse_simpson(
     firing_frequency: torch.Tensor,
     d_sae: int,
     eps: float = 1e-12,
 ) -> tuple[float, float]:
-    """Compute (D_IS, u_IS) from feature firing frequencies or counts.
-
-    Args:
-        firing_frequency: 1D Tensor of feature firing frequencies (or counts) across dictionary.
-        d_sae: Total number of features in dictionary.
-        eps: Small numerical stability constant.
-
-    Returns:
-        d_is: Inverse-Simpson effective dictionary size in [0, d_sae].
-        u_is: Dictionary utilization fraction in [0, 1] (d_is / d_sae).
-    """
-    total = float(firing_frequency.sum().item())
-    if total <= 0:
-        return 0.0, 0.0
-    probabilities = firing_frequency / (total + eps)
-    sum_pi_sq = float((probabilities.square().sum()).item())
-    d_is = 1.0 / (sum_pi_sq + eps)
-    u_is = d_is / float(d_sae)
-    return d_is, u_is
+    """Compute ``(D_IS, u_IS)`` from feature firing frequencies or counts."""
+    d_is, u_is, _ = inverse_simpson_from_mass(firing_frequency, d_sae, eps)
+    return float(d_is.item()), float(u_is.item())
 
 
 def batch_inverse_simpson(
@@ -247,10 +256,5 @@ def batch_inverse_simpson(
         (d_is, u_is) as 0D tensors preserving autograd back through the gate.
     """
     p_hat = gate.mean(dim=0)
-    p_sum = p_hat.sum()
-    pi = p_hat / (p_sum + eps)
-    sum_pi_sq = (pi.square()).sum()
-    d_is = 1.0 / (sum_pi_sq + eps)
-    u_is = d_is / float(d_sae)
+    d_is, u_is, _ = inverse_simpson_from_mass(p_hat, d_sae, eps)
     return d_is, u_is
-

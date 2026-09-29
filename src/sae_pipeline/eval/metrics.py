@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from sae_pipeline.sae.base import SparseAutoencoder
-from sae_pipeline.sae.jumprelu import compute_inverse_simpson
+from sae_pipeline.sae.jumprelu import inverse_simpson_from_mass
 
 
 @dataclass
@@ -206,7 +206,9 @@ def streaming_reconstruction_metrics(
     firing_frequency = support_counts / max(1, support_seen)
     concentration = firing_concentration(firing_frequency)
     total_frequency = float(firing_frequency.sum().item())
-    probabilities = firing_frequency / max(total_frequency, 1.0e-12)
+    d_is_tensor, u_is_tensor, probabilities = inverse_simpson_from_mass(
+        firing_frequency, sae.d_sae
+    )
     positive = probabilities > 0
     entropy_nats = float(
         (-(probabilities[positive] * probabilities[positive].log()).sum()).item()
@@ -214,7 +216,8 @@ def streaming_reconstruction_metrics(
     entropy_normalised = entropy_nats / max(1.0e-12, float(torch.log(torch.tensor(float(sae.d_sae))).item()))
 
     # Inverse-Simpson effective dictionary size and utilization fraction
-    d_is, u_is = compute_inverse_simpson(firing_frequency, sae.d_sae)
+    d_is = float(d_is_tensor.item())
+    u_is = float(u_is_tensor.item())
 
     # Concentration: latents for 50%, 90%, 99% mass as percentage of dictionary
     sorted_probs, _ = torch.sort(probabilities, descending=True)
