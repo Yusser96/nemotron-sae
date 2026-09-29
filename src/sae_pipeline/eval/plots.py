@@ -207,13 +207,18 @@ def plot_training_curves(
     return written
 
 
+def _is_train_split(language: str) -> bool:
+    normalized = str(language).strip().lower()
+    return normalized in ("train", "train_probe") or normalized.startswith("train")
+
+
 def plot_validation_curves(
     jsonl_path: str | Path,
     out_dir: str | Path,
     *,
     title_prefix: str = "",
 ) -> list[Path]:
-    """Plot the fixed train probe and language-specific validation trajectories."""
+    """Plot the fixed train probe, language-specific validation trajectories, and validation average."""
     jsonl_path = Path(jsonl_path)
     out_dir = Path(out_dir)
     rows: list[dict] = []
@@ -227,7 +232,10 @@ def plot_validation_curves(
     if not rows:
         return []
 
-    languages = sorted({str(row["language"]) for row in rows})
+    train_rows = [row for row in rows if _is_train_split(row.get("language", ""))]
+    val_rows = [row for row in rows if not _is_train_split(row.get("language", ""))]
+    val_languages = sorted({str(row["language"]) for row in val_rows})
+
     has_is = any("d_is" in row and "u_is" in row for row in rows)
     metric_defs = [
         ("fvu", "FVU (lower is better)", "Ratio"),
@@ -247,35 +255,102 @@ def plot_validation_curves(
     if title_prefix:
         fig.suptitle(f"{title_prefix}: fixed-probe trajectories", fontsize=14)
 
+    val_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+
     for axis, (key, title, y_label) in zip(axes, metric_defs):
-        for language in languages:
-            language_rows = sorted(
-                (row for row in rows if str(row["language"]) == language),
+        val_step_values: dict[int, list[float]] = {}
+        for idx, language in enumerate(val_languages):
+            color = val_colors[idx % len(val_colors)]
+            lang_rows = sorted(
+                (row for row in val_rows if str(row["language"]) == language),
                 key=lambda row: int(row["step"]),
             )
             values_key = key
-            if key == "inactive_pct" and any(key not in row for row in language_rows):
+            if key == "inactive_pct" and any(key not in row for row in lang_rows):
                 values_key = "dead_pct"
-            y_vals = [float(row.get(values_key, math.nan)) for row in language_rows]
+            steps = [int(row["step"]) for row in lang_rows]
+            y_vals = [float(row.get(values_key, math.nan)) for row in lang_rows]
             axis.plot(
-                [int(row["step"]) for row in language_rows],
+                steps,
                 y_vals,
                 marker="o",
                 linewidth=1.8,
-                label=language.upper(),
+                color=color,
+                label=f"Val ({language.upper()})",
             )
+            for s, v in zip(steps, y_vals):
+                if math.isfinite(v):
+                    val_step_values.setdefault(s, []).append(v)
+
+        if len(val_languages) >= 2 and val_step_values:
+            avg_steps = sorted(val_step_values.keys())
+            avg_vals = [
+                float(np.mean(val_step_values[s])) if val_step_values[s] else math.nan
+                for s in avg_steps
+            ]
+            axis.plot(
+                avg_steps,
+                avg_vals,
+                marker="D",
+                markersize=6,
+                linewidth=2.4,
+                color="#4a148c",
+                linestyle="-",
+                label="Val Average",
+            )
+
+        if train_rows:
+            values_key = key
+            if key == "inactive_pct" and any(key not in row for row in train_rows):
+                values_key = "dead_pct"
+            sorted_train = sorted(train_rows, key=lambda row: int(row["step"]))
+            train_steps = [int(row["step"]) for row in sorted_train]
+            train_vals = [float(row.get(values_key, math.nan)) for row in sorted_train]
+            axis.plot(
+                train_steps,
+                train_vals,
+                marker="s",
+                markersize=5,
+                linewidth=1.8,
+                linestyle="--",
+                color="#555555",
+                label="Train (Probe)",
+            )
+
         if key == "l0":
             target = rows[-1].get("target_l0")
             if target is not None:
                 axis.axhline(
-                    float(target), color="black", linestyle="--", linewidth=1,
+                    float(target),
+                    color="black",
+                    linestyle="--",
+                    linewidth=1,
                     label=f"target L0 = {target}",
                 )
+        if key == "u_is":
+            u_min = next(
+                (
+                    row.get("inverse_simpson_floor") or row.get("u_min")
+                    for row in rows
+                    if row.get("inverse_simpson_floor") or row.get("u_min")
+                ),
+                None,
+            )
+            if u_min is not None:
+                axis.axhline(
+                    float(u_min),
+                    color="darkred",
+                    linestyle=":",
+                    linewidth=1,
+                    label=f"u_min = {float(u_min):.3f}",
+                )
+
         axis.set_title(title)
         axis.set_xlabel("Training step")
         axis.set_ylabel(y_label)
         axis.grid(alpha=0.3)
         axis.legend(loc="best", fontsize=9)
+
     for axis in axes[len(metric_defs):]:
         axis.set_visible(False)
     out_dir.mkdir(parents=True, exist_ok=True)

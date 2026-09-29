@@ -129,3 +129,48 @@ def test_plot_validation_curves_with_inverse_simpson(tmp_path: Path):
     written = plot_validation_curves(log_path, out_dir, title_prefix="test_is")
     assert written == [out_dir / "validation_evolution.png"]
     assert written[0].stat().st_size > 5_000
+
+
+def test_plot_validation_curves_with_train_val_average_legend(tmp_path: Path):
+    log_path = tmp_path / "validation_log.jsonl"
+    rows = []
+    for step in (10_000, 20_000):
+        # Validation language 1
+        rows.append({
+            "step": step,
+            "language": "en",
+            "fvu": 0.45,
+            "l0": 10.2,
+            "inactive_pct": 20.0,
+            "d_is": 200.0,
+            "u_is": 0.012,
+            "target_l0": 10,
+        })
+        # Validation language 2
+        rows.append({
+            "step": step,
+            "language": "de",
+            "fvu": 0.55,
+            "l0": 9.8,
+            "inactive_pct": 22.0,
+            "d_is": 190.0,
+            "u_is": 0.011,
+            "target_l0": 10,
+        })
+        # Train probe
+        rows.append({
+            "step": step,
+            "language": "train_probe",
+            "fvu": 0.40,
+            "l0": 10.0,
+            "inactive_pct": 18.0,
+            "d_is": 220.0,
+            "u_is": 0.013,
+            "target_l0": 10,
+        })
+    log_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    out_dir = tmp_path / "plots"
+    written = plot_validation_curves(log_path, out_dir, title_prefix="Bilingual Run")
+    assert written == [out_dir / "validation_evolution.png"]
+    assert written[0].stat().st_size > 5_000

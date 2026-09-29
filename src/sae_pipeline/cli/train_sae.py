@@ -212,6 +212,8 @@ def main() -> None:
         checkpoint_updates["seed"] = args.seed
     if args.steps is not None:
         checkpoint_updates["n_steps"] = args.steps
+    if args.l0 is not None:
+        checkpoint_updates["l0_target"] = args.l0
     if args.l0_start is not None:
         checkpoint_updates["l0_target_start"] = args.l0_start
     if args.l0_warmup_steps is not None:
