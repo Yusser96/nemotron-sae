@@ -13,12 +13,27 @@ import argparse
 import logging
 from pathlib import Path
 
-from sae_pipeline.cache.manifest import CacheManifest, manifest_path_for
+from sae_pipeline.cache.manifest import (
+    CacheManifest,
+    manifest_path_for,
+    validation_dir_for,
+    validation_manifest_path_for,
+)
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.train import train_sae
 
 log = logging.getLogger(__name__)
+
+
+def _validation_manifest_site_mismatch(
+    manifest: CacheManifest, spec: ComponentSpec
+) -> str | None:
+    expected = (spec.layer, spec.kind)
+    actual = (manifest.layer, manifest.component)
+    if actual == expected:
+        return None
+    return f"site=({manifest.layer},{manifest.component})"
 
 
 def main() -> None:
@@ -69,6 +84,9 @@ def main() -> None:
     p.add_argument("--residual-reset-calibration-tokens", type=int, default=None)
     p.add_argument("--residual-reset-anneal-steps", type=int, default=None)
     p.add_argument("--feature-frequency-penalty-multiplier", type=float, default=None)
+    p.add_argument("--inverse-simpson-floor", type=float, default=None)
+    p.add_argument("--inverse-simpson-max-scale", type=float, default=None)
+    p.add_argument("--inverse-simpson-warmup-steps", type=int, default=None)
     p.add_argument("--device", default=None)
     args = p.parse_args()
 
@@ -100,6 +118,58 @@ def main() -> None:
         )
     log.info("Found cache: %s (%d shards, %d tokens, d=%d)",
              manifest_path, manifest.n_shards, manifest.total_tokens, manifest.d_activation)
+
+    validation_cache_dirs: dict[str, Path] = {}
+    languages = sorted(
+        {source.language for source in (cfg.data.sources or []) if source.language}
+    )
+    if cfg.early_stopping.enabled and len(languages) < 2:
+        raise SystemExit(
+            "Bilingual early stopping requires at least two configured source languages"
+        )
+    validation_run_id = cfg.validation_run_id or cfg.run_id
+    for language in languages:
+        validation_manifest_path = validation_manifest_path_for(
+            cfg.cache.cache_dir, validation_run_id, language, spec.slug
+        )
+        if not validation_manifest_path.is_file():
+            if cfg.early_stopping.enabled:
+                raise SystemExit(f"Missing validation manifest: {validation_manifest_path}")
+            continue
+        validation_manifest = CacheManifest.read(validation_manifest_path)
+        mismatches = []
+        if not validation_manifest.complete:
+            mismatches.append("incomplete")
+        if validation_manifest.run_id != validation_run_id:
+            mismatches.append(f"run_id={validation_manifest.run_id!r}")
+        if validation_manifest.model != cfg.model.name:
+            mismatches.append(f"model={validation_manifest.model!r}")
+        site_mismatch = _validation_manifest_site_mismatch(validation_manifest, spec)
+        if site_mismatch is not None:
+            mismatches.append(site_mismatch)
+        if validation_manifest.language != language:
+            mismatches.append(f"language={validation_manifest.language!r}")
+        if validation_manifest.d_activation != manifest.d_activation:
+            mismatches.append(f"d_activation={validation_manifest.d_activation}")
+        if validation_manifest.total_tokens < cfg.eval.fvu_n_tokens:
+            mismatches.append(
+                f"tokens={validation_manifest.total_tokens} < eval.fvu_n_tokens="
+                f"{cfg.eval.fvu_n_tokens}"
+            )
+        if mismatches:
+            raise SystemExit(
+                f"Invalid validation cache {validation_manifest_path}: "
+                + "; ".join(mismatches)
+            )
+        validation_cache_dirs[language] = validation_dir_for(
+            cfg.cache.cache_dir, validation_run_id, language, spec.slug
+        )
+        log.info(
+            "Validation cache %s: %d tokens (%d evaluation tokens)",
+            validation_cache_dirs[language],
+            validation_manifest.total_tokens,
+            cfg.eval.fvu_n_tokens,
+        )
 
     out_dir = (
         Path(cfg.sae.ckpt_dir) / (args.output_id or cfg.run_id) / spec.slug / f"{arch}_w{width}_l0_{l0_target}"
@@ -144,6 +214,12 @@ def main() -> None:
         checkpoint_updates["activation_centering"] = args.activation_centering
     if args.active_subspace_rank is not None:
         checkpoint_updates["active_subspace_rank"] = args.active_subspace_rank
+    if args.inverse_simpson_floor is not None:
+        checkpoint_updates["inverse_simpson_floor"] = args.inverse_simpson_floor
+    if args.inverse_simpson_max_scale is not None:
+        checkpoint_updates["inverse_simpson_max_scale"] = args.inverse_simpson_max_scale
+    if args.inverse_simpson_warmup_steps is not None:
+        checkpoint_updates["inverse_simpson_warmup_steps"] = args.inverse_simpson_warmup_steps
     if checkpoint_updates:
         sae_cfg = cfg.sae.model_copy(update=checkpoint_updates)
     train_sae(
@@ -160,6 +236,10 @@ def main() -> None:
             if sae_cfg.normalization_dir is not None
             else None
         ),
+        validation_cache_dirs=validation_cache_dirs,
+        validation_tokens=cfg.eval.fvu_n_tokens,
+        validation_dead_tokens=cfg.eval.dead_n_tokens,
+        early_stopping=cfg.early_stopping,
     )
 
 
