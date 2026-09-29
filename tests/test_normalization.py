@@ -4,7 +4,21 @@ import torch
 from safetensors.torch import save_file
 
 from sae_pipeline.cache.manifest import CacheManifest
-from sae_pipeline.sae.normalization import resolve_whole_vector_normalization
+from sae_pipeline.sae.normalization import (
+    _cpu_shard_squared_norm,
+    resolve_whole_vector_normalization,
+)
+
+
+def test_cpu_shard_squared_norm_reduces_in_chunks(tmp_path):
+    activations = torch.arange(35, dtype=torch.float32).reshape(7, 5) - 9
+    shard = tmp_path / "chunked.safetensors"
+    save_file({"x": activations}, str(shard))
+
+    squared_norm, n_tokens = _cpu_shard_squared_norm(shard, chunk_rows=2)
+
+    assert n_tokens == 7
+    assert math.isclose(squared_norm, float(activations.square().sum()))
 
 
 def test_parallel_whole_vector_normalization_matches_all_shards(tmp_path):

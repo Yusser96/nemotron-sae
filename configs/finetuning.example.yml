@@ -48,7 +48,7 @@ sae:
   pre_encoder_bias: true
   input_normalization: whole_vector
   checkpoint_format: raw_export
-  lr_schedule: warmup_constant
+  lr_schedule: cosine_warmup_constant
   gradient_clip_norm: 1.0
   n_batches_in_buffer: 8
   ckpt_every: 5000

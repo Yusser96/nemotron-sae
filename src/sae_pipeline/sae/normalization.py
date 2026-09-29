@@ -63,13 +63,24 @@ def write_normalization(path: str | Path, value: WholeVectorNormalization) -> No
     _write_atomic(Path(path), value)
 
 
-def _cpu_shard_squared_norm(path: Path) -> tuple[float, int]:
-    """Return a shard's squared-norm sum and row count using one CPU thread."""
+def _cpu_shard_squared_norm(
+    path: Path, *, chunk_rows: int = 16_384
+) -> tuple[float, int]:
+    """Reduce a shard in bounded-memory chunks using one CPU thread."""
 
+    if chunk_rows <= 0:
+        raise ValueError(f"chunk_rows must be positive, got {chunk_rows}")
     with safe_open(str(path), framework="pt", device="cpu") as handle:
-        activations = handle.get_tensor("x")
-    squared_norm = activations.float().square().sum(dtype=torch.float64).item()
-    return float(squared_norm), int(activations.shape[0])
+        activations = handle.get_slice("x")
+        shape = activations.get_shape()
+        n_tokens = int(shape[0])
+        chunk_sums = []
+        for start in range(0, n_tokens, chunk_rows):
+            chunk = activations[start : min(start + chunk_rows, n_tokens)]
+            chunk_sums.append(
+                chunk.float().square().sum(dtype=torch.float64).item()
+            )
+    return math.fsum(chunk_sums), n_tokens
 
 
 def centering_path(out_dir: str | Path) -> Path:
