@@ -8,15 +8,24 @@ import math
 import random
 import shutil
 import time
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Iterable
 
+import numpy as np
 import torch
 
+from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.reader import ActivationBuffer, ShardReader
-from sae_pipeline.config import SAECfg
-from sae_pipeline.eval.metrics import dead_pct_from_fired, firing_concentration
-from sae_pipeline.eval.plots import plot_training_curves
+from sae_pipeline.config import EarlyStoppingCfg, SAECfg
+from sae_pipeline.eval.metrics import (
+    ReconMetrics,
+    dead_pct_from_fired,
+    firing_concentration,
+    streaming_reconstruction_metrics,
+)
+from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves
 from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.checkpoint import (
     capture_random_state,
@@ -26,7 +35,7 @@ from sae_pipeline.sae.checkpoint import (
     restore_random_state,
     save_checkpoint_pair,
 )
-from sae_pipeline.sae.jumprelu import JumpReLUSAE
+from sae_pipeline.sae.jumprelu import JumpReLUSAE, batch_inverse_simpson
 from sae_pipeline.sae.normalization import (
     centering_path,
     normalization_path,
@@ -73,6 +82,15 @@ def warmup_constant(step: int, peak_lr: float, warmup_steps: int) -> float:
     return peak_lr * (0.1 + 0.9 * step / max(1, warmup_steps))
 
 
+def cosine_warmup_constant(step: int, peak_lr: float, warmup_steps: int) -> float:
+    """Cosine ramp from 0.1*peak to peak, followed by a constant rate."""
+    if step >= warmup_steps:
+        return peak_lr
+    progress = step / max(1, warmup_steps)
+    cosine_ramp = 0.5 * (1.0 - math.cos(math.pi * progress))
+    return peak_lr * (0.1 + 0.9 * cosine_ramp)
+
+
 def linear_warmup(step: int, peak: float, warmup_steps: int) -> float:
     if step >= warmup_steps:
         return peak
@@ -99,6 +117,89 @@ class StepLog:
     max_firing_frequency: float
     feature_resets: int
     target_l0: float
+    d_is: float = 0.0
+    u_is: float = 0.0
+    inverse_simpson_penalty: float = 0.0
+
+
+
+@dataclass
+class _ValidationEarlyStop:
+    previous: dict[str, ReconMetrics] | None = None
+    stable_intervals: int = 0
+
+    def update(
+        self,
+        current: dict[str, ReconMetrics],
+        *,
+        target_l0: float,
+        cfg: EarlyStoppingCfg,
+        eligible: bool = True,
+    ) -> tuple[bool, bool]:
+        """Return (metrics_stable, target_l0_reached) for this evaluation."""
+        l0_ok = all(
+            abs(metrics.l0 - target_l0)
+            <= cfg.l0_relative_tolerance * max(abs(target_l0), 1.0)
+            for metrics in current.values()
+        )
+        if not eligible:
+            self.previous = current
+            self.stable_intervals = 0
+            return False, l0_ok
+        if self.previous is None or set(self.previous) != set(current):
+            stable = False
+        else:
+            previous_l0_ok = all(
+                abs(metrics.l0 - target_l0)
+                <= cfg.l0_relative_tolerance * max(abs(target_l0), 1.0)
+                for metrics in self.previous.values()
+            )
+            stable = l0_ok and previous_l0_ok and all(
+                abs(current[language].fvu - self.previous[language].fvu)
+                <= min(
+                    cfg.ev_absolute_tolerance,
+                    cfg.fvu_relative_tolerance
+                    * max(abs(self.previous[language].fvu), 1.0e-12),
+                )
+                for language in current
+            )
+        self.stable_intervals = self.stable_intervals + 1 if stable else 0
+        self.previous = current
+        return stable, l0_ok
+
+
+def _validation_batches(
+    reader: ShardReader,
+    *,
+    n_tokens: int,
+    batch_size: int,
+    input_scale: float,
+    input_center: torch.Tensor | None,
+    device: str,
+) -> Iterable[torch.Tensor]:
+    """Yield the same bounded validation prefix deterministically each time."""
+    if n_tokens <= 0 or n_tokens > reader.manifest.total_tokens:
+        raise ValueError(
+            f"Requested {n_tokens} validation vectors from a cache containing "
+            f"{reader.manifest.total_tokens}"
+        )
+    seen = 0
+    for shard in reader.iter_shards():
+        for start in range(0, shard.shape[0], batch_size):
+            if seen >= n_tokens:
+                return
+            take = min(batch_size, n_tokens - seen)
+            batch = shard[start : start + take].to(device, dtype=torch.float32)
+            if input_scale != 1.0:
+                batch.mul_(input_scale)
+            if input_center is not None:
+                batch.sub_(input_center)
+            seen += batch.shape[0]
+            yield batch
+    if seen != n_tokens:
+        raise ValueError(
+            f"Validation cache yielded {seen} vectors, expected {n_tokens}"
+        )
 
 
 def _seed_training(seed: int) -> None:
@@ -342,15 +443,55 @@ def train_sae(
     out_dir: str | Path,
     device: str | None = None,
     normalization_dir: str | Path | None = None,
+    validation_cache_dirs: dict[str, str | Path] | None = None,
+    validation_tokens: int | None = None,
+    validation_dead_tokens: int = 50_000,
+    early_stopping: EarlyStoppingCfg | None = None,
 ) -> Path:
     _seed_training(cfg.seed)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    early_stopping = early_stopping or EarlyStoppingCfg()
+    validation_cache_dirs = validation_cache_dirs or {}
+    if early_stopping.enabled:
+        if not validation_cache_dirs:
+            raise ValueError("Validation-based early stopping requires validation caches")
+        if validation_tokens is None or validation_tokens <= 0:
+            raise ValueError("Validation-based early stopping requires a positive token count")
+        if len(validation_cache_dirs) < 2:
+            raise ValueError("Bilingual early stopping requires separate DE and EN validation caches")
+    validation_readers = {
+        language: ShardReader(path)
+        for language, path in sorted(validation_cache_dirs.items())
+    }
+    if any(reader.manifest.d_activation != d_in for reader in validation_readers.values()):
+        raise ValueError("Validation activation dimension differs from the training cache")
+    train_probe_reader: ShardReader | None = None
+    try:
+        train_manifest = CacheManifest.read(Path(cache_dir) / "manifest.json")
+        if train_manifest.shard_paths:
+            train_probe_reader = ShardReader(cache_dir)
+            log.info("Initialized fixed train probe from %s (%d tokens)", cache_dir, train_manifest.total_tokens)
+    except Exception as exc:
+        log.warning("Could not initialize train probe reader: %s", exc)
+    early_stop_monitor = _ValidationEarlyStop()
+    validation_log_path = out_dir / "validation_log.jsonl"
     log.info(
         "Training SAE: arch=%s d_in=%d d_sae=%d l0=%d steps=%d device=%s",
         arch, d_in, d_sae, l0_target, cfg.n_steps, device,
     )
+    if early_stopping.enabled:
+        log.info(
+            "Validation early stopping: every %d steps after step %d; patience=%d; "
+            "FVU relative tolerance=%.3g; EV absolute tolerance=%.3g; L0 tolerance=%.1f%%",
+            early_stopping.evaluation_interval_steps,
+            early_stopping.minimum_steps,
+            early_stopping.patience,
+            early_stopping.fvu_relative_tolerance,
+            early_stopping.ev_absolute_tolerance,
+            100.0 * early_stopping.l0_relative_tolerance,
+        )
 
     normalization_scale = 1.0
     metadata_dir = Path(normalization_dir) if normalization_dir else out_dir
@@ -495,6 +636,23 @@ def train_sae(
             metadata_dir=metadata_dir,
         )
 
+    def write_raw_export(step: int) -> Path | None:
+        if cfg.input_normalization != "whole_vector" or not isinstance(sae, JumpReLUSAE):
+            return None
+        export_path = out_dir / f"sae_export_step_{step:07d}.safetensors"
+        temporary = export_path.with_name(f".{export_path.name}.tmp")
+        save_file(
+            sae.raw_export_state_dict(
+                normalization_scale,
+                input_center=activation_center,
+                output_center=activation_center,
+            ),
+            str(temporary),
+        )
+        temporary.replace(export_path)
+        log.info("Wrote raw-activation SAE export %s", export_path)
+        return export_path
+
     def write_checkpoint(step: int) -> Path:
         saved = save_checkpoint_pair(
             out_dir=out_dir,
@@ -517,19 +675,6 @@ def train_sae(
         log.info(
             "Wrote checkpoint pair %s and %s", saved.weights_path, saved.trainer_state_path
         )
-        if cfg.input_normalization == "whole_vector" and isinstance(sae, JumpReLUSAE):
-            export_path = out_dir / f"sae_export_step_{step:07d}.safetensors"
-            temporary = export_path.with_name(f".{export_path.name}.tmp")
-            save_file(
-                sae.raw_export_state_dict(
-                    normalization_scale,
-                    input_center=activation_center,
-                    output_center=activation_center,
-                ),
-                str(temporary),
-            )
-            temporary.replace(export_path)
-            log.info("Wrote raw-activation SAE export %s", export_path)
         # The JSONL is flushed at every checkpoint step, so this plot remains
         # useful if a later allocation ends before the final checkpoint.
         try:
@@ -545,17 +690,26 @@ def train_sae(
 
     log_path = out_dir / "train_log.jsonl"
     log_mode = "a" if cfg.checkpoint_source is not None and cfg.checkpoint_mode == "resume" else "w"
+    validation_log_mode = log_mode
 
     t_start = time.time()
     final_checkpoint = source_checkpoint.weights_path if source_checkpoint is not None else None
+    completed_step = start_step
     if source_checkpoint is not None and cfg.checkpoint_mode == "resume" and start_step == cfg.n_steps:
         log.info(
             "Resume checkpoint is already at target step %d; writing it into %s",
             cfg.n_steps, out_dir,
         )
         final_checkpoint = write_checkpoint(start_step)
-    with open(log_path, log_mode) as log_f:
+    with ExitStack() as stack:
+        log_f = stack.enter_context(open(log_path, log_mode))
+        validation_f = (
+            stack.enter_context(open(validation_log_path, validation_log_mode))
+            if validation_readers or train_probe_reader
+            else None
+        )
         for step in range(start_step + 1, cfg.n_steps + 1):
+            completed_step = step
             x = buffer.next_batch().to(device, dtype=torch.float32)
             if normalization_scale != 1.0:
                 x = x * normalization_scale
@@ -566,7 +720,11 @@ def train_sae(
             lr = (
                 warmup_constant(step, cfg.lr, cfg.warmup_steps)
                 if cfg.lr_schedule == "warmup_constant"
-                else cosine_warmup(step, cfg.lr, cfg.warmup_steps, cfg.n_steps)
+                else (
+                    cosine_warmup_constant(step, cfg.lr, cfg.warmup_steps)
+                    if cfg.lr_schedule == "cosine_warmup_constant"
+                    else cosine_warmup(step, cfg.lr, cfg.warmup_steps, cfg.n_steps)
+                )
             )
             lam = linear_warmup(step, peak=1.0, warmup_steps=cfg.l0_warmup_steps)
             for g in optim.param_groups:
@@ -618,11 +776,43 @@ def train_sae(
                     )
                 feature_use_penalty = frequency_penalty_scale * weighted_activation
 
+            inverse_simpson_penalty = reconstruction_loss.new_zeros(())
+            d_is_batch = 0.0
+            u_is_batch = 0.0
+            if (
+                cfg.inverse_simpson_floor > 0
+                and cfg.inverse_simpson_max_scale > 0
+                and isinstance(sae, JumpReLUSAE)
+            ):
+                g = sae.jump_relu_gate(x)
+                d_is_tensor, u_is_tensor = batch_inverse_simpson(g, d_sae)
+                d_is_batch = float(d_is_tensor.detach().item())
+                u_is_batch = float(u_is_tensor.detach().item())
+                gap = torch.clamp(
+                    (cfg.inverse_simpson_floor - u_is_tensor)
+                    / max(cfg.inverse_simpson_floor, 1.0e-8),
+                    min=0.0,
+                )
+                loss_is = gap.square()
+                lam_is = linear_warmup(
+                    step,
+                    peak=cfg.inverse_simpson_max_scale,
+                    warmup_steps=cfg.inverse_simpson_warmup_steps,
+                )
+                inverse_simpson_penalty = lam_is * loss_is
+
             loss = (
                 reconstruction_loss
                 + lam * cfg.l0_penalty_scale * l0_penalty
                 + feature_use_penalty
+                + inverse_simpson_penalty
             )
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"Non-finite training loss at step {step}: "
+                    f"reconstruction={reconstruction_loss.detach().item()} "
+                    f"l0_penalty={l0_penalty.detach().item()}"
+                )
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
@@ -702,17 +892,141 @@ def train_sae(
                     max_firing_frequency=concentration.max_firing_frequency,
                     feature_resets=feature_resets,
                     target_l0=target_l0,
+                    d_is=d_is_batch,
+                    u_is=u_is_batch,
+                    inverse_simpson_penalty=float(inverse_simpson_penalty.detach()),
                 )
                 log_f.write(json.dumps(asdict(entry)) + "\n")
                 log_f.flush()
                 log.info(
-                    "step=%d loss=%.4f recon=%.4f l0=%.1f dead=%.1f%% active=%d top1=%.1f%% lr=%.2e lam=%.2e",
+                    "step=%d loss=%.4f recon=%.4f l0=%.1f dead=%.1f%% D_is=%.1f u_is=%.2f%% is_pen=%.4f lr=%.2e lam=%.2e",
                     step, entry.loss, entry.reconstruction_loss, entry.hard_l0,
-                    entry.dead_pct, entry.active_features, entry.top1_activation_mass_pct, lr, lam,
+                    entry.dead_pct, entry.d_is, entry.u_is * 100.0, entry.inverse_simpson_penalty, lr, lam,
                 )
 
-            if step % cfg.ckpt_every == 0 or step == cfg.n_steps:
+            eval_interval = cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
+            validation_due = bool(validation_readers or train_probe_reader) and (
+                step % eval_interval == 0
+                or step == cfg.n_steps
+            )
+            checkpoint_due = (
+                step % cfg.ckpt_every == 0 or step == cfg.n_steps or validation_due
+            )
+            if checkpoint_due:
                 final_checkpoint = write_checkpoint(step)
+
+            if validation_due:
+                assert validation_f is not None
+                n_eval_tokens = validation_tokens or validation_dead_tokens or 50_000
+                probe_readers: dict[str, ShardReader] = {}
+                if train_probe_reader is not None:
+                    probe_readers["train"] = train_probe_reader
+                probe_readers.update(validation_readers)
+
+                all_eval_metrics: dict[str, ReconMetrics] = {}
+                eval_ckpt_dir = out_dir / "eval_checkpoints"
+                eval_ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+                for split_name, reader in probe_readers.items():
+                    metrics, arrays = streaming_reconstruction_metrics(
+                        sae,
+                        _validation_batches(
+                            reader,
+                            n_tokens=n_eval_tokens,
+                            batch_size=cfg.batch_size,
+                            input_scale=normalization_scale,
+                            input_center=activation_center,
+                            device=device,
+                        ),
+                        dead_threshold_tokens=n_eval_tokens,
+                        return_arrays=True,
+                    )
+                    assert isinstance(metrics, ReconMetrics)
+                    if not all(
+                        math.isfinite(float(value))
+                        for value in (metrics.l0, metrics.fvu, metrics.dead_pct)
+                    ):
+                        raise FloatingPointError(
+                            f"Non-finite evaluation metric at step {step} for {split_name}: {metrics}"
+                        )
+                    all_eval_metrics[split_name] = metrics
+                    np.savez_compressed(
+                        eval_ckpt_dir / f"eval_arrays_step_{step:07d}_{split_name}.npz",
+                        firing_frequency=arrays.firing_frequency,
+                        l0_per_token=arrays.l0_per_token,
+                        recon_err_per_token=arrays.recon_err_per_token,
+                    )
+
+                val_metrics_only = {
+                    lang: m for lang, m in all_eval_metrics.items() if lang in validation_readers
+                }
+                if val_metrics_only and early_stopping.enabled:
+                    stable, l0_ok = early_stop_monitor.update(
+                        val_metrics_only,
+                        target_l0=float(l0_target),
+                        cfg=early_stopping,
+                        eligible=step > early_stopping.minimum_steps,
+                    )
+                    stop_now = (
+                        early_stopping.enabled
+                        and step >= early_stopping.minimum_steps
+                        and early_stop_monitor.stable_intervals >= early_stopping.patience
+                    )
+                else:
+                    stable, l0_ok, stop_now = False, True, False
+
+                for split_name, metrics in all_eval_metrics.items():
+                    row = asdict(metrics)
+                    row["inactive_pct"] = row.pop("dead_pct")
+                    row.update(
+                        {
+                            "step": step,
+                            "language": split_name,
+                            "target_l0": float(l0_target),
+                            "validation_sample_tokens": metrics.n_tokens,
+                            "inactive_sample_tokens": min(
+                                validation_dead_tokens, metrics.n_tokens
+                            ),
+                            "stable_interval": stable,
+                            "l0_within_tolerance": l0_ok,
+                            "stable_intervals": early_stop_monitor.stable_intervals,
+                            "early_stop_triggered": stop_now,
+                        }
+                    )
+                    validation_f.write(json.dumps(row) + "\n")
+                validation_f.flush()
+                for split_name, metrics in all_eval_metrics.items():
+                    log.info(
+                        "eval step=%d split=%s fvu=%.6g l0=%.4f inactive@%d=%.2f%% D_IS=%.1f u_IS=%.2f%% D50=%.2f%% D90=%.2f%%",
+                        step,
+                        split_name,
+                        metrics.fvu,
+                        metrics.l0,
+                        min(validation_dead_tokens, metrics.n_tokens),
+                        metrics.dead_pct,
+                        metrics.d_is,
+                        metrics.u_is * 100.0,
+                        metrics.d_50,
+                        metrics.d_90,
+                    )
+                try:
+                    plot_validation_curves(
+                        validation_log_path,
+                        out_dir / "plots",
+                        title_prefix=f"{arch} d_sae={d_sae} L0*={l0_target}",
+                    )
+                except Exception as exc:  # plotting is non-load-bearing
+                    log.warning("Failed to refresh validation plot at step %d: %s", step, exc)
+                sae.train()
+                if stop_now:
+                    log.info(
+                        "Early stopping at step %d: both-language validation FVU plateaued "
+                        "for %d evaluations and L0 stayed within %.1f%% of target",
+                        step,
+                        early_stop_monitor.stable_intervals,
+                        100.0 * early_stopping.l0_relative_tolerance,
+                    )
+                    break
 
     elapsed = time.time() - t_start
     log.info("Training done in %.1fs", elapsed)
@@ -732,4 +1046,5 @@ def train_sae(
 
     if final_checkpoint is None:
         raise ValueError("Training produced no checkpoint; n_steps must be positive")
+    write_raw_export(completed_step)
     return final_checkpoint

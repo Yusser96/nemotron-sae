@@ -69,6 +69,26 @@ class _L0(torch.autograd.Function):
         return None, grad_out * grad_log_theta, None
 
 
+class _JumpReLUGate(torch.autograd.Function):
+    """Hard JumpReLU gate (B, D) with an STE on log-thresholds only."""
+
+    @staticmethod
+    def forward(ctx, z: torch.Tensor, log_theta: torch.Tensor, bandwidth: float) -> torch.Tensor:
+        theta = log_theta.exp()
+        gate = (z > theta).to(z.dtype)
+        ctx.save_for_backward(z, theta)
+        ctx.bandwidth = bandwidth
+        return gate
+
+    @staticmethod
+    def backward(ctx, grad_out: torch.Tensor):
+        z, theta = ctx.saved_tensors
+        eps = ctx.bandwidth
+        in_window = (z - theta).abs() < (eps / 2.0)
+        grad_log_theta = -(grad_out * (theta / eps) * in_window.to(z.dtype)).sum(dim=0)
+        return None, grad_log_theta, None
+
+
 class JumpReLUSAE(SparseAutoencoder):
     def __init__(
         self,
@@ -128,6 +148,10 @@ class JumpReLUSAE(SparseAutoencoder):
     def hard_l0(self, x: torch.Tensor) -> torch.Tensor:
         return (self.gate_input(x) > self.theta).to(x.dtype).sum(dim=-1).mean()
 
+    def jump_relu_gate(self, x: torch.Tensor) -> torch.Tensor:
+        """Evaluate hard JumpReLU gate (B, D) with straight-through estimator on log_theta."""
+        return _JumpReLUGate.apply(self.gate_input(x), self.log_theta, self.bandwidth)
+
     @torch.no_grad()
     def unfold_raw_export(self, input_scale: float) -> None:
         """Convert exported raw-activation weights to normalised training coordinates."""
@@ -179,3 +203,54 @@ class JumpReLUSAE(SparseAutoencoder):
             "b_dec": raw_b_dec.detach().cpu().contiguous(),
             "threshold": self.theta.detach().cpu().contiguous(),
         }
+
+
+def compute_inverse_simpson(
+    firing_frequency: torch.Tensor,
+    d_sae: int,
+    eps: float = 1e-12,
+) -> tuple[float, float]:
+    """Compute (D_IS, u_IS) from feature firing frequencies or counts.
+
+    Args:
+        firing_frequency: 1D Tensor of feature firing frequencies (or counts) across dictionary.
+        d_sae: Total number of features in dictionary.
+        eps: Small numerical stability constant.
+
+    Returns:
+        d_is: Inverse-Simpson effective dictionary size in [0, d_sae].
+        u_is: Dictionary utilization fraction in [0, 1] (d_is / d_sae).
+    """
+    total = float(firing_frequency.sum().item())
+    if total <= 0:
+        return 0.0, 0.0
+    probabilities = firing_frequency / (total + eps)
+    sum_pi_sq = float((probabilities.square().sum()).item())
+    d_is = 1.0 / (sum_pi_sq + eps)
+    u_is = d_is / float(d_sae)
+    return d_is, u_is
+
+
+def batch_inverse_simpson(
+    gate: torch.Tensor,
+    d_sae: int,
+    eps: float = 1e-12,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Differentiable batch-level Inverse-Simpson computation for training.
+
+    Args:
+        gate: (batch_size, d_sae) binary activation gate with STE gradient.
+        d_sae: Total number of features in dictionary.
+        eps: Small numerical stability constant.
+
+    Returns:
+        (d_is, u_is) as 0D tensors preserving autograd back through the gate.
+    """
+    p_hat = gate.mean(dim=0)
+    p_sum = p_hat.sum()
+    pi = p_hat / (p_sum + eps)
+    sum_pi_sq = (pi.square()).sum()
+    d_is = 1.0 / (sum_pi_sq + eps)
+    u_is = d_is / float(d_sae)
+    return d_is, u_is
+

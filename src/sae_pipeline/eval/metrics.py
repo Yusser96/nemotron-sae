@@ -18,10 +18,26 @@ import numpy as np
 import torch
 
 from sae_pipeline.sae.base import SparseAutoencoder
+from sae_pipeline.sae.jumprelu import compute_inverse_simpson
 
 
 @dataclass
 class ReconMetrics:
+    """Summary metrics from evaluation over an activation stream.
+
+    Units:
+        l0: Mean active latents per token (count).
+        fvu: Fraction of variance unexplained (ratio, lower is better).
+        dead_pct: Inactive latent percentage (0.0 to 100.0).
+        n_tokens: Total tokens evaluated.
+        d_is: Inverse-Simpson effective dictionary size in [0, d_sae].
+        u_is: Inverse-Simpson dictionary utilization fraction in [0.0, 1.0] (d_is / d_sae).
+        d_50: Percentage of dictionary accounting for 50% of activation mass (0.0 to 100.0).
+        d_90: Percentage of dictionary accounting for 90% of activation mass (0.0 to 100.0).
+        d_99: Percentage of dictionary accounting for 99% of activation mass (0.0 to 100.0).
+        q10..q99: Quantiles of firing frequency p_j among active latents (p_j > 0).
+    """
+
     l0: float
     fvu: float
     dead_pct: float
@@ -33,6 +49,17 @@ class ReconMetrics:
     firing_gini: float
     firing_entropy_nats: float
     firing_entropy_normalised: float
+    d_is: float = 0.0
+    u_is: float = 0.0
+    d_50: float = 0.0
+    d_90: float = 0.0
+    d_99: float = 0.0
+    q10: float = 0.0
+    q25: float = 0.0
+    q50: float = 0.0
+    q75: float = 0.0
+    q90: float = 0.0
+    q99: float = 0.0
 
 
 @dataclass
@@ -119,6 +146,7 @@ def streaming_reconstruction_metrics(
     activation_batches,
     *,
     dead_threshold_tokens: int = 50_000,
+    max_tokens: int | None = None,
     return_arrays: bool = False,
 ) -> ReconMetrics | tuple[ReconMetrics, ReconArrays]:
     """Evaluate without materialising the full latent matrix.
@@ -143,6 +171,12 @@ def streaming_reconstruction_metrics(
         if batch.numel() == 0:
             continue
         activations = batch.to(device, dtype=torch.float32, non_blocking=True)
+        if max_tokens is not None and max_tokens > 0:
+            remaining = max_tokens - n_total
+            if remaining <= 0:
+                break
+            if activations.shape[0] > remaining:
+                activations = activations[:remaining]
         f = sae.encode(activations)
         x_hat = sae.decode(f)
         active = f > 0
@@ -178,6 +212,31 @@ def streaming_reconstruction_metrics(
         (-(probabilities[positive] * probabilities[positive].log()).sum()).item()
     )
     entropy_normalised = entropy_nats / max(1.0e-12, float(torch.log(torch.tensor(float(sae.d_sae))).item()))
+
+    # Inverse-Simpson effective dictionary size and utilization fraction
+    d_is, u_is = compute_inverse_simpson(firing_frequency, sae.d_sae)
+
+    # Concentration: latents for 50%, 90%, 99% mass as percentage of dictionary
+    sorted_probs, _ = torch.sort(probabilities, descending=True)
+    cum_probs = torch.cumsum(sorted_probs, dim=0)
+    k50 = int((cum_probs < 0.50).sum().item()) + 1 if total_frequency > 0 else 0
+    k90 = int((cum_probs < 0.90).sum().item()) + 1 if total_frequency > 0 else 0
+    k99 = int((cum_probs < 0.99).sum().item()) + 1 if total_frequency > 0 else 0
+    d_50 = 100.0 * k50 / float(sae.d_sae)
+    d_90 = 100.0 * k90 / float(sae.d_sae)
+    d_99 = 100.0 * k99 / float(sae.d_sae)
+
+    # Quantiles of active firing frequencies
+    active_freqs = firing_frequency[firing_frequency > 0]
+    if active_freqs.numel() > 0:
+        q_tensor = torch.quantile(
+            active_freqs.float(),
+            torch.tensor([0.10, 0.25, 0.50, 0.75, 0.90, 0.99], device=active_freqs.device),
+        )
+        q10, q25, q50, q75, q90, q99 = [float(v.item()) for v in q_tensor]
+    else:
+        q10 = q25 = q50 = q75 = q90 = q99 = 0.0
+
     # FVU = sum_t ||x_t - x_hat_t||^2 / sum_t ||x_t - x_bar||^2 (a ratio of
     # sums over the same token set, so n_total cancels -- do not renormalise
     # the numerator and denominator by different divisors here).
@@ -195,13 +254,32 @@ def streaming_reconstruction_metrics(
         firing_gini=_gini(firing_frequency),
         firing_entropy_nats=entropy_nats,
         firing_entropy_normalised=entropy_normalised,
+        d_is=d_is,
+        u_is=u_is,
+        d_50=d_50,
+        d_90=d_90,
+        d_99=d_99,
+        q10=q10,
+        q25=q25,
+        q50=q50,
+        q75=q75,
+        q90=q90,
+        q99=q99,
     )
     if not return_arrays:
         return metrics
+    try:
+        arr_firing = firing_frequency.detach().cpu().float().numpy()
+        arr_l0 = torch.cat(l0_parts).numpy() if l0_parts else np.zeros((0,), dtype=np.int32)
+        arr_err = torch.cat(err_parts).numpy() if err_parts else np.zeros((0,), dtype=np.float32)
+    except RuntimeError:
+        arr_firing = np.array(firing_frequency.detach().cpu().float().tolist(), dtype=np.float32)
+        arr_l0 = np.array(torch.cat(l0_parts).tolist(), dtype=np.int32) if l0_parts else np.zeros((0,), dtype=np.int32)
+        arr_err = np.array(torch.cat(err_parts).tolist(), dtype=np.float32) if err_parts else np.zeros((0,), dtype=np.float32)
     arrays = ReconArrays(
-        firing_frequency=firing_frequency.detach().cpu().float().numpy(),
-        l0_per_token=torch.cat(l0_parts).numpy(),
-        recon_err_per_token=torch.cat(err_parts).numpy(),
+        firing_frequency=arr_firing,
+        l0_per_token=arr_l0,
+        recon_err_per_token=arr_err,
     )
     return metrics, arrays
 

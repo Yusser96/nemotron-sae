@@ -21,7 +21,7 @@ SAEArch = Literal["jumprelu"]
 CheckpointMode = Literal["finetune", "resume"]
 InputNormalization = Literal["none", "whole_vector"]
 CheckpointFormat = Literal["native", "raw_export"]
-LRSchedule = Literal["cosine_decay", "warmup_constant"]
+LRSchedule = Literal["cosine_decay", "warmup_constant", "cosine_warmup_constant"]
 ReconstructionLoss = Literal["coordinate_mean", "vector_sum"]
 FeatureUseStrategy = Literal[
     "none",
@@ -139,8 +139,12 @@ class SAECfg(BaseModel):
     residual_reset_anneal_steps: int = 10_000
     feature_frequency_penalty_multiplier: float = 1.0
     dead_freq_threshold: float = 0.1  # direct frequency penalization on >10% latents
+    inverse_simpson_floor: float = 0.0
+    inverse_simpson_max_scale: float = 0.0
+    inverse_simpson_warmup_steps: int = 50_000
     n_batches_in_buffer: int = 8
     ckpt_every: int = 5_000
+    eval_interval_steps: int | None = None
     log_every: int = 100
     ckpt_dir: Path = Path("outputs/checkpoints")
     checkpoint_source: str | Path | None = None
@@ -183,11 +187,18 @@ class SAECfg(BaseModel):
             raise ValueError("scale values must be positive")
         return v
 
-    @field_validator("feature_frequency_penalty_multiplier")
+    @field_validator("feature_frequency_penalty_multiplier", "inverse_simpson_max_scale")
     @classmethod
     def _frequency_multiplier_nonnegative(cls, v: float) -> float:
         if v < 0:
-            raise ValueError("feature_frequency_penalty_multiplier must be non-negative")
+            raise ValueError("Multiplier and regularizer scales must be non-negative")
+        return v
+
+    @field_validator("inverse_simpson_floor")
+    @classmethod
+    def _inverse_simpson_floor_valid(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("inverse_simpson_floor must be in [0, 1]")
         return v
 
     @field_validator("feature_frequency_ema_decay")
@@ -217,11 +228,18 @@ class SAECfg(BaseModel):
             raise ValueError("intervention step and count values must be positive")
         return v
 
-    @field_validator("l0_target_warmup_steps", "decoder_freeze_steps")
+    @field_validator("l0_target_warmup_steps", "decoder_freeze_steps", "inverse_simpson_warmup_steps")
     @classmethod
     def _optional_intervention_steps_nonnegative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("intervention step values must be non-negative")
+        return v
+
+    @field_validator("eval_interval_steps")
+    @classmethod
+    def _eval_interval_steps_positive(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("eval_interval_steps must be positive when set")
         return v
 
     @field_validator(
@@ -283,6 +301,41 @@ class EvalCfg(BaseModel):
     interp_enabled: bool = False  # auto-interp via OPENAI_API_KEY
 
 
+class EarlyStoppingCfg(BaseModel):
+    """Validation-based stopping for fine-tuning runs."""
+
+    enabled: bool = False
+    evaluation_interval_steps: int = 5_000
+    minimum_steps: int = 50_000
+    patience: int = 2
+    fvu_relative_tolerance: float = 0.01
+    ev_absolute_tolerance: float = 0.005
+    l0_relative_tolerance: float = 0.10
+
+    @field_validator("evaluation_interval_steps", "patience")
+    @classmethod
+    def _positive_early_stop_counts(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("early-stopping intervals and patience must be positive")
+        return value
+
+    @field_validator("minimum_steps")
+    @classmethod
+    def _nonnegative_early_stop_minimum(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("early-stopping minimum_steps cannot be negative")
+        return value
+
+    @field_validator(
+        "fvu_relative_tolerance", "ev_absolute_tolerance", "l0_relative_tolerance"
+    )
+    @classmethod
+    def _positive_early_stop_tolerances(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("early-stopping tolerances must be positive")
+        return value
+
+
 class LogCfg(BaseModel):
     use_wandb: bool = False
     wandb_project: str = "nemotron-sae"
@@ -303,6 +356,7 @@ class PipelineCfg(BaseModel):
     sae: SAECfg = Field(default_factory=SAECfg)
     target: TargetCfg
     eval: EvalCfg = Field(default_factory=EvalCfg)
+    early_stopping: EarlyStoppingCfg = Field(default_factory=EarlyStoppingCfg)
     log: LogCfg = Field(default_factory=LogCfg)
 
     @classmethod

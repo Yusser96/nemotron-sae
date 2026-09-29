@@ -2,15 +2,24 @@
 
 import math
 
+import pytest
 import torch
 
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
-from sae_pipeline.config import SAECfg
+from sae_pipeline.config import EarlyStoppingCfg, SAECfg
 from sae_pipeline.sae.train import (
+    _ValidationEarlyStop,
     _resample_underused_features,
     _scheduled_l0_target,
+    cosine_warmup_constant,
     quad_l0_loss,
 )
+
+
+def _validation_metric(l0: float, fvu: float):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(l0=l0, fvu=fvu)
 
 
 def test_jumprelu_forward_shape():
@@ -67,6 +76,15 @@ def test_vector_sum_reconstruction_is_coordinate_mean_times_width():
     torch.testing.assert_close(vector_sum, coordinate_mean * x.shape[-1])
 
 
+def test_cosine_warmup_then_constant_schedule():
+    peak_lr = 7.0e-5
+    warmup_steps = 1000
+    assert cosine_warmup_constant(0, peak_lr, warmup_steps) == pytest.approx(0.1 * peak_lr)
+    assert cosine_warmup_constant(500, peak_lr, warmup_steps) == pytest.approx(0.55 * peak_lr)
+    assert cosine_warmup_constant(1000, peak_lr, warmup_steps) == pytest.approx(peak_lr)
+    assert cosine_warmup_constant(1500, peak_lr, warmup_steps) == pytest.approx(peak_lr)
+
+
 def test_l0_penalty_scale_is_explicit():
     l0 = torch.tensor(12.0)
     base = quad_l0_loss(l0, 10)
@@ -78,6 +96,65 @@ def test_gradual_l0_schedule_reaches_final_target():
     assert _scheduled_l0_target(0, 10, cfg) == 16.7
     assert _scheduled_l0_target(15_000, 10, cfg) == 10.0
     assert 10.0 < _scheduled_l0_target(7_500, 10, cfg) < 16.7
+
+
+def test_bilingual_early_stop_requires_stable_fvu_and_target_l0():
+    cfg = EarlyStoppingCfg(
+        enabled=True,
+        fvu_relative_tolerance=0.01,
+        ev_absolute_tolerance=0.005,
+        l0_relative_tolerance=0.10,
+        patience=2,
+    )
+    monitor = _ValidationEarlyStop()
+    first = {lang: _validation_metric(10.0, 0.50) for lang in ("de", "en")}
+    second = {"de": _validation_metric(10.1, 0.498), "en": _validation_metric(9.9, 0.498)}
+    third = {"de": _validation_metric(10.0, 0.496), "en": _validation_metric(10.0, 0.496)}
+
+    stable, l0_ok = monitor.update(first, target_l0=10.0, cfg=cfg)
+    assert not stable and l0_ok and monitor.stable_intervals == 0
+    stable, l0_ok = monitor.update(second, target_l0=10.0, cfg=cfg)
+    assert stable and l0_ok and monitor.stable_intervals == 1
+    stable, l0_ok = monitor.update(third, target_l0=10.0, cfg=cfg)
+    assert stable and l0_ok and monitor.stable_intervals == 2
+
+
+def test_bilingual_early_stop_resets_if_any_language_is_unstable_or_l0_misses():
+    cfg = EarlyStoppingCfg(enabled=True)
+    monitor = _ValidationEarlyStop()
+    monitor.update(
+        {lang: _validation_metric(10.0, 0.50) for lang in ("de", "en")},
+        target_l0=10.0,
+        cfg=cfg,
+    )
+    stable, _ = monitor.update(
+        {"de": _validation_metric(10.0, 0.499), "en": _validation_metric(10.0, 0.45)},
+        target_l0=10.0,
+        cfg=cfg,
+    )
+    assert not stable and monitor.stable_intervals == 0
+    stable, l0_ok = monitor.update(
+        {lang: _validation_metric(15.0, 0.499) for lang in ("de", "en")},
+        target_l0=10.0,
+        cfg=cfg,
+    )
+    assert not stable and not l0_ok and monitor.stable_intervals == 0
+
+
+def test_early_stop_uses_post_warmup_evaluations_as_its_baseline():
+    cfg = EarlyStoppingCfg(enabled=True, patience=2)
+    monitor = _ValidationEarlyStop()
+    warmup_end = {lang: _validation_metric(10.0, 0.50) for lang in ("de", "en")}
+    first_post_warmup = {lang: _validation_metric(10.0, 0.499) for lang in ("de", "en")}
+
+    stable, _ = monitor.update(
+        warmup_end, target_l0=10.0, cfg=cfg, eligible=False
+    )
+    assert not stable and monitor.stable_intervals == 0
+    stable, _ = monitor.update(
+        first_post_warmup, target_l0=10.0, cfg=cfg, eligible=True
+    )
+    assert stable and monitor.stable_intervals == 1
 
 
 def test_centred_coordinates_preserve_initial_function():

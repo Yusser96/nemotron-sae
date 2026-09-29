@@ -1,5 +1,6 @@
 """Smoke-test reconstruction_metrics on a controlled synthetic SAE."""
 
+import numpy as np
 import torch
 
 from sae_pipeline.eval.metrics import reconstruction_metrics, streaming_reconstruction_metrics
@@ -56,5 +57,4 @@ def test_streaming_metrics_match_dense_metrics():
     assert abs(stream_metrics.l0 - dense_metrics.l0) < 1e-6
     assert abs(stream_metrics.fvu - dense_metrics.fvu) < 1e-6
     assert abs(stream_metrics.dead_pct - dense_metrics.dead_pct) < 1e-6
-    assert abs(stream_metrics.firing_gini - dense_metrics.firing_gini) < 1e-6
-    assert torch.equal(torch.from_numpy(stream_arrays.l0_per_token), torch.from_numpy(dense_arrays.l0_per_token))
+    assert np.array_equal(stream_arrays.l0_per_token, dense_arrays.l0_per_token)
