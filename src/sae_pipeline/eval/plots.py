@@ -207,6 +207,81 @@ def plot_training_curves(
     return written
 
 
+def plot_validation_curves(
+    jsonl_path: str | Path,
+    out_dir: str | Path,
+    *,
+    title_prefix: str = "",
+) -> list[Path]:
+    """Plot language-separated held-out metrics logged during training."""
+    jsonl_path = Path(jsonl_path)
+    out_dir = Path(out_dir)
+    rows: list[dict] = []
+    if not jsonl_path.exists():
+        return []
+    with jsonl_path.open() as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    if not rows:
+        return []
+
+    languages = sorted({str(row["language"]) for row in rows})
+    has_is = any("d_is" in row or "u_is" in row for row in rows)
+    metric_defs = [
+        ("fvu", "FVU (lower is better)", "Ratio"),
+        ("l0", "Mean active latents per token", "Latents"),
+        ("inactive_pct", "Inactive features in finite sample (%)", "Percent"),
+    ]
+    if has_is:
+        metric_defs.append(
+            ("d_is", "Effective Dictionary Size ($D_{\\mathrm{IS}}$)", "Active Latents")
+        )
+
+    fig, axes = plt.subplots(1, len(metric_defs), figsize=(5.2 * len(metric_defs), 4.8), constrained_layout=True)
+    if len(metric_defs) == 1:
+        axes = [axes]
+    if title_prefix:
+        fig.suptitle(f"{title_prefix}: held-out validation", fontsize=14)
+
+    for axis, (key, title, y_label) in zip(axes, metric_defs):
+        for language in languages:
+            language_rows = sorted(
+                (row for row in rows if str(row["language"]) == language),
+                key=lambda row: int(row["step"]),
+            )
+            values_key = key
+            if key == "inactive_pct" and any(key not in row for row in language_rows):
+                values_key = "dead_pct"
+            y_vals = [float(row[values_key]) for row in language_rows]
+            axis.plot(
+                [int(row["step"]) for row in language_rows],
+                y_vals,
+                marker="o",
+                linewidth=1.8,
+                label=language.upper(),
+            )
+        if key == "l0":
+            target = rows[-1].get("target_l0")
+            if target is not None:
+                axis.axhline(
+                    float(target), color="black", linestyle="--", linewidth=1,
+                    label=f"target L0 = {target}",
+                )
+        axis.set_title(title)
+        axis.set_xlabel("Training step")
+        axis.set_ylabel(y_label)
+        axis.grid(alpha=0.3)
+        axis.legend(loc="best", fontsize=9)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "validation_evolution.png"
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+    log.info("Wrote %s", path)
+    return [path]
+
+
 # ---------------------------------------------------------------------------
 # Eval plots
 # ---------------------------------------------------------------------------

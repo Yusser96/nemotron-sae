@@ -5,7 +5,11 @@ from pathlib import Path
 
 import numpy as np
 
-from sae_pipeline.eval.plots import plot_eval_summary, plot_training_curves
+from sae_pipeline.eval.plots import (
+    plot_eval_summary,
+    plot_training_curves,
+    plot_validation_curves,
+)
 
 
 def _write_fake_train_log(path: Path, n_steps: int = 200) -> None:
@@ -77,3 +81,51 @@ def test_plot_training_handles_empty_log(tmp_path: Path):
     # Empty input should not produce a file
     assert not (out_dir / "training_overview.png").exists() or \
            (out_dir / "training_overview.png").stat().st_size == 0
+
+
+def test_plot_validation_curves_separates_languages(tmp_path: Path):
+    log_path = tmp_path / "validation_log.jsonl"
+    rows = []
+    for step, fvu in ((10_000, 0.6), (20_000, 0.5)):
+        for language in ("de", "en"):
+            rows.append(
+                {
+                    "step": step,
+                    "language": language,
+                    "fvu": fvu + (0.01 if language == "de" else 0.0),
+                    "l0": 10.0,
+                    "inactive_pct": 80.0,
+                    "target_l0": 10,
+                }
+            )
+    log_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    out_dir = tmp_path / "plots"
+    written = plot_validation_curves(log_path, out_dir, title_prefix="test")
+    assert written == [out_dir / "validation_evolution.png"]
+    assert written[0].stat().st_size > 5_000
+
+
+def test_plot_validation_curves_with_inverse_simpson(tmp_path: Path):
+    log_path = tmp_path / "validation_log.jsonl"
+    rows = []
+    for step, fvu in ((10_000, 0.6), (20_000, 0.5)):
+        for language in ("de", "en", "train"):
+            rows.append(
+                {
+                    "step": step,
+                    "language": language,
+                    "fvu": fvu,
+                    "l0": 10.0,
+                    "inactive_pct": 50.0,
+                    "d_is": 150.0,
+                    "u_is": 0.009,
+                    "target_l0": 10,
+                }
+            )
+    log_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    out_dir = tmp_path / "plots"
+    written = plot_validation_curves(log_path, out_dir, title_prefix="test_is")
+    assert written == [out_dir / "validation_evolution.png"]
+    assert written[0].stat().st_size > 5_000
