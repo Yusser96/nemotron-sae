@@ -231,7 +231,7 @@ def main() -> None:
     if args.inverse_simpson_warmup_steps is not None:
         checkpoint_updates["inverse_simpson_warmup_steps"] = args.inverse_simpson_warmup_steps
     if checkpoint_updates:
-        sae_cfg = cfg.sae.model_copy(update=checkpoint_updates)
+        sae_cfg = type(cfg.sae).model_validate({**cfg.sae.model_dump(), **checkpoint_updates})
     train_sae(
         cfg=sae_cfg,
         cache_dir=cache_dir,

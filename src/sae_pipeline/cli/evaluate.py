@@ -128,7 +128,10 @@ def main() -> None:
             )
         with norm_path.open() as handle:
             input_scale = float(json.load(handle)["input_scale"])
+    if checkpoint_format == "canonical":
         centre_path = ckpt.parent / "centering.json"
+        if cfg.sae.activation_centering == "mean" and not centre_path.exists():
+            raise FileNotFoundError(f"Centred checkpoint requires metadata at {centre_path}")
         if centre_path.exists():
             with centre_path.open() as handle:
                 input_center = torch.tensor(
