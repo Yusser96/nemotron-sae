@@ -31,6 +31,28 @@ def test_jumprelu_forward_shape():
     assert f.shape == (64, d_sae)
 
 
+def test_reconstruction_and_gate_have_distinct_log_threshold_gradients():
+    from sae_pipeline.sae.jumprelu import _JumpReLU, _JumpReLUGate, _L0
+
+    # Independent analytical expectations from the JumpReLU jump magnitude
+    # and the log-threshold chain rule; finite differences cannot test an STE.
+    theta = torch.tensor([0.2, 0.7], dtype=torch.float64)
+    z = torch.stack([theta - 0.01, theta + 0.01, theta + 0.1]).requires_grad_()
+    rho = theta.log().requires_grad_()
+    bandwidth = 0.1
+    weights = torch.tensor([[1., 2.], [3., 4.], [5., 6.]], dtype=torch.float64)
+    out = _JumpReLU.apply(z, rho, bandwidth)
+    grad_z, grad_rho = torch.autograd.grad((out * weights).sum(), (z, rho))
+    torch.testing.assert_close(grad_rho, -theta.square() / bandwidth * weights[:2].sum(0))
+    torch.testing.assert_close(grad_z, weights * (z > theta))
+    gate = _JumpReLUGate.apply(z, rho, bandwidth)
+    gate_z, gate_rho = torch.autograd.grad((gate * weights).sum(), (z, rho), allow_unused=True)
+    assert gate_z is None
+    torch.testing.assert_close(gate_rho, -theta / bandwidth * weights[:2].sum(0))
+    grad_l0, = torch.autograd.grad(_L0.apply(z, rho, bandwidth), (rho,))
+    torch.testing.assert_close(grad_l0, -theta / bandwidth * (2. / 3.))
+
+
 def test_jumprelu_decoder_unit_norm_after_renorm():
     sae = JumpReLUSAE(d_in=16, d_sae=128)
     sae.W_dec.data.mul_(3.7)  # break unit norm

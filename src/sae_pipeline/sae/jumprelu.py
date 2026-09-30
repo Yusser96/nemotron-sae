@@ -5,7 +5,7 @@ Activation:
 Reconstruction:
     x̂ = W_dec f + b_dec
 Loss (quadratic L0 penalty around target L0*):
-    L = ‖x − x̂‖² + λ · (2 / L0*) · (‖f‖₀ − L0*)²
+    L = ‖x − x̂‖² + λ · (‖f‖₀ − L0*)² / (2 L0*)
 
 Both the Heaviside H and the L0 norm are non-differentiable; a
 rectangular-kernel straight-through estimator (bandwidth ε) is applied to the
@@ -58,7 +58,11 @@ class _JumpReLU(torch.autograd.Function):
     def backward(ctx, grad_out: torch.Tensor):
         z, theta, active = ctx.saved_tensors
         grad_z = grad_out * active.to(grad_out.dtype)
-        grad_log_theta = _log_theta_ste_gradient(z, theta, grad_out, ctx.bandwidth)
+        # JumpReLU has a jump of theta, whereas the binary gate has a jump
+        # of one. The helper supplies the additional dtheta/dlog_theta factor.
+        grad_log_theta = _log_theta_ste_gradient(
+            z, theta, grad_out * theta, ctx.bandwidth
+        )
         return grad_z, grad_log_theta, None
 
 
