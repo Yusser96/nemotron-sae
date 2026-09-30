@@ -58,3 +58,31 @@ def test_streaming_metrics_match_dense_metrics():
     assert abs(stream_metrics.fvu - dense_metrics.fvu) < 1e-6
     assert abs(stream_metrics.dead_pct - dense_metrics.dead_pct) < 1e-6
     assert np.array_equal(stream_arrays.l0_per_token, dense_arrays.l0_per_token)
+
+
+def test_fvu_handles_small_variance_around_a_large_mean():
+    x = torch.tensor([[9999.0], [10000.0], [10001.0], [10002.0]])
+    sae = JumpReLUSAE(d_in=1, d_sae=2)
+    with torch.no_grad():
+        sae.W_enc.zero_()
+        sae.b_dec.fill_(10000.5)
+    metrics = streaming_reconstruction_metrics(sae, (x[:1], x[1:3], x[3:]))
+    assert abs(metrics.fvu - 1.0) < 1e-10
+    assert metrics.support_n_tokens == 4
+
+
+def test_validation_preprocessing_does_not_modify_cpu_shards():
+    from types import SimpleNamespace
+    from sae_pipeline.sae.train import _validation_batches
+
+    shard = torch.arange(12, dtype=torch.float32).reshape(6, 2)
+    original = shard.clone()
+    reader = SimpleNamespace(manifest=SimpleNamespace(total_tokens=6), iter_shards=lambda: iter([shard]))
+    def probe():
+        return torch.cat(list(_validation_batches(
+            reader, n_tokens=6, batch_size=2, input_scale=0.5,
+            input_center=torch.ones(2), device="cpu",
+        )))
+    torch.testing.assert_close(probe(), original * 0.5 - 1)
+    torch.testing.assert_close(probe(), original * 0.5 - 1)
+    assert torch.equal(shard, original)

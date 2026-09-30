@@ -212,7 +212,8 @@ def _validation_batches(
             if seen >= n_tokens:
                 return
             take = min(batch_size, n_tokens - seen)
-            batch = shard[start : start + take].to(device, dtype=torch.float32)
+            # CPU float32 caches may alias the mapped shard after .to().
+            batch = shard[start : start + take].to(device, dtype=torch.float32, copy=True)
             if input_scale != 1.0:
                 batch.mul_(input_scale)
             if input_center is not None:
@@ -731,9 +732,10 @@ def train_sae(
         activation_center = torch.tensor(centre.mean, device=device, dtype=torch.float32)
         if activation_center.numel() != d_in:
             raise ValueError("Activation centre has the wrong dimension")
-        with torch.no_grad():
-            # For x_c=x-mu, shifting b_dec by -mu preserves the initial gate.
-            sae.b_dec.sub_(activation_center)
+        if cfg.checkpoint_mode != "resume" or source_checkpoint is None:
+            with torch.no_grad():
+                # A resumed canonical checkpoint is already centred.
+                sae.b_dec.sub_(activation_center)
         if centering_path(out_dir) != centering_path(metadata_dir):
             shutil.copyfile(centering_path(metadata_dir), centering_path(out_dir))
 
@@ -854,7 +856,7 @@ def train_sae(
                 if cfg.reconstruction_loss == "vector_sum"
                 else squared_error.mean()
             )
-            mse = reconstruction_loss / x.shape[-1]
+            mse = squared_error.mean()
             l0_diff = sae.l0(x)  # type: ignore[attr-defined]
             target_l0 = _scheduled_l0_target(step, l0_target, cfg)
             if reset_target_step is not None:

@@ -60,6 +60,7 @@ class ReconMetrics:
     q75: float = 0.0
     q90: float = 0.0
     q99: float = 0.0
+    support_n_tokens: int = 0
 
 
 @dataclass
@@ -161,8 +162,8 @@ def streaming_reconstruction_metrics(
     support_seen = 0
     l0_sum = 0.0
     err_sum = 0.0
-    x_sum = None
-    x_sq_sum = None
+    x_mean = None
+    variance_sum = torch.zeros((), dtype=torch.float64, device=device)
     support_counts = torch.zeros(sae.d_sae, dtype=torch.float64, device=device)
     l0_parts: list[torch.Tensor] = []
     err_parts: list[torch.Tensor] = []
@@ -184,13 +185,24 @@ def streaming_reconstruction_metrics(
         err_per_token = (activations - x_hat).pow(2).sum(dim=-1)
 
         n_batch = activations.shape[0]
-        n_total += n_batch
         l0_sum += float(l0_per_token.sum().item())
         err_sum += float(err_per_token.sum().item())
-        batch_sum = activations.sum(dim=0, dtype=torch.float64)
-        batch_sq_sum = activations.square().sum(dim=0, dtype=torch.float64)
-        x_sum = batch_sum if x_sum is None else x_sum + batch_sum
-        x_sq_sum = batch_sq_sum if x_sq_sum is None else x_sq_sum + batch_sq_sum
+        # Merge centred second moments in float64. E[x²] - E[x]² loses
+        # small variances for activation streams with large nonzero means.
+        batch_x = activations.to(torch.float64)
+        batch_mean = batch_x.mean(dim=0)
+        batch_variance_sum = (batch_x - batch_mean).square().sum()
+        if x_mean is None:
+            x_mean = batch_mean
+            variance_sum = batch_variance_sum
+        else:
+            delta = batch_mean - x_mean
+            combined_n = n_total + n_batch
+            variance_sum += batch_variance_sum + delta.square().sum() * (
+                n_total * n_batch / combined_n
+            )
+            x_mean += delta * (n_batch / combined_n)
+        n_total += n_batch
 
         take = min(n_batch, max(0, dead_threshold_tokens - support_seen))
         if take:
@@ -200,7 +212,7 @@ def streaming_reconstruction_metrics(
             l0_parts.append(l0_per_token.detach().cpu().to(torch.int32))
             err_parts.append(err_per_token.detach().cpu().float())
 
-    if n_total == 0 or x_sum is None or x_sq_sum is None:
+    if n_total == 0 or x_mean is None:
         raise ValueError("Cannot evaluate an empty activation stream")
     n_float = float(n_total)
     firing_frequency = support_counts / max(1, support_seen)
@@ -243,7 +255,6 @@ def streaming_reconstruction_metrics(
     # FVU = sum_t ||x_t - x_hat_t||^2 / sum_t ||x_t - x_bar||^2 (a ratio of
     # sums over the same token set, so n_total cancels -- do not renormalise
     # the numerator and denominator by different divisors here).
-    variance_sum = x_sq_sum.sum() - x_sum.square().sum() / n_float
     fvu = err_sum / max(float(variance_sum.item()), 1.0e-12)
     metrics = ReconMetrics(
         l0=l0_sum / n_float,
@@ -268,6 +279,7 @@ def streaming_reconstruction_metrics(
         q75=q75,
         q90=q90,
         q99=q99,
+        support_n_tokens=support_seen,
     )
     if not return_arrays:
         return metrics

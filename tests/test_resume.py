@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+import pytest
 from safetensors.torch import load_file, save_file
 
 from sae_pipeline.cache.manifest import CacheManifest
@@ -31,7 +32,8 @@ def _make_cache(path: Path) -> None:
         writer.add(activations)
 
 
-def test_interrupted_resume_matches_uninterrupted_cpu_run(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("centering", ["none", "mean"])
+def test_interrupted_resume_matches_uninterrupted_cpu_run(tmp_path: Path, monkeypatch, centering):
     # Plotting is unrelated to training continuity and dominates this tiny test.
     monkeypatch.setattr("sae_pipeline.sae.train.plot_training_curves", lambda **_: None)
     cache = tmp_path / "cache"
@@ -48,6 +50,7 @@ def test_interrupted_resume_matches_uninterrupted_cpu_run(tmp_path: Path, monkey
         log_every=1,
         n_batches_in_buffer=3,
         keep_last_checkpoints=3,
+        activation_centering=centering,
     )
 
     torch.manual_seed(777)
