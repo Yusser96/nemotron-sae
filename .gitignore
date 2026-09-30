@@ -18,6 +18,7 @@ wandb/
 *.ckpt
 
 # Generated reports, results, and local experiment runs.
+data/
 reports/
 results/
 experiments/
