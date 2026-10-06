@@ -26,7 +26,7 @@ from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.hf import HFHookExtractor
-from sae_pipeline.extraction.vllm_layout import require_residual_site
+from sae_pipeline.extraction.vllm_worker import hookable
 from sae_pipeline.hooks.components import site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import dump_topology, enumerate_hooks
@@ -103,9 +103,10 @@ def main() -> None:
     if use_vllm:
         from sae_pipeline.extraction.vllm import VLLMExtractor
 
-        # Fail before loading anything if a site is not on the residual stream.
-        for spec, _site in requests.values():
-            require_residual_site(spec)
+        # Fail before loading anything if a site has no module boundary in vLLM.
+        unsupported = [slug for slug, (spec, _site) in requests.items() if not hookable(spec)]
+        if unsupported:
+            raise SystemExit(f"vLLM extraction cannot hook {unsupported}")
         tokenizer = load_tokenizer(cfg.model)
         # Start the engine before the SAEs allocate: vLLM sizes itself from
         # extraction.vllm.gpu_memory_utilization at startup.

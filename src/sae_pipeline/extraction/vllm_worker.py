@@ -19,9 +19,16 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from sae_pipeline.hooks.components import ComponentSpec
+
 # Component kind -> substring of the mixer class name it must be hooked on.
 MIXER_KINDS = {"mamba_out": "Mamba", "attn_out_prelinear": "Attention", "moe_out": "MoE"}
 RESIDUAL_KINDS = ("resid_pre", "resid_post")
+
+
+def hookable(spec: ComponentSpec) -> bool:
+    """Whether a site has a module boundary to hook in vLLM's NemotronH."""
+    return spec.expert_idx is None and spec.head_idx is None and (spec.kind in RESIDUAL_KINDS or spec.kind in MIXER_KINDS)
 
 
 def _arg(args: tuple, kwargs: dict, index: int, name: str):

@@ -1,127 +1,120 @@
-"""VLLMExtractor against a fake engine that writes files like vLLM's connector."""
+"""VLLMExtractor end to end against a fake engine running the real worker extension."""
 
-import itertools
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors.torch import save_file
 
-from sae_pipeline.config import ActivationSinkCfg, VLLMCfg
+from sae_pipeline.config import ActivationSinkCfg, PipelineCfg, VLLMCfg
 from sae_pipeline.extraction.vllm import VLLMExtractor
+from sae_pipeline.extraction.vllm_worker import ActivationHookExtension
 from sae_pipeline.hooks.components import ComponentSpec
+from tests.test_vllm_worker_extension import _CausalLM
 
-D = 4
 SPECS = {
-    "L2_resid_post": ComponentSpec.parse(2, "resid_post"),
-    "L0_resid_pre": ComponentSpec.parse(0, "resid_pre"),
+    "L0_mamba_out": ComponentSpec.parse(0, "mamba_out"),
+    "L1_moe_out": ComponentSpec.parse(1, "moe_out"),
+    "L0_resid_post": ComponentSpec.parse(0, "resid_post"),
 }
 
 
-def _hidden(token: int, layer_id: int) -> torch.Tensor:
-    return torch.full((D,), float(token * 100 + layer_id))
+class _FakeEngine(ActivationHookExtension):
+    """Batches every call's prompts into one forward pass, plus one padding row."""
 
-
-class _FakeEngine:
-    def __init__(self, *, shuffle: bool = False, **engine_kwargs) -> None:
+    def __init__(self, **engine_kwargs) -> None:
+        torch.manual_seed(0)
         self.kwargs = engine_kwargs
-        self.shuffle = shuffle
+        self.model_runner = SimpleNamespace(model=_CausalLM())
         self.calls: list[int] = []
-        self.counter = itertools.count()
-        self.directory = Path(engine_kwargs["kv_transfer_config"]["kv_connector_extra_config"]["shared_storage_path"])
-        self.layer_ids = engine_kwargs["speculative_config"]["draft_model_config"]["hf_config"][
-            "eagle_aux_hidden_state_layer_ids"
-        ]
+
+    def collective_rpc(self, method, args=()):
+        return [getattr(self, method)(*args)]
 
     def generate(self, prompts, sampling_params, use_tqdm):
         assert sampling_params == "one-token"
         self.calls.append(len(prompts))
-        outputs = []
-        for prompt in prompts:
-            tokens = prompt["prompt_token_ids"] + [0]  # plus the generated token
-            hidden = torch.stack([torch.stack([_hidden(t, l) for l in self.layer_ids]) for t in tokens])
-            path = self.directory / f"req-{next(self.counter)}.safetensors"
-            save_file({"token_ids": torch.tensor(tokens), "hidden_states": hidden}, str(path))
-            outputs.append(SimpleNamespace(kv_transfer_params={"hidden_states_path": str(path)}))
-        return outputs[::-1] if self.shuffle else outputs
+        ids = [token for prompt in prompts for token in prompt["prompt_token_ids"]] + [0]
+        positions = [p for prompt in prompts for p in range(len(prompt["prompt_token_ids"]))] + [0]
+        with torch.no_grad():
+            self.model_runner.model(torch.tensor(ids), torch.tensor(positions))
+        return [object() for _ in prompts]
 
 
-def _extractor(tmp_path, *, shuffle=False, sequences_per_call=2) -> VLLMExtractor:
+def _extractor(tmp_path, *, sequences_per_call=2) -> VLLMExtractor:
     return VLLMExtractor(
         model_name="example/model",
         dtype="bfloat16",
         trust_remote_code=True,
         specs=SPECS,
-        num_hidden_layers=4,
         seq_len=3,
         vllm_cfg=VLLMCfg(sequences_per_call=sequences_per_call),
         sink_cfg=ActivationSinkCfg(path=str(tmp_path / "sink")),
-        engine_factory=lambda **kwargs: _FakeEngine(shuffle=shuffle, **kwargs),
+        engine_factory=_FakeEngine,
         sampling_params_factory=lambda: "one-token",
     )
 
 
-def test_engine_is_configured_for_hidden_state_extraction(tmp_path):
-    kwargs = _extractor(tmp_path).llm.kwargs
+def _reference(model, token_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Each sequence run on its own, outside vLLM."""
+    rows = {slug: [] for slug in SPECS}
+    with torch.no_grad():
+        for row in token_ids:
+            embedded = model.model.embed(row)
+            mamba = model.model.layers[0].mixer(embedded)
+            rows["L0_mamba_out"].append(mamba)
+            rows["L0_resid_post"].append(mamba + embedded)
+            rows["L1_moe_out"].append(model.model.layers[1].mixer(mamba + embedded))
+    return {slug: torch.cat(values) for slug, values in rows.items()}
 
+
+def test_engine_is_configured_for_hooked_whole_prompt_batches(tmp_path):
+    kwargs = _extractor(tmp_path, sequences_per_call=8).llm.kwargs
+
+    assert kwargs["worker_extension_cls"] == "sae_pipeline.extraction.vllm_worker.ActivationHookExtension"
     assert kwargs["enable_chunked_prefill"] is False
-    assert kwargs["enable_prefix_caching"] is False
-    assert kwargs["pipeline_parallel_size"] == 1
+    assert kwargs["enforce_eager"] is True
     assert kwargs["max_model_len"] == 4
-    assert kwargs["speculative_config"]["method"] == "extract_hidden_states"
-    assert kwargs["speculative_config"]["draft_model_config"]["hf_config"]["eagle_aux_hidden_state_layer_ids"] == [0, 3]
-    assert kwargs["kv_transfer_config"]["kv_connector"] == "ExampleHiddenStatesConnector"
+    assert kwargs["max_num_batched_tokens"] == 8 * 4
 
 
-def test_extract_returns_sequence_major_site_activations_and_consumes_files(tmp_path):
+def test_extract_returns_each_sites_rows_in_submission_order_and_consumes_files(tmp_path):
     extractor = _extractor(tmp_path)
     token_ids = torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
 
     batch = extractor.extract(token_ids)
 
-    assert extractor.llm.calls == [2, 1]  # sequences_per_call=2
-    flat = token_ids.reshape(-1).tolist()
-    torch.testing.assert_close(batch.activations["L0_resid_pre"], torch.stack([_hidden(t, 0) for t in flat]))
-    torch.testing.assert_close(batch.activations["L2_resid_post"], torch.stack([_hidden(t, 3) for t in flat]))
+    assert extractor.llm.calls == [2, 1]
+    expected = _reference(extractor.llm.model_runner.model, token_ids)
+    for slug in SPECS:
+        torch.testing.assert_close(batch.activations[slug], expected[slug])
     assert list(extractor.sink.path.iterdir()) == []
     extractor.close()
     assert not extractor.sink.path.exists()
 
 
-def test_outputs_matched_to_the_wrong_prompt_are_detected(tmp_path):
-    extractor = _extractor(tmp_path, shuffle=True)
+def test_sites_without_a_module_boundary_are_rejected_before_starting_vllm(tmp_path):
+    with pytest.raises(ValueError, match="L3_expert_7"):
+        VLLMExtractor(
+            model_name="example/model",
+            dtype="bfloat16",
+            trust_remote_code=True,
+            specs={"L3_expert_7": ComponentSpec.parse(3, "expert.7")},
+            seq_len=3,
+            vllm_cfg=VLLMCfg(),
+            sink_cfg=ActivationSinkCfg(path=str(tmp_path / "sink")),
+            engine_factory=lambda **_: pytest.fail("engine must not start"),
+        )
 
-    with pytest.raises(ValueError, match="token_ids"):
-        extractor.extract(torch.tensor([[1, 2, 3], [4, 5, 6]]))
 
-
-def test_only_residual_sites_are_supported(tmp_path):
-    extractor = _extractor(tmp_path)
-
-    assert extractor.supports(ComponentSpec.parse(1, "resid_post"))
-    assert not extractor.supports(ComponentSpec.parse(1, "moe_out"))
-    assert not extractor.supports(ComponentSpec.parse(9, "resid_post"))
-
-
-def test_from_config_reads_the_layer_count_and_settings(tmp_path, monkeypatch):
-    from transformers import AutoConfig
-
-    from sae_pipeline.config import PipelineCfg
-
-    monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *_a, **_k: SimpleNamespace(num_hidden_layers=4))
+def test_from_config_takes_the_engine_and_sink_settings(tmp_path):
     cfg = PipelineCfg.from_yaml("configs/dev.yaml").with_overrides(
         **{"model.name": "example/model", "extraction.sink.path": str(tmp_path / "sink"), "data.seq_len": 3}
     )
 
     extractor = VLLMExtractor.from_config(
-        cfg,
-        SPECS,
-        engine_factory=lambda **kwargs: _FakeEngine(**kwargs),
-        sampling_params_factory=lambda: "one-token",
+        cfg, SPECS, engine_factory=_FakeEngine, sampling_params_factory=lambda: "one-token"
     )
 
-    assert extractor.num_hidden_layers == 4
     assert extractor.llm.kwargs["model"] == "example/model"
     assert extractor.llm.kwargs["max_model_len"] == 4
     assert extractor.sink.path == tmp_path / "sink"

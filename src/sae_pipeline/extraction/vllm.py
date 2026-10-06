@@ -1,10 +1,10 @@
-"""vLLM extraction backend: native hidden-state extraction, written through a sink.
+"""vLLM extraction backend: forward hooks inside the vLLM workers.
 
-Uses vLLM's ``extract_hidden_states`` speculative method together with the
-``ExampleHiddenStatesConnector``, which writes one safetensors file per
-request into the sink directory. Each token sequence is one request, sent as
-token ids (no re-tokenisation) with a single generated token. Only
-residual-stream sites are available (see ``vllm_layout``).
+The engine is started with ``vllm_worker.ActivationHookExtension`` as its
+``worker_extension_cls``; hooks are installed once over ``collective_rpc``.
+Each token sequence is one request, sent as token ids (no re-tokenisation)
+with a single generated token; the workers write every forward pass's rows to
+the sink, and the driver reassembles them per prompt.
 """
 
 from __future__ import annotations
@@ -15,18 +15,18 @@ from typing import Any
 import torch
 
 from sae_pipeline.config import ActivationSinkCfg, PipelineCfg, VLLMCfg
-from sae_pipeline.extraction.base import ActivationBatch, UnsupportedComponentError
+from sae_pipeline.extraction.base import ActivationBatch
 from sae_pipeline.extraction.sink import HiddenStateSink
-from sae_pipeline.extraction.vllm_layout import VLLMLayout, residual_layer_id
+from sae_pipeline.extraction.vllm_worker import hookable
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import normalize_hf_source
+
+WORKER_EXTENSION = "sae_pipeline.extraction.vllm_worker.ActivationHookExtension"
 
 
 def _vllm_engine(**engine_kwargs: Any) -> Any:
     from vllm import LLM
-    from vllm.config.kv_transfer import KVTransferConfig
 
-    engine_kwargs["kv_transfer_config"] = KVTransferConfig(**engine_kwargs["kv_transfer_config"])
     return LLM(**engine_kwargs)
 
 
@@ -44,7 +44,6 @@ class VLLMExtractor:
         dtype: str,
         trust_remote_code: bool,
         specs: dict[str, ComponentSpec],
-        num_hidden_layers: int,
         seq_len: int,
         vllm_cfg: VLLMCfg,
         sink_cfg: ActivationSinkCfg,
@@ -52,8 +51,10 @@ class VLLMExtractor:
         engine_factory: Callable[..., Any] = _vllm_engine,
         sampling_params_factory: Callable[[], Any] = _one_token_sampling,
     ) -> None:
-        self.num_hidden_layers = num_hidden_layers
-        self.layout = VLLMLayout.from_specs(specs, num_hidden_layers)
+        unsupported = [slug for slug, spec in specs.items() if not hookable(spec)]
+        if unsupported:
+            raise ValueError(f"vLLM extraction cannot hook {unsupported}")
+        self.slugs = list(specs)
         self.sink = HiddenStateSink(sink_cfg)
         self.capture_device = capture_device
         self.sequences_per_call = vllm_cfg.sequences_per_call
@@ -62,31 +63,18 @@ class VLLMExtractor:
             "dtype": dtype,
             "trust_remote_code": trust_remote_code,
             "tensor_parallel_size": vllm_cfg.tensor_parallel_size,
-            # Aux hidden-state ids are relative to the first local layer.
-            "pipeline_parallel_size": 1,
             "gpu_memory_utilization": vllm_cfg.gpu_memory_utilization,
             "max_model_len": vllm_cfg.max_model_len or seq_len + 1,
-            # Hidden-state extraction does not support chunked prefill.
+            # Whole prompts per forward pass, and all of one call's prompts in one batch.
             "enable_chunked_prefill": False,
+            "max_num_batched_tokens": vllm_cfg.sequences_per_call * (seq_len + 1),
             "enable_prefix_caching": vllm_cfg.enable_prefix_caching,
-            "speculative_config": {
-                "method": "extract_hidden_states",
-                "num_speculative_tokens": 1,
-                "draft_model_config": {
-                    "hf_config": {"eagle_aux_hidden_state_layer_ids": list(self.layout.layer_ids)},
-                },
-            },
-            "kv_transfer_config": {
-                "kv_connector": "ExampleHiddenStatesConnector",
-                "kv_role": "kv_producer",
-                "kv_connector_extra_config": {
-                    "shared_storage_path": str(self.sink.prepare()),
-                    "num_writer_threads": sink_cfg.writer_threads,
-                    "use_synchronization_lock": sink_cfg.synchronization_lock,
-                },
-            },
+            "enforce_eager": vllm_cfg.enforce_eager,
+            "worker_extension_cls": WORKER_EXTENSION,
         }
         self.llm = engine_factory(**self.engine_kwargs)
+        sites = [(slug, spec.kind, spec.layer) for slug, spec in specs.items()]
+        self.llm.collective_rpc("sae_install_hooks", args=(sites, str(self.sink.prepare())))
         self.sampling_params = sampling_params_factory()
 
     @classmethod
@@ -102,16 +90,11 @@ class VLLMExtractor:
 
         ``factories`` forwards ``engine_factory`` / ``sampling_params_factory``.
         """
-        from transformers import AutoConfig
-
-        model_name = normalize_hf_source(cfg.model.name)
-        model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=cfg.model.trust_remote_code)
         return cls(
-            model_name=model_name,
+            model_name=normalize_hf_source(cfg.model.name),
             dtype=cfg.model.dtype,
             trust_remote_code=cfg.model.trust_remote_code,
             specs=specs,
-            num_hidden_layers=model_config.num_hidden_layers,
             seq_len=cfg.data.seq_len,
             vllm_cfg=cfg.extraction.vllm,
             sink_cfg=cfg.extraction.sink,
@@ -120,37 +103,23 @@ class VLLMExtractor:
         )
 
     def supports(self, spec: ComponentSpec) -> bool:
-        try:
-            residual_layer_id(spec, self.num_hidden_layers)
-        except (UnsupportedComponentError, ValueError):
-            return False
-        return True
+        return hookable(spec)
 
     def extract(self, token_ids: torch.Tensor) -> ActivationBatch:
-        rows = token_ids.detach().cpu()
-        parts: dict[str, list[torch.Tensor]] = {slug: [] for slug in self.layout.columns}
-        for start in range(0, rows.shape[0], self.sequences_per_call):
-            chunk = rows[start : start + self.sequences_per_call]
+        parts: dict[str, list[torch.Tensor]] = {slug: [] for slug in self.slugs}
+        for chunk in token_ids.detach().cpu().split(self.sequences_per_call):
             prompts = [{"prompt_token_ids": row.tolist()} for row in chunk]
-            # generate() returns outputs in prompt order; the sink re-checks
-            # every file's token ids against the row it is matched to.
-            outputs = self.llm.generate(prompts, self.sampling_params, use_tqdm=False)
-            if len(outputs) != len(prompts):
-                raise RuntimeError(f"vLLM returned {len(outputs)} outputs for {len(prompts)} prompts")
-            for row, output in zip(chunk, outputs):
-                activations = self.sink.read(
-                    output.kv_transfer_params["hidden_states_path"],
-                    expected_token_ids=row,
-                    layout=self.layout,
-                    device=self.capture_device,
-                )
-                for slug, value in activations.items():
-                    parts[slug].append(value)
+            self.llm.generate(prompts, self.sampling_params, use_tqdm=False)
+            step_paths = [path for paths in self.llm.collective_rpc("sae_flush") for path in paths]
+            activations = self.sink.collect(step_paths, chunk, self.slugs, device=self.capture_device)
+            for slug, value in activations.items():
+                parts[slug].append(value)
         return ActivationBatch(
             token_ids=token_ids,
             activations={slug: torch.cat(values, dim=0) for slug, values in parts.items()},
         )
 
     def close(self) -> None:
+        self.llm.collective_rpc("sae_remove_hooks")
         self.llm = None
         self.sink.cleanup()
