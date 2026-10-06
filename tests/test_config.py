@@ -97,6 +97,13 @@ def test_target_sites_require_unique_slugs():
         TargetCfg(sites=[site, site])
 
 
+def test_model_device_map_accepts_a_name_or_an_explicit_mapping():
+    from sae_pipeline.config import ModelCfg
+
+    assert ModelCfg().device_map == "auto"
+    assert ModelCfg(device_map={"": "cuda:0"}).device_map == {"": "cuda:0"}
+
+
 def test_overrides_overlay_dotted_fields():
     cfg = PipelineCfg.from_yaml("configs/dev.yaml")
     new = cfg.with_overrides(**{"sae.d_sae": 8192})

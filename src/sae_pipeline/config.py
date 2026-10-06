@@ -37,7 +37,9 @@ class ModelCfg(BaseModel):
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
     load_quant: Quant = "auto"
     trust_remote_code: bool = True
-    device_map: str = "auto"
+    # A string ("auto", "balanced", ...) lets accelerate place the model across
+    # every visible GPU; a mapping such as {"": "cuda:0"} pins it to one device.
+    device_map: str | dict[str, str] = "auto"
 
 
 class DataSourceCfg(BaseModel):
