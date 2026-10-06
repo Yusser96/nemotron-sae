@@ -72,6 +72,26 @@ def build_sae(
     raise NotImplementedError(f"SAE arch {arch!r} not yet implemented (registry stub).")
 
 
+def build_sae_and_optimizer(
+    cfg: SAECfg, *, arch: str, d_in: int, d_sae: int, device: str
+) -> tuple[SparseAutoencoder, torch.optim.Optimizer]:
+    """Build the SAE and its Adam optimizer from one SAECfg, ready to train."""
+    sae = build_sae(
+        arch,
+        d_in=d_in,
+        d_sae=d_sae,
+        bandwidth=cfg.bandwidth,
+        pre_encoder_bias=(cfg.pre_encoder_bias or cfg.input_normalization == "whole_vector"),
+    ).to(device)
+    optim = torch.optim.Adam(
+        sae.parameters(),
+        lr=cfg.lr,
+        betas=(cfg.adam_beta1, cfg.adam_beta2),
+        eps=cfg.adam_eps,
+    )
+    return sae, optim
+
+
 @dataclass
 class StepLog:
     step: int
@@ -679,19 +699,7 @@ def train_sae(
             normalization.n_tokens,
         )
 
-    sae = build_sae(
-        arch,
-        d_in=d_in,
-        d_sae=d_sae,
-        bandwidth=cfg.bandwidth,
-        pre_encoder_bias=(cfg.pre_encoder_bias or cfg.input_normalization == "whole_vector"),
-    ).to(device)
-    optim = torch.optim.Adam(
-        sae.parameters(),
-        lr=cfg.lr,
-        betas=(cfg.adam_beta1, cfg.adam_beta2),
-        eps=cfg.adam_eps,
-    )
+    sae, optim = build_sae_and_optimizer(cfg, arch=arch, d_in=d_in, d_sae=d_sae, device=device)
 
     buffer = ActivationBuffer(
         cache_dir=cache_dir,

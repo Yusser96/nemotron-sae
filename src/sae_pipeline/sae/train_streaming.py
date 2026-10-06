@@ -52,7 +52,7 @@ from sae_pipeline.sae.train import (
     StepLog,
     _probe_cache_signature,
     _validation_batches,
-    build_sae,
+    build_sae_and_optimizer,
     record_firing,
     step_log,
 )
@@ -144,16 +144,7 @@ def init_streaming_site(
             raise ValueError(f"{slug}: whole_vector normalisation needs a precomputed normalization_dir")
         normalization_scale = load_whole_vector_normalization(normalization_dir, d_activation=d_in).input_scale
 
-    sae = build_sae(
-        arch,
-        d_in=d_in,
-        d_sae=d_sae,
-        bandwidth=sae_cfg.bandwidth,
-        pre_encoder_bias=(sae_cfg.pre_encoder_bias or sae_cfg.input_normalization == "whole_vector"),
-    ).to(device)
-    optim = torch.optim.Adam(
-        sae.parameters(), lr=sae_cfg.lr, betas=(sae_cfg.adam_beta1, sae_cfg.adam_beta2), eps=sae_cfg.adam_eps
-    )
+    sae, optim = build_sae_and_optimizer(sae_cfg, arch=arch, d_in=d_in, d_sae=d_sae, device=device)
     validation_readers = {lang: ShardReader(path) for lang, path in sorted(validation_cache_dirs.items())}
     validation_cache_signature = _probe_cache_signature(validation_readers)
     ever_fired = torch.zeros(d_sae, dtype=torch.bool, device=device)
