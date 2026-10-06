@@ -876,7 +876,6 @@ def train_sae(
 
     log_path = out_dir / "train_log.jsonl"
     log_mode = "a" if cfg.checkpoint_source is not None and cfg.checkpoint_mode == "resume" else "w"
-    validation_log_mode = log_mode
 
     t_start = time.time()
     final_checkpoint = source_checkpoint.weights_path if source_checkpoint is not None else None
@@ -890,7 +889,7 @@ def train_sae(
     with ExitStack() as stack:
         log_f = stack.enter_context(open(log_path, log_mode))
         validation_f = (
-            stack.enter_context(open(validation_log_path, validation_log_mode))
+            stack.enter_context(open(validation_log_path, log_mode))
             if validation_readers
             else None
         )
@@ -1022,7 +1021,6 @@ def train_sae(
 
             if validation_due:
                 assert validation_f is not None and train_probe_reader is not None
-                n_eval_tokens = probe_tokens
                 probe_readers: dict[str, ShardReader] = {}
                 probe_readers["train_probe"] = train_probe_reader
                 probe_readers.update(validation_readers)
@@ -1036,13 +1034,13 @@ def train_sae(
                         sae,
                         _validation_batches(
                             reader,
-                            n_tokens=n_eval_tokens,
+                            n_tokens=probe_tokens,
                             batch_size=cfg.batch_size,
                             input_scale=normalization_scale,
                             input_center=activation_center,
                             device=device,
                         ),
-                        dead_threshold_tokens=n_eval_tokens,
+                        dead_threshold_tokens=probe_tokens,
                         return_arrays=True,
                     )
                     assert isinstance(metrics, ReconMetrics)
