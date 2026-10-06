@@ -138,7 +138,12 @@ def main() -> None:
                 try:
                     resume_checkpoint = resolve_checkpoint(site_dir, require_trainer_state=True)
                 except FileNotFoundError:
-                    pass
+                    log.warning(
+                        "%s: no complete checkpoint pair in %s; starting from the warm start "
+                        "(its logs are overwritten)",
+                        target.slug,
+                        site_dir,
+                    )
             checkpoint_filename = cfg.sae.checkpoint_filename
             if cfg.sae.checkpoint_filename_template is not None:
                 checkpoint_filename = cfg.sae.checkpoint_filename_template.format(slug=target.slug)
