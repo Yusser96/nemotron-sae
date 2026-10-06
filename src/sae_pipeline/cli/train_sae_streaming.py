@@ -27,9 +27,9 @@ from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.hf import HFHookExtractor
 from sae_pipeline.extraction.vllm_layout import require_residual_site
-from sae_pipeline.hooks.components import ComponentSpec
+from sae_pipeline.hooks.components import site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
-from sae_pipeline.model.topology import HookSite, dump_topology, enumerate_hooks
+from sae_pipeline.model.topology import dump_topology, enumerate_hooks
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.train_streaming import init_streaming_site, run_streaming_training
 
@@ -95,13 +95,7 @@ def main() -> None:
     d_sae = cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0]
     l0_target = cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0]
 
-    requests = {
-        target.slug: (
-            ComponentSpec.parse(target.layer, target.component),
-            HookSite(target.component, target.layer, target.hook_name),
-        )
-        for target in cfg.target.sites
-    }
+    requests = site_requests(cfg.target.sites)
     # Check every validation cache before spending minutes loading the model.
     validation = {target.slug: _validation_cache_dirs(cfg, target, languages) for target in cfg.target.sites}
     use_vllm = cfg.extraction.backend == "vllm"

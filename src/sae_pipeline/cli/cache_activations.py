@@ -28,7 +28,7 @@ from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import make_token_loader
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.hf import HFHookExtractor
-from sae_pipeline.hooks.components import ComponentSpec, resolve
+from sae_pipeline.hooks.components import ComponentSpec, resolve, site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import HookSite, dump_topology, enumerate_hooks
 
@@ -168,14 +168,9 @@ def main() -> None:
     if args.all_targets:
         if not cfg.target.sites:
             p.error("--all-targets requires target.sites")
-        for target in cfg.target.sites:
-            spec = ComponentSpec.parse(target.layer, target.component)
-            # Released SAE metadata is authoritative.  It avoids guessing the
-            # custom module type from a path such as `.mixer`.
-            site = HookSite(target.component, target.layer, target.hook_name)
-            requests[target.slug] = (spec, site)
-            components[target.slug] = target.component
-            layers[target.slug] = target.layer
+        requests = site_requests(cfg.target.sites)
+        components = {target.slug: target.component for target in cfg.target.sites}
+        layers = {target.slug: target.layer for target in cfg.target.sites}
     else:
         assert args.layer is not None and args.component is not None
         spec = ComponentSpec.parse(args.layer, args.component)

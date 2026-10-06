@@ -24,8 +24,7 @@ from safetensors.torch import load_file, save_file
 
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.extraction.base import ActivationExtractor
-from sae_pipeline.hooks.components import ComponentSpec
-from sae_pipeline.model.topology import HookSite
+from sae_pipeline.hooks.components import ComponentSpec, site_requests
 
 log = logging.getLogger(__name__)
 
@@ -54,13 +53,7 @@ def _hf_extractor(cfg: PipelineCfg, device: str) -> tuple[ActivationExtractor, o
 
     model, tokenizer = load_model_and_tokenizer(cfg.model.model_copy(update={"device_map": {"": device}}))
     model.eval()
-    requests = {
-        target.slug: (
-            ComponentSpec.parse(target.layer, target.component),
-            HookSite(target.component, target.layer, target.hook_name),
-        )
-        for target in cfg.target.sites or []
-    }
+    requests = site_requests(cfg.target.sites or [])
     return HFHookExtractor(model, requests, model_device=device, capture_device="cpu"), tokenizer
 
 

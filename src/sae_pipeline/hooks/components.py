@@ -43,6 +43,25 @@ class ComponentSpec:
         return f"L{self.layer}_{self.kind}"
 
 
+def site_requests(sites) -> dict[str, tuple[ComponentSpec, HookSite]]:
+    """Build each site's (ComponentSpec, HookSite) request from its config entry.
+
+    Each entry already names its exact hook (component, layer, hook_name), so
+    this builds the HookSite directly rather than resolving it from enumerated
+    topology: topology resolution can guess the wrong module for a custom
+    component path (e.g. ``.mixer``), while released SAE metadata is
+    authoritative. ``sites`` duck-types ``target.slug/.layer/.component/.hook_name``
+    (a ``list[HookTargetCfg]``, typically ``cfg.target.sites``).
+    """
+    return {
+        target.slug: (
+            ComponentSpec.parse(target.layer, target.component),
+            HookSite(target.component, target.layer, target.hook_name),
+        )
+        for target in sites
+    }
+
+
 def load_topology(path: str | Path) -> list[HookSite]:
     with open(path, "r") as f:
         payload = json.load(f)
