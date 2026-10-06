@@ -1,8 +1,6 @@
 """Deterministic bilingual token mixing without contacting Hugging Face."""
 
 import pytest
-import torch
-from torch import nn
 
 from sae_pipeline.config import DataCfg, DataSourceCfg
 from sae_pipeline.data import streaming

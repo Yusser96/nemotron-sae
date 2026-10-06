@@ -1,6 +1,5 @@
 """Round-trip activation shards through writer + reader on synthetic data."""
 
-import tempfile
 from pathlib import Path
 
 import torch
