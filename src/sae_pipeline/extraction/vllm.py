@@ -16,7 +16,7 @@ import torch
 
 from sae_pipeline.config import ActivationSinkCfg, PipelineCfg, VLLMCfg
 from sae_pipeline.extraction.base import ActivationBatch
-from sae_pipeline.extraction.sink import HiddenStateSink
+from sae_pipeline.extraction.sink import ActivationSink
 from sae_pipeline.extraction.vllm_worker import hookable
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import normalize_hf_source
@@ -55,7 +55,7 @@ class VLLMExtractor:
         if unsupported:
             raise ValueError(f"vLLM extraction cannot hook {unsupported}")
         self.slugs = list(specs)
-        self.sink = HiddenStateSink(sink_cfg)
+        self.sink = ActivationSink(sink_cfg)
         self.capture_device = capture_device
         self.sequences_per_call = vllm_cfg.sequences_per_call
         self.engine_kwargs = {

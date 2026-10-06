@@ -30,7 +30,7 @@ FeatureUseStrategy = Literal[
 ]
 ActivationCentering = Literal["none", "mean"]
 ExtractionBackend = Literal["hf_hooks", "vllm"]
-SinkLifecycle = Literal["consume", "cache", "persist"]
+SinkLifecycle = Literal["consume", "cache"]
 
 
 class ModelCfg(BaseModel):
@@ -482,22 +482,12 @@ class ActivationSinkCfg(BaseModel):
 
     ``path`` may reference environment variables (e.g.
     ``/dev/shm/sae-${SLURM_JOB_ID}``); a RAM-backed tmpfs suits streaming,
-    node-local disk suits offline extraction. ``lifecycle``: ``consume``
-    deletes each file once read, ``cache`` keeps files, ``persist`` keeps them
-    with a dataset manifest.
+    node-local disk suits debugging. ``lifecycle``: ``consume`` deletes each
+    file once read, ``cache`` keeps them.
     """
 
     path: str = "/dev/shm/sae-activations"
     lifecycle: SinkLifecycle = "consume"
-    writer_threads: int = 8
-    synchronization_lock: bool = True
-
-    @field_validator("writer_threads")
-    @classmethod
-    def _writer_threads_positive(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("sink.writer_threads must be positive")
-        return value
 
     def resolved_path(self) -> Path:
         """The sink directory with ``~`` and environment variables expanded."""
