@@ -65,22 +65,10 @@ def _hf_extractor(cfg: PipelineCfg, device: str) -> tuple[ActivationExtractor, o
 
 
 def _vllm_extractor(cfg: PipelineCfg) -> ActivationExtractor:
-    from transformers import AutoConfig
-
     from sae_pipeline.extraction.vllm import VLLMExtractor
 
-    model_config = AutoConfig.from_pretrained(cfg.model.name, trust_remote_code=cfg.model.trust_remote_code)
-    return VLLMExtractor(
-        model_name=cfg.model.name,
-        dtype=cfg.model.dtype,
-        trust_remote_code=cfg.model.trust_remote_code,
-        specs={target.slug: ComponentSpec.parse(target.layer, target.component) for target in cfg.target.sites or []},
-        num_hidden_layers=model_config.num_hidden_layers,
-        seq_len=cfg.data.seq_len,
-        vllm_cfg=cfg.extraction.vllm,
-        sink_cfg=cfg.extraction.sink,
-        capture_device="cpu",
-    )
+    specs = {target.slug: ComponentSpec.parse(target.layer, target.component) for target in cfg.target.sites or []}
+    return VLLMExtractor.from_config(cfg, specs)
 
 
 def main() -> None:

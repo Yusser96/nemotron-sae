@@ -102,3 +102,26 @@ def test_only_residual_sites_are_supported(tmp_path):
     assert extractor.supports(ComponentSpec.parse(1, "resid_post"))
     assert not extractor.supports(ComponentSpec.parse(1, "moe_out"))
     assert not extractor.supports(ComponentSpec.parse(9, "resid_post"))
+
+
+def test_from_config_reads_the_layer_count_and_settings(tmp_path, monkeypatch):
+    from transformers import AutoConfig
+
+    from sae_pipeline.config import PipelineCfg
+
+    monkeypatch.setattr(AutoConfig, "from_pretrained", lambda *_a, **_k: SimpleNamespace(num_hidden_layers=4))
+    cfg = PipelineCfg.from_yaml("configs/dev.yaml").with_overrides(
+        **{"model.name": "example/model", "extraction.sink.path": str(tmp_path / "sink"), "data.seq_len": 3}
+    )
+
+    extractor = VLLMExtractor.from_config(
+        cfg,
+        SPECS,
+        engine_factory=lambda **kwargs: _FakeEngine(**kwargs),
+        sampling_params_factory=lambda: "one-token",
+    )
+
+    assert extractor.num_hidden_layers == 4
+    assert extractor.llm.kwargs["model"] == "example/model"
+    assert extractor.llm.kwargs["max_model_len"] == 4
+    assert extractor.sink.path == tmp_path / "sink"

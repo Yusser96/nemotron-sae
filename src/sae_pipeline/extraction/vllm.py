@@ -14,11 +14,12 @@ from typing import Any
 
 import torch
 
-from sae_pipeline.config import ActivationSinkCfg, VLLMCfg
+from sae_pipeline.config import ActivationSinkCfg, PipelineCfg, VLLMCfg
 from sae_pipeline.extraction.base import ActivationBatch, UnsupportedComponentError
 from sae_pipeline.extraction.sink import HiddenStateSink
 from sae_pipeline.extraction.vllm_layout import VLLMLayout, residual_layer_id
 from sae_pipeline.hooks.components import ComponentSpec
+from sae_pipeline.sae.checkpoint import normalize_hf_source
 
 
 def _vllm_engine(**engine_kwargs: Any) -> Any:
@@ -87,6 +88,36 @@ class VLLMExtractor:
         }
         self.llm = engine_factory(**self.engine_kwargs)
         self.sampling_params = sampling_params_factory()
+
+    @classmethod
+    def from_config(
+        cls,
+        cfg: PipelineCfg,
+        specs: dict[str, ComponentSpec],
+        *,
+        capture_device: str | torch.device = "cpu",
+        **factories: Any,
+    ) -> "VLLMExtractor":
+        """Build from a pipeline config (model, ``data.seq_len``, ``extraction.vllm``/``sink``).
+
+        ``factories`` forwards ``engine_factory`` / ``sampling_params_factory``.
+        """
+        from transformers import AutoConfig
+
+        model_name = normalize_hf_source(cfg.model.name)
+        model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=cfg.model.trust_remote_code)
+        return cls(
+            model_name=model_name,
+            dtype=cfg.model.dtype,
+            trust_remote_code=cfg.model.trust_remote_code,
+            specs=specs,
+            num_hidden_layers=model_config.num_hidden_layers,
+            seq_len=cfg.data.seq_len,
+            vllm_cfg=cfg.extraction.vllm,
+            sink_cfg=cfg.extraction.sink,
+            capture_device=capture_device,
+            **factories,
+        )
 
     def supports(self, spec: ComponentSpec) -> bool:
         try:
