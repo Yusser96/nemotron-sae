@@ -6,6 +6,7 @@ Loaded from YAML; CLI flags overlay specific fields. One config feeds a sweep ov
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -30,6 +31,8 @@ FeatureUseStrategy = Literal[
     "frequency_residual_reset",
 ]
 ActivationCentering = Literal["none", "mean"]
+ExtractionBackend = Literal["hf_hooks", "vllm"]
+SinkLifecycle = Literal["consume", "cache", "persist"]
 
 
 class ModelCfg(BaseModel):
@@ -445,6 +448,72 @@ class StreamCfg(BaseModel):
         return value
 
 
+class VLLMCfg(BaseModel):
+    """Engine settings for the vLLM extraction backend.
+
+    Chunked prefill is always disabled: vLLM's hidden-state extraction does
+    not support it. Prefix caching stays off unless explicitly validated.
+    """
+
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.5
+    # None: data.seq_len + 1 (the prompt plus the single generated token).
+    max_model_len: int | None = None
+    # Sequences submitted per generate() call; each becomes one vLLM request.
+    sequences_per_call: int = 64
+    enable_prefix_caching: bool = False
+
+    @field_validator("tensor_parallel_size", "sequences_per_call")
+    @classmethod
+    def _positive_counts(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("vllm counts must be positive")
+        return value
+
+    @field_validator("gpu_memory_utilization")
+    @classmethod
+    def _utilization_fraction(cls, value: float) -> float:
+        if not 0.0 < value <= 1.0:
+            raise ValueError("vllm.gpu_memory_utilization must be in (0, 1]")
+        return value
+
+
+class ActivationSinkCfg(BaseModel):
+    """Where extracted activations are written and how long they live.
+
+    ``path`` may reference environment variables (e.g.
+    ``/dev/shm/sae-${SLURM_JOB_ID}``); a RAM-backed tmpfs suits streaming,
+    node-local disk suits offline extraction. ``lifecycle``: ``consume``
+    deletes each file once read, ``cache`` keeps files, ``persist`` keeps them
+    with a dataset manifest.
+    """
+
+    path: str = "/dev/shm/sae-activations"
+    lifecycle: SinkLifecycle = "consume"
+    writer_threads: int = 8
+    synchronization_lock: bool = True
+
+    @field_validator("writer_threads")
+    @classmethod
+    def _writer_threads_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("sink.writer_threads must be positive")
+        return value
+
+    def resolved_path(self) -> Path:
+        """The sink directory with ``~`` and environment variables expanded."""
+        expanded = os.path.expanduser(os.path.expandvars(self.path))
+        if "$" in expanded:
+            raise ValueError(f"Unresolved environment variable in sink path {self.path!r}: {expanded!r}")
+        return Path(expanded)
+
+
+class ExtractionCfg(BaseModel):
+    backend: ExtractionBackend = "hf_hooks"
+    vllm: VLLMCfg = Field(default_factory=VLLMCfg)
+    sink: ActivationSinkCfg = Field(default_factory=ActivationSinkCfg)
+
+
 class LogCfg(BaseModel):
     use_wandb: bool = False
     wandb_project: str = "nemotron-sae"
@@ -467,6 +536,7 @@ class PipelineCfg(BaseModel):
     eval: EvalCfg = Field(default_factory=EvalCfg)
     early_stopping: EarlyStoppingCfg = Field(default_factory=EarlyStoppingCfg)
     stream: StreamCfg = Field(default_factory=StreamCfg)
+    extraction: ExtractionCfg = Field(default_factory=ExtractionCfg)
     log: LogCfg = Field(default_factory=LogCfg)
 
     @model_validator(mode="after")
@@ -475,6 +545,16 @@ class PipelineCfg(BaseModel):
             raise ValueError(
                 "cache.tokens_per_fwd must be a multiple of sae.batch_size for streaming "
                 f"(tokens_per_fwd={self.cache.tokens_per_fwd}, batch_size={self.sae.batch_size})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _vllm_context_fits_a_sequence(self) -> "PipelineCfg":
+        max_model_len = self.extraction.vllm.max_model_len
+        if max_model_len is not None and max_model_len < self.data.seq_len + 1:
+            raise ValueError(
+                f"extraction.vllm.max_model_len={max_model_len} must be at least data.seq_len + 1 "
+                f"({self.data.seq_len + 1}): each request is one sequence plus one generated token"
             )
         return self
 

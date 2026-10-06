@@ -178,6 +178,35 @@ def test_stream_config_defaults_and_validation():
         StreamCfg(stop_after_seconds=-1)
 
 
+def test_extraction_config_defaults_to_hf_hooks():
+    cfg = PipelineCfg.from_yaml("configs/dev.yaml")
+
+    assert cfg.extraction.backend == "hf_hooks"
+    assert cfg.extraction.vllm.enable_prefix_caching is False
+    assert cfg.extraction.sink.lifecycle == "consume"
+
+
+def test_sink_path_expands_environment_variables(monkeypatch):
+    from sae_pipeline.config import ActivationSinkCfg
+
+    monkeypatch.setenv("SLURM_JOB_ID", "1234")
+    assert ActivationSinkCfg(path="/dev/shm/sae-${SLURM_JOB_ID}").resolved_path().name == "sae-1234"
+    monkeypatch.delenv("SLURM_JOB_ID")
+    with pytest.raises(ValueError, match="Unresolved"):
+        ActivationSinkCfg(path="/dev/shm/sae-${SLURM_JOB_ID}").resolved_path()
+
+
+def test_vllm_context_must_hold_a_sequence_plus_one_token():
+    cfg = PipelineCfg.from_yaml("configs/dev.yaml")
+    seq_len = cfg.data.seq_len
+
+    cfg.with_overrides(**{"extraction.vllm.max_model_len": seq_len + 1})
+    with pytest.raises(ValueError, match="max_model_len"):
+        cfg.with_overrides(**{"extraction.vllm.max_model_len": seq_len})
+    with pytest.raises(ValueError, match="gpu_memory_utilization"):
+        cfg.with_overrides(**{"extraction.vllm.gpu_memory_utilization": 0.0})
+
+
 def test_streaming_requires_whole_batches_per_forward():
     cfg = PipelineCfg.from_yaml("configs/dev.yaml")
     batch_size = cfg.sae.batch_size
