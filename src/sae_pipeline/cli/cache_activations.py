@@ -110,6 +110,56 @@ def _repair_misaligned_manifests(
     return common_tokens
 
 
+def _reconcile_manifests(
+    cfg: PipelineCfg,
+    args: argparse.Namespace,
+    requests: dict[str, tuple[ComponentSpec, HookSite]],
+    components: dict[str, str],
+    layers: dict[str, int],
+) -> tuple[Path, Path, dict[str, CacheManifest], int | None]:
+    """Build each site's expected manifest and reconcile it with any existing cache.
+
+    Returns (cache_root, base_dir, manifests, target_tokens).
+    """
+    cache_root = Path(cfg.cache.cache_dir) / cfg.run_id
+    base_dir = cache_root if args.partition == "train" else cache_root / "validation" / args.language
+    fingerprint = hashlib.sha256(json.dumps(cfg.data.model_dump(), sort_keys=True).encode()).hexdigest()
+    manifests: dict[str, CacheManifest] = {}
+    target_tokens = (
+        cfg.data.total_tokens
+        if args.partition == "train"
+        else cfg.data.validation_tokens_per_language
+    )
+    for slug in requests:
+        out_dir = base_dir / slug
+        out_dir.mkdir(parents=True, exist_ok=True)
+        expected = CacheManifest(
+            run_id=cfg.run_id,
+            model=cfg.model.name,
+            dtype=cfg.model.dtype,
+            layer=layers[slug],
+            component=components[slug],
+            d_activation=-1,
+            shuffle_seed=cfg.cache.shuffle_seed,
+            dataset_fingerprint=fingerprint,
+            partition=args.partition,
+            language=args.language,
+        )
+        existing_path = out_dir / "manifest.json"
+        if existing_path.exists():
+            existing = CacheManifest.read(existing_path)
+            for field in ("run_id", "model", "layer", "component", "dataset_fingerprint", "partition", "language"):
+                if getattr(existing, field) != getattr(expected, field):
+                    raise RuntimeError(f"Existing cache {existing_path} has incompatible {field}")
+            if target_tokens is not None and existing.total_tokens > target_tokens:
+                raise RuntimeError(f"Existing cache {existing_path} exceeds its configured token budget")
+            manifests[slug] = existing
+        else:
+            manifests[slug] = expected
+    log.info("Caching %d sites to %s", len(requests), base_dir)
+    return cache_root, base_dir, manifests, target_tokens
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
@@ -179,42 +229,9 @@ def main() -> None:
         components[spec.slug] = args.component
         layers[spec.slug] = args.layer
 
-    cache_root = Path(cfg.cache.cache_dir) / cfg.run_id
-    base_dir = cache_root if args.partition == "train" else cache_root / "validation" / args.language
-    fingerprint = hashlib.sha256(json.dumps(cfg.data.model_dump(), sort_keys=True).encode()).hexdigest()
-    manifests: dict[str, CacheManifest] = {}
-    target_tokens = (
-        cfg.data.total_tokens
-        if args.partition == "train"
-        else cfg.data.validation_tokens_per_language
+    cache_root, base_dir, manifests, target_tokens = _reconcile_manifests(
+        cfg, args, requests, components, layers
     )
-    for slug in requests:
-        out_dir = base_dir / slug
-        out_dir.mkdir(parents=True, exist_ok=True)
-        expected = CacheManifest(
-            run_id=cfg.run_id,
-            model=cfg.model.name,
-            dtype=cfg.model.dtype,
-            layer=layers[slug],
-            component=components[slug],
-            d_activation=-1,
-            shuffle_seed=cfg.cache.shuffle_seed,
-            dataset_fingerprint=fingerprint,
-            partition=args.partition,
-            language=args.language,
-        )
-        existing_path = out_dir / "manifest.json"
-        if existing_path.exists():
-            existing = CacheManifest.read(existing_path)
-            for field in ("run_id", "model", "layer", "component", "dataset_fingerprint", "partition", "language"):
-                if getattr(existing, field) != getattr(expected, field):
-                    raise RuntimeError(f"Existing cache {existing_path} has incompatible {field}")
-            if target_tokens is not None and existing.total_tokens > target_tokens:
-                raise RuntimeError(f"Existing cache {existing_path} exceeds its configured token budget")
-            manifests[slug] = existing
-        else:
-            manifests[slug] = expected
-    log.info("Caching %d sites to %s", len(requests), base_dir)
 
     micro_batch = max(1, cfg.cache.tokens_per_fwd // cfg.data.seq_len)
     languages = {args.language} if args.language else None
