@@ -42,6 +42,7 @@ from sae_pipeline.sae.normalization import (
     resolve_whole_vector_normalization,
     write_normalization,
 )
+from sae_pipeline.sae.objective import coefficients_at, inverse_simpson_warmup_steps
 from safetensors.torch import save_file
 
 log = logging.getLogger(__name__)
@@ -62,38 +63,6 @@ def build_sae(
             pre_encoder_bias=pre_encoder_bias,
         )
     raise NotImplementedError(f"SAE arch {arch!r} not yet implemented (registry stub).")
-
-
-def cosine_warmup(step: int, peak_lr: float, warmup_steps: int, total_steps: int) -> float:
-    if step < warmup_steps:
-        # Linear warmup from peak_lr * 0.1 to peak_lr (Gemma Scope 2).
-        return peak_lr * (0.1 + 0.9 * step / max(1, warmup_steps))
-    # Cosine decay to 0.1 * peak_lr.
-    progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-    progress = min(progress, 1.0)
-    return peak_lr * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * progress)))
-
-
-def warmup_constant(step: int, peak_lr: float, warmup_steps: int) -> float:
-    """Gemma Scope 2 schedule: 0.1*peak to peak, then no decay."""
-    if step >= warmup_steps:
-        return peak_lr
-    return peak_lr * (0.1 + 0.9 * step / max(1, warmup_steps))
-
-
-def cosine_warmup_constant(step: int, peak_lr: float, warmup_steps: int) -> float:
-    """Cosine ramp from 0.1*peak to peak, followed by a constant rate."""
-    if step >= warmup_steps:
-        return peak_lr
-    progress = step / max(1, warmup_steps)
-    cosine_ramp = 0.5 * (1.0 - math.cos(math.pi * progress))
-    return peak_lr * (0.1 + 0.9 * cosine_ramp)
-
-
-def linear_warmup(step: int, peak: float, warmup_steps: int) -> float:
-    if step >= warmup_steps:
-        return peak
-    return peak * (step / max(1, warmup_steps))
 
 
 @dataclass
@@ -559,11 +528,6 @@ def train_sae(
     early_stop_monitor = _ValidationEarlyStop()
     validation_log_path = out_dir / "validation_log.jsonl"
     eval_interval = cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
-    inverse_simpson_warmup_steps = (
-        cfg.l0_warmup_steps
-        if cfg.inverse_simpson_warmup_steps is None
-        else cfg.inverse_simpson_warmup_steps
-    )
     log.info(
         "Training SAE: arch=%s d_in=%d d_sae=%d l0=%d steps=%d device=%s",
         arch, d_in, d_sae, l0_target, cfg.n_steps, device,
@@ -585,7 +549,7 @@ def train_sae(
             "warm-up=%d steps",
             cfg.inverse_simpson_floor,
             cfg.inverse_simpson_max_scale,
-            inverse_simpson_warmup_steps,
+            inverse_simpson_warmup_steps(cfg),
         )
 
     normalization_scale = 1.0
@@ -835,17 +799,9 @@ def train_sae(
             if activation_center is not None:
                 x = x - activation_center
 
-            # LR + λ schedule
-            lr = (
-                warmup_constant(step, cfg.lr, cfg.warmup_steps)
-                if cfg.lr_schedule == "warmup_constant"
-                else (
-                    cosine_warmup_constant(step, cfg.lr, cfg.warmup_steps)
-                    if cfg.lr_schedule == "cosine_warmup_constant"
-                    else cosine_warmup(step, cfg.lr, cfg.warmup_steps, cfg.n_steps)
-                )
-            )
-            lam = linear_warmup(step, peak=1.0, warmup_steps=cfg.l0_warmup_steps)
+            coefficients = coefficients_at(cfg, step, n_steps=cfg.n_steps)
+            lr = coefficients.lr
+            lam = coefficients.lambda_l0
             for g in optim.param_groups:
                 g["lr"] = lr
 
@@ -912,13 +868,7 @@ def train_sae(
                     / max(cfg.inverse_simpson_floor, 1.0e-8),
                     min=0.0,
                 )
-                loss_is = gap.square()
-                lam_is = linear_warmup(
-                    step,
-                    peak=cfg.inverse_simpson_max_scale,
-                    warmup_steps=inverse_simpson_warmup_steps,
-                )
-                inverse_simpson_penalty = lam_is * loss_is
+                inverse_simpson_penalty = coefficients.lambda_is * gap.square()
 
             loss = (
                 reconstruction_loss
