@@ -1,7 +1,9 @@
 """The JumpReLU SAE training objective, shared by every trainer.
 
 Schedules map a global step to the coefficients of the loss (learning rate,
-L0-penalty weight, Inverse-Simpson weight).
+L0-penalty weight, Inverse-Simpson weight); :func:`training_loss` evaluates
+the loss itself for one activation batch. The same function scores held-out
+data, so early stopping can track exactly what training optimises.
 """
 
 from __future__ import annotations
@@ -9,7 +11,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import torch
+
 from sae_pipeline.config import SAECfg
+from sae_pipeline.sae.base import SparseAutoencoder
+from sae_pipeline.sae.jumprelu import JumpReLUSAE, batch_inverse_simpson
 
 
 def cosine_warmup(step: int, peak_lr: float, warmup_steps: int, total_steps: int) -> float:
@@ -78,4 +84,70 @@ def coefficients_at(cfg: SAECfg, step: int, *, n_steps: int | None = None) -> Lo
         lambda_is=linear_warmup(
             step, peak=cfg.inverse_simpson_max_scale, warmup_steps=inverse_simpson_warmup_steps(cfg)
         ),
+    )
+
+
+def quad_l0_loss(
+    l0_diff: torch.Tensor,
+    l0_target: float,
+    scale: float = 1.0,
+) -> torch.Tensor:
+    """Quadratic target-L0 penalty: ``(L0-L0*)² / (2 L0*)``."""
+    return scale * (1.0 / (2.0 * max(l0_target, 1))) * (l0_diff - float(l0_target)).pow(2)
+
+
+@dataclass
+class LossTerms:
+    """One batch's loss, its components, and the forward outputs."""
+
+    total: torch.Tensor
+    reconstruction: torch.Tensor
+    mse: torch.Tensor
+    l0_penalty: torch.Tensor
+    inverse_simpson_penalty: torch.Tensor
+    d_is: float
+    u_is: float
+    x_hat: torch.Tensor
+    f: torch.Tensor
+
+
+def training_loss(
+    sae: SparseAutoencoder,
+    x: torch.Tensor,
+    cfg: SAECfg,
+    coefficients: LossCoefficients,
+    *,
+    target_l0: float,
+) -> LossTerms:
+    """Reconstruction + λ_L0·quadratic L0 penalty + λ_IS·Inverse-Simpson floor penalty."""
+    x_hat, f = sae(x)
+    squared_error = (x - x_hat).pow(2)
+    if cfg.reconstruction_loss == "vector_sum":
+        reconstruction = squared_error.sum(dim=-1).mean()
+    else:
+        reconstruction = squared_error.mean()
+    l0_penalty = quad_l0_loss(sae.l0(x), target_l0)  # type: ignore[attr-defined]
+
+    inverse_simpson_penalty = reconstruction.new_zeros(())
+    d_is = u_is = 0.0
+    if cfg.inverse_simpson_floor > 0 and cfg.inverse_simpson_max_scale > 0 and isinstance(sae, JumpReLUSAE):
+        d_is_tensor, u_is_tensor = batch_inverse_simpson(sae.jump_relu_gate(x), sae.d_sae)
+        d_is = float(d_is_tensor.detach().item())
+        u_is = float(u_is_tensor.detach().item())
+        gap = torch.clamp(
+            (cfg.inverse_simpson_floor - u_is_tensor) / max(cfg.inverse_simpson_floor, 1.0e-8), min=0.0
+        )
+        inverse_simpson_penalty = coefficients.lambda_is * gap.square()
+
+    total = reconstruction + coefficients.lambda_l0 * cfg.l0_penalty_scale * l0_penalty + inverse_simpson_penalty
+    return LossTerms(
+        total=total,
+        reconstruction=reconstruction,
+        mse=squared_error.mean(),
+        l0_penalty=l0_penalty,
+        inverse_simpson_penalty=inverse_simpson_penalty,
+        d_is=d_is,
+        u_is=u_is,
+        x_hat=x_hat,
+        f=f,
     )

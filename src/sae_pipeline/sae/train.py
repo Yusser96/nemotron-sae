@@ -34,7 +34,7 @@ from sae_pipeline.sae.checkpoint import (
     restore_random_state,
     save_checkpoint_pair,
 )
-from sae_pipeline.sae.jumprelu import JumpReLUSAE, batch_inverse_simpson
+from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.normalization import (
     centering_path,
     normalization_path,
@@ -42,7 +42,7 @@ from sae_pipeline.sae.normalization import (
     resolve_whole_vector_normalization,
     write_normalization,
 )
-from sae_pipeline.sae.objective import coefficients_at, inverse_simpson_warmup_steps
+from sae_pipeline.sae.objective import coefficients_at, inverse_simpson_warmup_steps, training_loss
 from safetensors.torch import save_file
 
 log = logging.getLogger(__name__)
@@ -322,15 +322,6 @@ def _load_reset_calibration(
         best_errors = keep_values
         best_residuals = residuals[keep_indices]
     return calibration_x, best_residuals, frequencies / calibration_x.shape[0]
-
-
-def quad_l0_loss(
-    l0_diff: torch.Tensor,
-    l0_target: float,
-    scale: float = 1.0,
-) -> torch.Tensor:
-    """Quadratic target-L0 penalty: ``(L0-L0*)² / (2 L0*)``."""
-    return scale * (1.0 / (2.0 * max(l0_target, 1))) * (l0_diff - float(l0_target)).pow(2)
 
 
 @torch.no_grad()
@@ -805,15 +796,6 @@ def train_sae(
             for g in optim.param_groups:
                 g["lr"] = lr
 
-            x_hat, f = sae(x)
-            squared_error = (x - x_hat).pow(2)
-            reconstruction_loss = (
-                squared_error.sum(dim=-1).mean()
-                if cfg.reconstruction_loss == "vector_sum"
-                else squared_error.mean()
-            )
-            mse = squared_error.mean()
-            l0_diff = sae.l0(x)  # type: ignore[attr-defined]
             target_l0 = _scheduled_l0_target(step, l0_target, cfg)
             if reset_target_step is not None:
                 elapsed = step - reset_target_step
@@ -821,7 +803,8 @@ def train_sae(
                     target_l0 += cfg.residual_reset_delta_l0 * (
                         1.0 - elapsed / max(1, cfg.residual_reset_anneal_steps)
                     )
-            l0_penalty = quad_l0_loss(l0_diff, target_l0)
+            terms = training_loss(sae, x, cfg, coefficients, target_l0=target_l0)
+            x_hat, f = terms.x_hat, terms.f
 
             with torch.no_grad():
                 fired = (f.detach() > 0).float()
@@ -830,7 +813,7 @@ def train_sae(
                     batch_frequency, alpha=1.0 - cfg.feature_frequency_ema_decay
                 )
 
-            feature_use_penalty = reconstruction_loss.new_zeros(())
+            feature_use_penalty = terms.reconstruction.new_zeros(())
             if (
                 cfg.feature_use_strategy in {"frequency", "frequency_residual_reset"}
                 and step >= cfg.feature_frequency_start_step
@@ -844,43 +827,19 @@ def train_sae(
                     target_penalty = (
                         cfg.feature_frequency_penalty_fraction
                         * cfg.feature_frequency_penalty_multiplier
-                        * reconstruction_loss.detach()
+                        * terms.reconstruction.detach()
                     )
                     frequency_penalty_scale = float(
                         (target_penalty / weighted_activation.detach().clamp_min(1.0e-8)).item()
                     )
                 feature_use_penalty = frequency_penalty_scale * weighted_activation
 
-            inverse_simpson_penalty = reconstruction_loss.new_zeros(())
-            d_is_batch = 0.0
-            u_is_batch = 0.0
-            if (
-                cfg.inverse_simpson_floor > 0
-                and cfg.inverse_simpson_max_scale > 0
-                and isinstance(sae, JumpReLUSAE)
-            ):
-                g = sae.jump_relu_gate(x)
-                d_is_tensor, u_is_tensor = batch_inverse_simpson(g, d_sae)
-                d_is_batch = float(d_is_tensor.detach().item())
-                u_is_batch = float(u_is_tensor.detach().item())
-                gap = torch.clamp(
-                    (cfg.inverse_simpson_floor - u_is_tensor)
-                    / max(cfg.inverse_simpson_floor, 1.0e-8),
-                    min=0.0,
-                )
-                inverse_simpson_penalty = coefficients.lambda_is * gap.square()
-
-            loss = (
-                reconstruction_loss
-                + lam * cfg.l0_penalty_scale * l0_penalty
-                + feature_use_penalty
-                + inverse_simpson_penalty
-            )
+            loss = terms.total + feature_use_penalty
             if not torch.isfinite(loss):
                 raise FloatingPointError(
                     f"Non-finite training loss at step {step}: "
-                    f"reconstruction={reconstruction_loss.detach().item()} "
-                    f"l0_penalty={l0_penalty.detach().item()}"
+                    f"reconstruction={terms.reconstruction.detach().item()} "
+                    f"l0_penalty={terms.l0_penalty.detach().item()}"
                 )
 
             optim.zero_grad(set_to_none=True)
@@ -948,22 +907,22 @@ def train_sae(
                     dead_pct = dead_pct_from_fired(ever_fired)
                     concentration = firing_concentration(feature_frequency)
                 entry = StepLog(
-                    step=step, loss=float(loss.detach()), mse=float(mse.detach()),
-                    l0_penalty=float(l0_penalty.detach()), hard_l0=hard_l0,
+                    step=step, loss=float(loss.detach()), mse=float(terms.mse.detach()),
+                    l0_penalty=float(terms.l0_penalty.detach()), hard_l0=hard_l0,
                     lr=lr, lambda_l0=lam, dead_pct=dead_pct,
                     ste_window_pct=ste_window_pct,
                     theta_grad_norm=theta_grad_norm,
                     encoder_grad_norm=encoder_grad_norm,
-                    reconstruction_loss=float(reconstruction_loss.detach()),
+                    reconstruction_loss=float(terms.reconstruction.detach()),
                     feature_use_penalty=float(feature_use_penalty.detach()),
                     active_features=concentration.active_features,
                     top1_activation_mass_pct=concentration.top1_activation_mass_pct,
                     max_firing_frequency=concentration.max_firing_frequency,
                     feature_resets=feature_resets,
                     target_l0=target_l0,
-                    d_is=d_is_batch,
-                    u_is=u_is_batch,
-                    inverse_simpson_penalty=float(inverse_simpson_penalty.detach()),
+                    d_is=terms.d_is,
+                    u_is=terms.u_is,
+                    inverse_simpson_penalty=float(terms.inverse_simpson_penalty.detach()),
                 )
                 log_f.write(json.dumps(asdict(entry)) + "\n")
                 log_f.flush()

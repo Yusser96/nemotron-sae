@@ -7,12 +7,11 @@ import torch
 
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg
-from sae_pipeline.sae.objective import cosine_warmup_constant
+from sae_pipeline.sae.objective import cosine_warmup_constant, quad_l0_loss
 from sae_pipeline.sae.train import (
     _ValidationEarlyStop,
     _resample_underused_features,
     _scheduled_l0_target,
-    quad_l0_loss,
 )
 
 
