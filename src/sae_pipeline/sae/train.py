@@ -1072,8 +1072,7 @@ def train_sae(
                         eligible=step >= early_stopping.minimum_steps,
                     )
                     stop_now = (
-                        early_stopping.enabled
-                        and step >= early_stopping.minimum_steps
+                        step >= early_stopping.minimum_steps
                         and early_stop_monitor.stable_intervals >= early_stopping.patience
                     )
                 else:
