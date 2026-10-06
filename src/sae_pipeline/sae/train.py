@@ -165,6 +165,63 @@ class _ValidationEarlyStop:
         return stable, l0_ok
 
 
+@dataclass
+class ObjectiveEarlyStop:
+    """Plateau-driven LR reduction and stopping on a held-out objective.
+
+    The objective (lower is better) is the training loss evaluated on
+    validation data. An evaluation is a new best when it is lower than the
+    best so far by more than ``improvement_rel_tol``. Once ``eligible`` (e.g.
+    after warmup), every non-improving evaluation counts towards a plateau:
+    every ``lr_plateau_patience`` of them scale the learning rate by
+    ``lr_reduce_factor`` (floored at ``min_lr_scale``), and ``patience`` of
+    them stop the run.
+    """
+
+    best: float | None = None
+    checks_since_improve: int = 0
+    lr_scale: float = 1.0
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "best": self.best,
+            "checks_since_improve": self.checks_since_improve,
+            "lr_scale": self.lr_scale,
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.best = None if state.get("best") is None else float(state["best"])  # type: ignore[arg-type]
+        self.checks_since_improve = int(state.get("checks_since_improve", 0))  # type: ignore[arg-type]
+        self.lr_scale = float(state.get("lr_scale", 1.0))  # type: ignore[arg-type]
+        if self.checks_since_improve < 0:
+            raise ValueError("Objective early-stopping state has a negative check count")
+        if not 0.0 < self.lr_scale <= 1.0:
+            raise ValueError("Objective early-stopping lr_scale must be in (0, 1]")
+
+    def update(
+        self, objective: float, cfg: EarlyStoppingCfg, *, eligible: bool = True
+    ) -> tuple[bool, bool, bool]:
+        """Return ``(is_best, lr_reduced, should_stop)`` for this evaluation."""
+        if not math.isfinite(objective):
+            raise FloatingPointError(f"Non-finite validation objective: {objective}")
+        if self.best is None or objective < self.best * (1.0 - cfg.improvement_rel_tol):
+            self.best = objective
+            self.checks_since_improve = 0
+            return True, False, False
+        if not eligible:
+            return False, False, False
+        self.checks_since_improve += 1
+        lr_reduced = False
+        if (
+            self.checks_since_improve < cfg.patience
+            and self.checks_since_improve % cfg.lr_plateau_patience == 0
+            and self.lr_scale > cfg.min_lr_scale
+        ):
+            self.lr_scale = max(cfg.min_lr_scale, self.lr_scale * cfg.lr_reduce_factor)
+            lr_reduced = True
+        return False, lr_reduced, self.checks_since_improve >= cfg.patience
+
+
 def _validation_batches(
     reader: ShardReader,
     *,
