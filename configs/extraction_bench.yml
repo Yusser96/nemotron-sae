@@ -1,0 +1,69 @@
+# Throughput benchmarks: cli.bench_extraction (both backends) and
+# cli.bench_sae_training. Fourteen sites cover every block type (Mamba,
+# attention, MoE) plus the residual stream at early, middle and late depth;
+# the SAE section is the fine-tuning recipe (16384 latents, L0 10, batch 4096).
+run_id: extraction_bench
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  load_quant: auto
+  trust_remote_code: true
+  device_map: auto
+
+data:
+  sources:
+    - {source: epfml/FineWeb2-HQ, name: deu_Latn, language: de}
+    - {source: nvidia/Nemotron-CC-v2.1, name: High-Quality, language: en}
+  split: train
+  streaming: true
+  total_tokens: 65_536
+  seq_len: 2048
+  shuffle_buffer: 0
+  seed: 42
+  validation_fraction: 0.05
+
+extraction:
+  vllm:
+    gpu_memory_utilization: 0.9
+  sink:
+    path: /dev/shm/sae-activations-${SLURM_JOB_ID}
+    lifecycle: consume
+
+sae:
+  arch: jumprelu
+  d_sae: 16384
+  l0_target: 10
+  lr: 7.0e-5
+  batch_size: 4096
+  warmup_steps: 1000
+  l0_warmup_steps: 50000
+  bandwidth: 0.001
+  adam_beta1: 0.0
+  adam_beta2: 0.999
+  decoder_unit_norm: true
+  input_normalization: whole_vector
+  lr_schedule: cosine_warmup_constant
+  gradient_clip_norm: 1.0
+  reconstruction_loss: vector_sum
+  inverse_simpson_floor: 0.015
+  inverse_simpson_max_scale: 0.05
+  inverse_simpson_warmup_steps: 50000
+  log_every: 100
+
+target:
+  sites:
+    - {slug: L2_resid_post, layer: 2, component: resid_post, hook_name: backbone.layers.2}
+    - {slug: L11_mamba_out, layer: 11, component: mamba_out, hook_name: backbone.layers.11.mixer}
+    - {slug: L12_attn_out_prelinear, layer: 12, component: attn_out_prelinear, hook_name: backbone.layers.12.mixer}
+    - {slug: L12_resid_post, layer: 12, component: resid_post, hook_name: backbone.layers.12}
+    - {slug: L13_moe_out, layer: 13, component: moe_out, hook_name: backbone.layers.13.mixer}
+    - {slug: L25_mamba_out, layer: 25, component: mamba_out, hook_name: backbone.layers.25.mixer}
+    - {slug: L26_attn_out_prelinear, layer: 26, component: attn_out_prelinear, hook_name: backbone.layers.26.mixer}
+    - {slug: L26_resid_post, layer: 26, component: resid_post, hook_name: backbone.layers.26}
+    - {slug: L27_moe_out, layer: 27, component: moe_out, hook_name: backbone.layers.27.mixer}
+    - {slug: L41_mamba_out, layer: 41, component: mamba_out, hook_name: backbone.layers.41.mixer}
+    - {slug: L42_attn_out_prelinear, layer: 42, component: attn_out_prelinear, hook_name: backbone.layers.42.mixer}
+    - {slug: L42_resid_post, layer: 42, component: resid_post, hook_name: backbone.layers.42}
+    - {slug: L43_moe_out, layer: 43, component: moe_out, hook_name: backbone.layers.43.mixer}
+    - {slug: L51_resid_post, layer: 51, component: resid_post, hook_name: backbone.layers.51}
