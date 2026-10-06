@@ -84,18 +84,23 @@ def _resolve_quantization_kwargs(cfg: ModelCfg) -> dict[str, Any]:
     return {"torch_dtype": _DTYPE_MAP[cfg.dtype]}
 
 
-def load_model_and_tokenizer(cfg: ModelCfg):
-    """Load the LM and its tokenizer. The model is left in eval mode; weights are frozen
-    (we never train the LM, only SAEs that read its activations)."""
-    quant_kwargs = _resolve_quantization_kwargs(cfg)
+def load_tokenizer(cfg: ModelCfg):
     model_source = normalize_hf_source(cfg.name)
-
     log.info("Loading tokenizer for %s", model_source)
     tokenizer = AutoTokenizer.from_pretrained(
         model_source, trust_remote_code=cfg.trust_remote_code
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
+    return tokenizer
+
+
+def load_model_and_tokenizer(cfg: ModelCfg):
+    """Load the LM and its tokenizer. The model is left in eval mode; weights are frozen
+    (we never train the LM, only SAEs that read its activations)."""
+    quant_kwargs = _resolve_quantization_kwargs(cfg)
+    model_source = normalize_hf_source(cfg.name)
+    tokenizer = load_tokenizer(cfg)
 
     log.info("Loading model %s with %s", model_source, quant_kwargs)
     model = AutoModelForCausalLM.from_pretrained(
