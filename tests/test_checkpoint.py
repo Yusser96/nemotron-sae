@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from sae_pipeline.sae import checkpoint as checkpoint_module
 from sae_pipeline.sae.checkpoint import (
@@ -13,6 +13,7 @@ from sae_pipeline.sae.checkpoint import (
     normalize_hf_repo_id,
     resolve_checkpoint,
     save_checkpoint_pair,
+    write_raw_export,
 )
 from sae_pipeline.sae.train import build_sae
 
@@ -207,3 +208,18 @@ def test_failed_save_does_not_commit_partial_pair(monkeypatch, tmp_path: Path):
             tmp_path, 1, model.state_dict(), {"global_step": 1}, keep_last=2
         )
     assert list(tmp_path.iterdir()) == []
+
+
+def test_write_raw_export_is_atomic_and_matches_the_export_state(tmp_path: Path):
+    torch.manual_seed(0)
+    sae = build_sae("jumprelu", d_in=4, d_sae=6)
+    center = torch.randn(4)
+    path = write_raw_export(sae, tmp_path / "export.safetensors", input_scale=0.5, activation_center=center)
+
+    assert path == tmp_path / "export.safetensors"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["export.safetensors"]
+    expected = sae.raw_export_state_dict(0.5, input_center=center, output_center=center)
+    written = load_file(str(path))
+    assert written.keys() == expected.keys()
+    for key, value in expected.items():
+        torch.testing.assert_close(written[key], value)

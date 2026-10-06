@@ -14,13 +14,16 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import unquote, urlparse
 
 import numpy as np
 import torch
 from huggingface_hub import hf_hub_download, list_repo_files
 from safetensors.torch import load_file, save_file
+
+if TYPE_CHECKING:
+    from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 log = logging.getLogger(__name__)
 
@@ -431,6 +434,29 @@ def save_checkpoint_pair(
         step=step,
         source=str(directory),
     )
+
+
+def write_raw_export(
+    sae: JumpReLUSAE,
+    path: str | Path,
+    *,
+    input_scale: float,
+    activation_center: torch.Tensor | None = None,
+) -> Path:
+    """Atomically write a normalised SAE re-expressed in raw activation units."""
+
+    path = Path(path)
+    temporary = path.with_name(f".{path.name}.tmp")
+    save_file(
+        sae.raw_export_state_dict(
+            input_scale,
+            input_center=activation_center,
+            output_center=activation_center,
+        ),
+        str(temporary),
+    )
+    temporary.replace(path)
+    return path
 
 
 def prune_checkpoints(out_dir: str | Path, *, keep_last: int) -> None:

@@ -33,6 +33,7 @@ from sae_pipeline.sae.checkpoint import (
     resolve_checkpoint,
     restore_random_state,
     save_checkpoint_pair,
+    write_raw_export,
 )
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.normalization import (
@@ -48,7 +49,6 @@ from sae_pipeline.sae.objective import (
     optimizer_step,
     training_loss,
 )
-from safetensors.torch import save_file
 
 log = logging.getLogger(__name__)
 
@@ -713,23 +713,6 @@ def train_sae(
             metadata_dir=metadata_dir,
         )
 
-    def write_raw_export(step: int) -> Path | None:
-        if cfg.input_normalization != "whole_vector" or not isinstance(sae, JumpReLUSAE):
-            return None
-        export_path = out_dir / f"sae_export_step_{step:07d}.safetensors"
-        temporary = export_path.with_name(f".{export_path.name}.tmp")
-        save_file(
-            sae.raw_export_state_dict(
-                normalization_scale,
-                input_center=activation_center,
-                output_center=activation_center,
-            ),
-            str(temporary),
-        )
-        temporary.replace(export_path)
-        log.info("Wrote raw-activation SAE export %s", export_path)
-        return export_path
-
     def write_checkpoint(step: int) -> Path:
         saved = save_checkpoint_pair(
             out_dir=out_dir,
@@ -1054,5 +1037,12 @@ def train_sae(
 
     if final_checkpoint is None:
         raise ValueError("Training produced no checkpoint; n_steps must be positive")
-    write_raw_export(completed_step)
+    if cfg.input_normalization == "whole_vector" and isinstance(sae, JumpReLUSAE):
+        export_path = write_raw_export(
+            sae,
+            out_dir / f"sae_export_step_{completed_step:07d}.safetensors",
+            input_scale=normalization_scale,
+            activation_center=activation_center,
+        )
+        log.info("Wrote raw-activation SAE export %s", export_path)
     return final_checkpoint
