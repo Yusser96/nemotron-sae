@@ -35,6 +35,8 @@ configs/finetuning.yml
 configs/*.local.yml
 configs/*.local.yaml
 configs/private/
+configs/soofi_*.yml
+configs/soofi_*.yaml
 
 # Local per-experiment configuration overrides stay untracked.
 configs/finetuning_*.yml
@@ -51,3 +53,4 @@ tests/*soofi*.py
 tests/test_select_l26_program.py
 internal_docs/
 internal-docs/
+sae_pipeline.tar.gz
