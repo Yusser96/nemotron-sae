@@ -479,7 +479,3 @@ def prune_checkpoints(out_dir: str | Path, *, keep_last: int) -> None:
         weights_path.unlink()
         state_path.unlink()
         log.info("Removed old checkpoint pair %s and %s", weights_path, state_path)
-
-
-# Clear, short aliases for callers and compatibility with earlier private helpers.
-latest_checkpoint = resolve_checkpoint
