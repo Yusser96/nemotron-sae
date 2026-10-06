@@ -369,6 +369,82 @@ def _scheduled_l0_target(step: int, base_target: int, cfg: SAECfg) -> float:
     return float(cfg.l0_target_start + alpha * (base_target - cfg.l0_target_start))
 
 
+def _prepare_validation_probes(
+    cache_dir: str | Path,
+    d_in: int,
+    *,
+    validation_cache_dirs: dict[str, str | Path],
+    validation_tokens: int | None,
+    validation_dead_tokens: int,
+    early_stopping: EarlyStoppingCfg,
+) -> tuple[dict[str, ShardReader], dict[str, dict[str, object]], ShardReader | None, int]:
+    """Validate config and open the validation + fixed train-probe readers.
+
+    Returns (validation_readers, validation_cache_signature, train_probe_reader,
+    probe_tokens).
+    """
+    if early_stopping.enabled:
+        if not validation_cache_dirs:
+            raise ValueError("Validation-based early stopping requires validation caches")
+        if validation_tokens is None or validation_tokens <= 0:
+            raise ValueError("Validation-based early stopping requires a positive token count")
+        if len(validation_cache_dirs) < 2:
+            raise ValueError("Bilingual early stopping requires two language validation caches")
+    validation_readers = {
+        language: ShardReader(path)
+        for language, path in sorted(validation_cache_dirs.items())
+    }
+    validation_cache_signature = _probe_cache_signature(validation_readers)
+    train_probe_reader: ShardReader | None = None
+    probe_tokens = validation_tokens if validation_tokens is not None else validation_dead_tokens
+    if validation_readers:
+        if probe_tokens <= 0:
+            raise ValueError("Validation trajectories require a positive fixed-probe token count")
+        undersized = {
+            language: reader.manifest.total_tokens
+            for language, reader in validation_readers.items()
+            if reader.manifest.total_tokens < probe_tokens
+        }
+        if undersized:
+            raise ValueError(
+                f"Validation caches are smaller than the {probe_tokens}-token probe: {undersized}"
+            )
+        train_probe_reader = ShardReader(cache_dir)
+        train_manifest = train_probe_reader.manifest
+        if not train_manifest.complete or train_manifest.partition != "train":
+            raise ValueError("Training probe must come from a complete training cache")
+        if train_manifest.d_activation != d_in:
+            raise ValueError("Training probe activation dimension differs from the SAE")
+        if train_probe_reader.manifest.total_tokens < probe_tokens:
+            raise ValueError(
+                f"Training cache has {train_probe_reader.manifest.total_tokens} tokens; "
+                f"the fixed probe requires {probe_tokens}"
+            )
+        for language, reader in validation_readers.items():
+            manifest = reader.manifest
+            if not manifest.complete or manifest.partition != "validation":
+                raise ValueError(f"{language} probe must come from a complete validation cache")
+            if manifest.language != language:
+                raise ValueError(
+                    f"Validation cache keyed as {language!r} declares language "
+                    f"{manifest.language!r}"
+                )
+            if (manifest.model, manifest.layer, manifest.component) != (
+                train_manifest.model,
+                train_manifest.layer,
+                train_manifest.component,
+            ):
+                raise ValueError(f"{language} validation cache belongs to a different site/model")
+            if manifest.d_activation != d_in:
+                raise ValueError(f"{language} validation activation dimension differs from the SAE")
+        log.info(
+            "Initialized fixed %d-token train probe from %s",
+            probe_tokens,
+            cache_dir,
+        )
+    return validation_readers, validation_cache_signature, train_probe_reader, probe_tokens
+
+
 def _active_subspace(
     cache_dir: str | Path,
     *,
@@ -598,65 +674,16 @@ def train_sae(
     out_dir.mkdir(parents=True, exist_ok=True)
     early_stopping = early_stopping or EarlyStoppingCfg()
     validation_cache_dirs = validation_cache_dirs or {}
-    if early_stopping.enabled:
-        if not validation_cache_dirs:
-            raise ValueError("Validation-based early stopping requires validation caches")
-        if validation_tokens is None or validation_tokens <= 0:
-            raise ValueError("Validation-based early stopping requires a positive token count")
-        if len(validation_cache_dirs) < 2:
-            raise ValueError("Bilingual early stopping requires two language validation caches")
-    validation_readers = {
-        language: ShardReader(path)
-        for language, path in sorted(validation_cache_dirs.items())
-    }
-    validation_cache_signature = _probe_cache_signature(validation_readers)
-    train_probe_reader: ShardReader | None = None
-    probe_tokens = validation_tokens if validation_tokens is not None else validation_dead_tokens
-    if validation_readers:
-        if probe_tokens <= 0:
-            raise ValueError("Validation trajectories require a positive fixed-probe token count")
-        undersized = {
-            language: reader.manifest.total_tokens
-            for language, reader in validation_readers.items()
-            if reader.manifest.total_tokens < probe_tokens
-        }
-        if undersized:
-            raise ValueError(
-                f"Validation caches are smaller than the {probe_tokens}-token probe: {undersized}"
-            )
-        train_probe_reader = ShardReader(cache_dir)
-        train_manifest = train_probe_reader.manifest
-        if not train_manifest.complete or train_manifest.partition != "train":
-            raise ValueError("Training probe must come from a complete training cache")
-        if train_manifest.d_activation != d_in:
-            raise ValueError("Training probe activation dimension differs from the SAE")
-        if train_probe_reader.manifest.total_tokens < probe_tokens:
-            raise ValueError(
-                f"Training cache has {train_probe_reader.manifest.total_tokens} tokens; "
-                f"the fixed probe requires {probe_tokens}"
-            )
-        for language, reader in validation_readers.items():
-            manifest = reader.manifest
-            if not manifest.complete or manifest.partition != "validation":
-                raise ValueError(f"{language} probe must come from a complete validation cache")
-            if manifest.language != language:
-                raise ValueError(
-                    f"Validation cache keyed as {language!r} declares language "
-                    f"{manifest.language!r}"
-                )
-            if (manifest.model, manifest.layer, manifest.component) != (
-                train_manifest.model,
-                train_manifest.layer,
-                train_manifest.component,
-            ):
-                raise ValueError(f"{language} validation cache belongs to a different site/model")
-            if manifest.d_activation != d_in:
-                raise ValueError(f"{language} validation activation dimension differs from the SAE")
-        log.info(
-            "Initialized fixed %d-token train probe from %s",
-            probe_tokens,
+    validation_readers, validation_cache_signature, train_probe_reader, probe_tokens = (
+        _prepare_validation_probes(
             cache_dir,
+            d_in,
+            validation_cache_dirs=validation_cache_dirs,
+            validation_tokens=validation_tokens,
+            validation_dead_tokens=validation_dead_tokens,
+            early_stopping=early_stopping,
         )
+    )
     early_stop_monitor = _ValidationEarlyStop()
     validation_log_path = out_dir / "validation_log.jsonl"
     eval_interval = cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
