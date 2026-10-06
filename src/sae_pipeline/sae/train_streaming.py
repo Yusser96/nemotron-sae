@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import IO, Protocol
@@ -27,6 +27,7 @@ from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg, StreamCfg
 from sae_pipeline.eval.metrics import ReconMetrics, streaming_reconstruction_metrics
 from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves
+from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.checkpoint import (
     capture_random_state,
@@ -459,7 +460,7 @@ def run_streaming_training(
     *,
     sites: dict[str, StreamingSite],
     token_stream: TokenStream,
-    extract_activations: Callable[[torch.Tensor], dict[str, torch.Tensor]],
+    extractor: ActivationExtractor,
     stream_cfg: StreamCfg,
     early_stopping: EarlyStoppingCfg,
     tokens_per_fwd: int,
@@ -469,8 +470,8 @@ def run_streaming_training(
 ) -> bool:
     """Train every site from one continuous stream of model activations.
 
-    ``extract_activations`` maps a ``(sequences, seq_len)`` token batch to
-    ``{slug: (tokens, d_in)}`` activations. Returns True once the run is
+    ``extractor`` maps each ``(sequences, seq_len)`` token batch to
+    ``{slug: (tokens, d_in)}`` activations for every site. Returns True once the run is
     complete (every site stopped, hit the token cap, or the corpus ran out);
     False when it paused at ``stream_cfg.stop_after_seconds`` and should be
     resumed. State is checkpointed so a resumed run repeats no tokens.
@@ -522,7 +523,7 @@ def run_streaming_training(
             done = True
             break
 
-        captured = extract_activations(token_batch)
+        captured = extractor.extract(token_batch).activations
         tokens_processed += tokens_per_fwd
         checkpointed = False
         for site in active:

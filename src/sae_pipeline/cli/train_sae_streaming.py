@@ -21,13 +21,11 @@ import os
 import sys
 from pathlib import Path
 
-import torch
-
 from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for, validation_manifest_path_for
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
+from sae_pipeline.extraction.hf import HFHookExtractor
 from sae_pipeline.hooks.components import ComponentSpec
-from sae_pipeline.hooks.extractor import capture_many
 from sae_pipeline.model.loader import load_model_and_tokenizer
 from sae_pipeline.model.topology import HookSite, dump_topology, enumerate_hooks
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
@@ -138,17 +136,14 @@ def main() -> None:
             resume_checkpoint=resume_checkpoint,
         )
 
-    def extract_activations(token_batch: torch.Tensor) -> dict[str, torch.Tensor]:
-        with capture_many(model, requests, device=cfg.stream.sae_device) as buffers:
-            with torch.no_grad():
-                model(token_batch.to(cfg.stream.model_device))
-            return {slug: buffer.consume() for slug, buffer in buffers.items()}
-
+    extractor = HFHookExtractor(
+        model, requests, model_device=cfg.stream.model_device, capture_device=cfg.stream.sae_device
+    )
     try:
         run_streaming_training(
             sites=sites,
             token_stream=ResumableTokenStream(cfg.data, tokenizer),
-            extract_activations=extract_activations,
+            extractor=extractor,
             stream_cfg=cfg.stream,
             early_stopping=cfg.early_stopping,
             tokens_per_fwd=cfg.cache.tokens_per_fwd,
@@ -157,6 +152,7 @@ def main() -> None:
             out_root=out_root,
         )
     finally:
+        extractor.close()
         for site in sites.values():
             site.close()
 

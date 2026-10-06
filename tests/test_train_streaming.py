@@ -13,6 +13,7 @@ from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.cache.writer import ShardWriter
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg, StreamCfg
+from sae_pipeline.extraction.base import ActivationBatch
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.objective import coefficients_at, training_loss
@@ -248,16 +249,19 @@ class _CountingStream:
         self.position = int(state["position"])
 
 
-def _extract(token_batch: torch.Tensor) -> dict[str, torch.Tensor]:
-    generator = torch.Generator().manual_seed(int(token_batch[0, 0]))
-    return {"site": torch.randn(token_batch.numel(), D_IN, generator=generator)}
+class _SeededExtractor:
+    """Deterministic activations derived from each batch's first token."""
+
+    def extract(self, token_batch: torch.Tensor) -> ActivationBatch:
+        generator = torch.Generator().manual_seed(int(token_batch[0, 0]))
+        return ActivationBatch(token_batch, {"site": torch.randn(token_batch.numel(), D_IN, generator=generator)})
 
 
 def _run(tmp_path: Path, site, stream, *, stream_cfg: StreamCfg, early_stopping=None) -> bool:
     return run_streaming_training(
         sites={"site": site},
         token_stream=stream,
-        extract_activations=_extract,
+        extractor=_SeededExtractor(),
         stream_cfg=stream_cfg,
         early_stopping=early_stopping or EarlyStoppingCfg(),
         tokens_per_fwd=TOKENS_PER_FWD,
