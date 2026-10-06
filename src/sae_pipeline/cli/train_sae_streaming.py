@@ -24,9 +24,11 @@ from pathlib import Path
 from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for, validation_manifest_path_for
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
+from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.hf import HFHookExtractor
+from sae_pipeline.extraction.vllm_layout import require_residual_site
 from sae_pipeline.hooks.components import ComponentSpec
-from sae_pipeline.model.loader import load_model_and_tokenizer
+from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import HookSite, dump_topology, enumerate_hooks
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.train_streaming import init_streaming_site, run_streaming_training
@@ -93,53 +95,73 @@ def main() -> None:
     d_sae = cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0]
     l0_target = cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0]
 
-    # Pin the whole model to one device: with several GPUs visible, a plain
-    # "auto" device_map would spread its layers across all of them.
-    model_cfg = cfg.model.model_copy(update={"device_map": {"": cfg.stream.model_device}})
-    model, tokenizer = load_model_and_tokenizer(model_cfg)
-    model.eval()
-    dump_topology(enumerate_hooks(model), out_root / "model_topology.json")
-
-    requests = {}
-    sites = {}
-    for target in cfg.target.sites:
-        requests[target.slug] = (
+    requests = {
+        target.slug: (
             ComponentSpec.parse(target.layer, target.component),
             HookSite(target.component, target.layer, target.hook_name),
         )
-        validation_dirs, d_in = _validation_cache_dirs(cfg, target, languages)
-        site_dir = out_root / target.slug
-        resume_checkpoint = None
-        if site_dir.exists():
-            try:
-                resume_checkpoint = resolve_checkpoint(site_dir, require_trainer_state=True)
-            except FileNotFoundError:
-                pass
-        checkpoint_filename = cfg.sae.checkpoint_filename
-        if cfg.sae.checkpoint_filename_template is not None:
-            checkpoint_filename = cfg.sae.checkpoint_filename_template.format(slug=target.slug)
-        # sae.normalization_dir holds one precomputed statistic per site slug.
-        normalization_dir = None if cfg.sae.normalization_dir is None else Path(cfg.sae.normalization_dir) / target.slug
-        sites[target.slug] = init_streaming_site(
-            slug=target.slug,
-            sae_cfg=cfg.sae,
-            d_in=d_in,
-            arch=arch,
-            d_sae=d_sae,
-            l0_target=l0_target,
-            out_dir=site_dir,
-            device=cfg.stream.sae_device,
-            validation_cache_dirs=validation_dirs,
-            probe_tokens=cfg.eval.trajectory_n_tokens,
-            normalization_dir=normalization_dir,
-            checkpoint_filename=checkpoint_filename,
-            resume_checkpoint=resume_checkpoint,
+        for target in cfg.target.sites
+    }
+    # Check every validation cache before spending minutes loading the model.
+    validation = {target.slug: _validation_cache_dirs(cfg, target, languages) for target in cfg.target.sites}
+    use_vllm = cfg.extraction.backend == "vllm"
+    extractor: ActivationExtractor
+    if use_vllm:
+        from sae_pipeline.extraction.vllm import VLLMExtractor
+
+        # Fail before loading anything if a site is not on the residual stream.
+        for spec, _site in requests.values():
+            require_residual_site(spec)
+        tokenizer = load_tokenizer(cfg.model)
+        # Start the engine before the SAEs allocate: vLLM sizes itself from
+        # extraction.vllm.gpu_memory_utilization at startup.
+        specs = {slug: spec for slug, (spec, _site) in requests.items()}
+        extractor = VLLMExtractor.from_config(cfg, specs, capture_device=cfg.stream.sae_device)
+    else:
+        # Pin the whole model to one device: with several GPUs visible, a plain
+        # "auto" device_map would spread its layers across all of them.
+        model_cfg = cfg.model.model_copy(update={"device_map": {"": cfg.stream.model_device}})
+        model, tokenizer = load_model_and_tokenizer(model_cfg)
+        model.eval()
+        dump_topology(enumerate_hooks(model), out_root / "model_topology.json")
+        extractor = HFHookExtractor(
+            model, requests, model_device=cfg.stream.model_device, capture_device=cfg.stream.sae_device
         )
 
-    extractor = HFHookExtractor(
-        model, requests, model_device=cfg.stream.model_device, capture_device=cfg.stream.sae_device
-    )
+    sites = {}
     try:
+        for target in cfg.target.sites:
+            validation_dirs, d_in = validation[target.slug]
+            site_dir = out_root / target.slug
+            resume_checkpoint = None
+            if site_dir.exists():
+                try:
+                    resume_checkpoint = resolve_checkpoint(site_dir, require_trainer_state=True)
+                except FileNotFoundError:
+                    pass
+            checkpoint_filename = cfg.sae.checkpoint_filename
+            if cfg.sae.checkpoint_filename_template is not None:
+                checkpoint_filename = cfg.sae.checkpoint_filename_template.format(slug=target.slug)
+            # sae.normalization_dir holds one precomputed statistic per site slug.
+            normalization_dir = None
+            if cfg.sae.normalization_dir is not None:
+                normalization_dir = Path(cfg.sae.normalization_dir) / target.slug
+            sites[target.slug] = init_streaming_site(
+                slug=target.slug,
+                sae_cfg=cfg.sae,
+                d_in=d_in,
+                arch=arch,
+                d_sae=d_sae,
+                l0_target=l0_target,
+                out_dir=site_dir,
+                device=cfg.stream.sae_device,
+                validation_cache_dirs=validation_dirs,
+                probe_tokens=cfg.eval.trajectory_n_tokens,
+                normalization_dir=normalization_dir,
+                checkpoint_filename=checkpoint_filename,
+                resume_checkpoint=resume_checkpoint,
+            )
+
         run_streaming_training(
             sites=sites,
             token_stream=ResumableTokenStream(cfg.data, tokenizer),
