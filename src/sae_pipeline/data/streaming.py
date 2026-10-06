@@ -152,6 +152,89 @@ def pack_token_stream(
     yield from _pack_token_ids(tokenized(), seq_len, total_tokens)
 
 
+class ResumableTokenStream:
+    """Unbounded, checkpoint-resumable token-sequence stream over all sources.
+
+    Each configured source streams fresh *training* documents (the validation
+    partition, see :func:`_is_validation_document`, is never touched),
+    tokenized and packed into ``seq_len`` sequences, round-robined across
+    sources so each contributes equally. There is no token budget: the caller
+    decides when to stop.
+
+    State is just each source's underlying ``datasets.IterableDataset``
+    state_dict. Per the library's own documentation, resuming loses only the
+    in-flight shuffle buffer and the current partially-packed document, i.e.
+    at most a few hundred tokens per source — never a repeat.
+    """
+
+    def __init__(self, cfg: DataCfg, tokenizer: PreTrainedTokenizerBase) -> None:
+        self.cfg = cfg
+        self.tokenizer = tokenizer
+        self.sources = configured_sources(cfg)
+        if not self.sources:
+            raise ValueError("ResumableTokenStream requires at least one source")
+        self._datasets: list[Any] = [_load_source_dataset(cfg, source) for source in self.sources]
+        self._sequence_iters: list[Iterator[torch.Tensor]] = []
+        self._active: list[int] = list(range(len(self.sources)))
+        self._cursor = 0
+        self._rebuild_sequence_iters()
+
+    def _rebuild_sequence_iters(self) -> None:
+        self._sequence_iters = [self._sequences_for(i) for i in range(len(self.sources))]
+
+    def _sequences_for(self, index: int) -> Iterator[torch.Tensor]:
+        source = self.sources[index]
+        docs = _filtered_documents(
+            self._datasets[index], source, "train", self.cfg.validation_fraction
+        )
+        yield from pack_token_stream(docs, self.tokenizer, seq_len=self.cfg.seq_len)
+
+    def _next_sequence(self) -> torch.Tensor:
+        while self._active:
+            cursor = self._cursor % len(self._active)
+            index = self._active[cursor]
+            try:
+                seq = next(self._sequence_iters[index])
+            except StopIteration:
+                self._active.pop(cursor)
+                continue
+            self._cursor = cursor + 1
+            return seq
+        raise StopIteration("All streaming sources are exhausted")
+
+    def next_batch(self, batch_size: int) -> torch.Tensor:
+        """Return one (batch_size, seq_len) int64 token-id batch."""
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        return torch.stack([self._next_sequence() for _ in range(batch_size)], dim=0)
+
+    def state_dict(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "active": list(self._active),
+            "cursor": self._cursor,
+            "sources": [ds.state_dict() for ds in self._datasets],
+        }
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        sources_state = list(state["sources"])  # type: ignore[arg-type]
+        if len(sources_state) != len(self._datasets):
+            raise ValueError(
+                f"Resumable stream state has {len(sources_state)} sources; "
+                f"current config has {len(self._datasets)}"
+            )
+        for ds, saved in zip(self._datasets, sources_state):
+            ds.load_state_dict(saved)
+        active = list(state["active"])  # type: ignore[arg-type]
+        if any(not 0 <= i < len(self._datasets) for i in active):
+            raise ValueError(f"Invalid active-source list in resumable stream state: {active}")
+        self._active = active
+        self._cursor = int(state["cursor"])  # type: ignore[arg-type]
+        # Fresh generators pick up each dataset's own resumed iteration
+        # position; the in-flight packing buffer is intentionally dropped.
+        self._rebuild_sequence_iters()
+
+
 def batch_sequences(
     seqs: Iterator[torch.Tensor], batch_size: int
 ) -> Iterator[torch.Tensor]:
