@@ -18,10 +18,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 from pathlib import Path
 
 from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for, validation_manifest_path_for
+from sae_pipeline.cli._process import run_then_hard_exit
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
@@ -179,11 +179,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
-    # Triton can leave an autotuner worker thread alive after the CUDA work is
-    # done, and normal interpreter shutdown then aborts in PyGILState_Release.
-    # Every checkpoint and log is committed by now, so skip that shutdown path
-    # (cli/cache_activations.py does the same).
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0)
+    run_then_hard_exit(main)

@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import signal
-import sys
 import time
 from pathlib import Path
 
@@ -24,6 +23,7 @@ from tqdm import tqdm
 
 from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.writer import CacheBudget, ShardWriter
+from sae_pipeline.cli._process import run_then_hard_exit
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import make_token_loader
 from sae_pipeline.extraction.base import ActivationExtractor
@@ -381,12 +381,4 @@ def _cache_forwards(
 
 
 if __name__ == "__main__":
-    main()
-    # Triton may leave an autotuner worker thread alive after the CUDA work has
-    # completed.  On this model/runtime combination, normal interpreter
-    # finalisation can then abort with PyGILState_Release even though every
-    # cache shard and manifest has been committed.  Flush the CLI output and
-    # bypass that shutdown path only after main() has returned successfully.
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0)
+    run_then_hard_exit(main)

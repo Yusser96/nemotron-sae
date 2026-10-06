@@ -22,6 +22,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file, save_file
 
+from sae_pipeline.cli._process import run_then_hard_exit
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.hooks.components import ComponentSpec, site_requests
@@ -114,4 +115,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_then_hard_exit(main)
