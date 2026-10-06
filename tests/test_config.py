@@ -158,3 +158,30 @@ def test_objective_early_stopping_config_validation():
         EarlyStoppingCfg(min_lr_scale=0.0)
     with pytest.raises(ValueError, match="positive"):
         EarlyStoppingCfg(improvement_rel_tol=0.0)
+
+
+def test_stream_config_defaults_and_validation():
+    from sae_pipeline.config import StreamCfg
+
+    cfg = PipelineCfg.from_yaml("configs/dev.yaml")
+    assert cfg.stream.enabled is False
+    assert cfg.stream.model_device == cfg.stream.sae_device == "cuda:0"
+
+    assert StreamCfg(milestone_tokens=[10, 20]).milestone_tokens == [10, 20]
+    with pytest.raises(ValueError, match="increasing"):
+        StreamCfg(milestone_tokens=[20, 10])
+    with pytest.raises(ValueError, match="increasing"):
+        StreamCfg(milestone_tokens=[10, 10])
+    with pytest.raises(ValueError, match="positive"):
+        StreamCfg(token_cap=0)
+    with pytest.raises(ValueError, match="negative"):
+        StreamCfg(stop_after_seconds=-1)
+
+
+def test_streaming_requires_whole_batches_per_forward():
+    cfg = PipelineCfg.from_yaml("configs/dev.yaml")
+    batch_size = cfg.sae.batch_size
+
+    cfg.with_overrides(**{"stream.enabled": True, "cache.tokens_per_fwd": 2 * batch_size})
+    with pytest.raises(ValueError, match="multiple of sae.batch_size"):
+        cfg.with_overrides(**{"stream.enabled": True, "cache.tokens_per_fwd": batch_size + 1})

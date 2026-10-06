@@ -155,6 +155,9 @@ class SAECfg(BaseModel):
     checkpoint_source: str | Path | None = None
     checkpoint_mode: CheckpointMode = "finetune"
     checkpoint_filename: str | None = None
+    # For multi-site runs: ``{slug}`` is replaced by each site's slug to pick
+    # that site's file in checkpoint_source, e.g. "{slug}/sae_weights.safetensors".
+    checkpoint_filename_template: str | None = None
     checkpoint_revision: str = "main"
     keep_last_checkpoints: int = 2
 
@@ -398,6 +401,50 @@ class EarlyStoppingCfg(BaseModel):
         return self
 
 
+class StreamCfg(BaseModel):
+    """Training from live model activations instead of an activation cache.
+
+    The frozen model runs continuously on fresh documents; only a fixed
+    validation set lives on disk. Each forward pass yields
+    ``cache.tokens_per_fwd`` activations per site, split into whole
+    ``sae.batch_size`` batches, so resuming needs only the token stream state.
+    """
+
+    enabled: bool = False
+    model_device: str = "cuda:0"
+    sae_device: str = "cuda:0"
+    # Hard cap on streamed training tokens per site, regardless of early
+    # stopping. Extra raw exports are written at each milestone token count.
+    token_cap: int | None = None
+    milestone_tokens: list[int] = Field(default_factory=list)
+    # Stop cleanly (checkpoint + exit) after this much wall time, so a job can
+    # end before a scheduler time limit and be resumed.
+    stop_after_seconds: float | None = None
+
+    @field_validator("token_cap")
+    @classmethod
+    def _token_cap_positive(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("stream.token_cap must be positive when set")
+        return value
+
+    @field_validator("milestone_tokens")
+    @classmethod
+    def _milestones_sorted_positive(cls, value: list[int]) -> list[int]:
+        if any(v <= 0 for v in value):
+            raise ValueError("stream.milestone_tokens must all be positive")
+        if list(value) != sorted(set(value)):
+            raise ValueError("stream.milestone_tokens must be strictly increasing")
+        return value
+
+    @field_validator("stop_after_seconds")
+    @classmethod
+    def _stop_after_seconds_nonnegative(cls, value: float | None) -> float | None:
+        if value is not None and value < 0:
+            raise ValueError("stream.stop_after_seconds cannot be negative")
+        return value
+
+
 class LogCfg(BaseModel):
     use_wandb: bool = False
     wandb_project: str = "nemotron-sae"
@@ -419,7 +466,17 @@ class PipelineCfg(BaseModel):
     target: TargetCfg
     eval: EvalCfg = Field(default_factory=EvalCfg)
     early_stopping: EarlyStoppingCfg = Field(default_factory=EarlyStoppingCfg)
+    stream: StreamCfg = Field(default_factory=StreamCfg)
     log: LogCfg = Field(default_factory=LogCfg)
+
+    @model_validator(mode="after")
+    def _stream_forward_yields_whole_batches(self) -> "PipelineCfg":
+        if self.stream.enabled and self.cache.tokens_per_fwd % self.sae.batch_size:
+            raise ValueError(
+                "cache.tokens_per_fwd must be a multiple of sae.batch_size for streaming "
+                f"(tokens_per_fwd={self.cache.tokens_per_fwd}, batch_size={self.sae.batch_size})"
+            )
+        return self
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "PipelineCfg":
