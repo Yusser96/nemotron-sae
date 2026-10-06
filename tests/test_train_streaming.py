@@ -1,7 +1,9 @@
 """Streaming SAE training: per-step parity with cached training, evaluation, loop."""
 
+import itertools
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -10,8 +12,9 @@ from safetensors.torch import load_file, save_file
 from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.cache.writer import ShardWriter
-from sae_pipeline.config import EarlyStoppingCfg, SAECfg
+from sae_pipeline.config import EarlyStoppingCfg, SAECfg, StreamCfg
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
+from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.objective import coefficients_at, training_loss
 from sae_pipeline.sae.train import train_sae
 from sae_pipeline.sae.train_streaming import (
@@ -19,6 +22,7 @@ from sae_pipeline.sae.train_streaming import (
     evaluate_site,
     init_streaming_site,
     record_baseline,
+    run_streaming_training,
     streaming_step,
 )
 
@@ -219,3 +223,114 @@ def test_a_resumed_site_without_a_stored_baseline_reports_no_deltas(tmp_path):
 
     assert site.baseline is None
     assert not (site.out_dir / "baseline_metrics.json").exists()
+
+
+SEQ_LEN, TOKENS_PER_FWD = 8, 2 * BATCH
+
+
+class _CountingStream:
+    """Token batches whose first token is a global sequence index."""
+
+    def __init__(self) -> None:
+        self.position = 0
+        self.first_rows: list[int] = []
+
+    def next_batch(self, batch_size: int) -> torch.Tensor:
+        rows = torch.arange(self.position, self.position + batch_size).unsqueeze(1).repeat(1, SEQ_LEN)
+        self.first_rows.append(self.position)
+        self.position += batch_size
+        return rows
+
+    def state_dict(self) -> dict[str, object]:
+        return {"position": self.position}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.position = int(state["position"])
+
+
+def _extract(token_batch: torch.Tensor) -> dict[str, torch.Tensor]:
+    generator = torch.Generator().manual_seed(int(token_batch[0, 0]))
+    return {"site": torch.randn(token_batch.numel(), D_IN, generator=generator)}
+
+
+def _run(tmp_path: Path, site, stream, *, stream_cfg: StreamCfg, early_stopping=None) -> bool:
+    return run_streaming_training(
+        sites={"site": site},
+        token_stream=stream,
+        extract_activations=_extract,
+        stream_cfg=stream_cfg,
+        early_stopping=early_stopping or EarlyStoppingCfg(),
+        tokens_per_fwd=TOKENS_PER_FWD,
+        seq_len=SEQ_LEN,
+        device="cpu",
+        out_root=tmp_path,
+    )
+
+
+def _logged_steps(site) -> list[int]:
+    return [json.loads(line)["step"] for line in site.log_path.read_text().splitlines()]
+
+
+def test_runs_to_the_token_cap_with_scheduled_evaluations(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), eval_interval_steps=2, ckpt_every=2)
+    site = _site(tmp_path, cfg, _validation_dirs(tmp_path))
+    stream = _CountingStream()
+
+    done = _run(tmp_path, site, stream, stream_cfg=StreamCfg(enabled=True, token_cap=6 * BATCH))
+    site.close()
+
+    assert done is True
+    assert (tmp_path / "DONE").exists()
+    assert site.step == 6 and site.stopped
+    assert _logged_steps(site) == [1, 2, 3, 4, 5, 6]
+    evaluated = [json.loads(line)["step"] for line in site.validation_log_path.read_text().splitlines()]
+    assert evaluated == [2, 2, 4, 4, 6, 6]
+    assert stream.position == 3 * TOKENS_PER_FWD // SEQ_LEN
+
+
+def test_pauses_at_the_time_limit_and_resumes_without_repeating_tokens(tmp_path, monkeypatch):
+    warm = _warm_start(tmp_path / "warm.safetensors")
+    clock = itertools.count()
+    monkeypatch.setattr(
+        "sae_pipeline.sae.train_streaming.time", SimpleNamespace(monotonic=lambda: float(next(clock)))
+    )
+    site = _site(tmp_path, _sae_cfg(warm, ckpt_every=100))
+    first = _CountingStream()
+
+    done = _run(tmp_path, site, first, stream_cfg=StreamCfg(enabled=True, stop_after_seconds=3))
+    site.close()
+
+    assert done is False and not (tmp_path / "DONE").exists()
+    assert site.step == 4  # two forward passes, each two SAE batches
+
+    resumed = _site(
+        tmp_path,
+        _sae_cfg(warm, ckpt_every=100),
+        resume_checkpoint=resolve_checkpoint(site.out_dir, require_trainer_state=True),
+    )
+    second = _CountingStream()
+    done = _run(tmp_path, resumed, second, stream_cfg=StreamCfg(enabled=True, token_cap=8 * BATCH))
+    resumed.close()
+
+    assert done is True
+    assert resumed.step == 8
+    assert _logged_steps(resumed) == list(range(1, 9))
+    assert set(first.first_rows).isdisjoint(second.first_rows)
+    assert second.first_rows[0] == first.position
+
+
+def test_stops_early_once_the_validation_objective_plateaus(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), lr=0.0, eval_interval_steps=1)
+    site = _site(tmp_path, cfg, _validation_dirs(tmp_path))
+    early_stopping = EarlyStoppingCfg(
+        enabled=True, mode="objective", minimum_steps=0, patience=2, lr_plateau_patience=1
+    )
+
+    done = _run(tmp_path, site, _CountingStream(), stream_cfg=StreamCfg(enabled=True), early_stopping=early_stopping)
+    site.close()
+
+    assert done is True and site.stopped
+    assert site.step == 3  # best at step 1, stale at 2 and 3
+    rows = [json.loads(line) for line in site.validation_log_path.read_text().splitlines()]
+    assert rows[-1]["early_stop_triggered"] is True
+    assert resolve_checkpoint(site.out_dir, require_trainer_state=True).step == 3
