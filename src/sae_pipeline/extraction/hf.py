@@ -38,4 +38,4 @@ class HFHookExtractor:
         return ActivationBatch(token_ids=token_ids, activations=activations)
 
     def close(self) -> None:
-        pass
+        """Nothing to release: the model is owned by the caller."""
