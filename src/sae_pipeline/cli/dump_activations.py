@@ -24,8 +24,7 @@ from safetensors.torch import load_file, save_file
 
 from sae_pipeline.cli._process import run_then_hard_exit
 from sae_pipeline.config import PipelineCfg
-from sae_pipeline.extraction.base import ActivationExtractor
-from sae_pipeline.hooks.components import ComponentSpec, site_requests
+from sae_pipeline.extraction.build import build_extractor
 
 log = logging.getLogger(__name__)
 
@@ -48,23 +47,6 @@ def sample_validation_token_ids(cfg: PipelineCfg, tokenizer, n_sequences: int) -
     return torch.stack(rows)
 
 
-def _hf_extractor(cfg: PipelineCfg, device: str) -> tuple[ActivationExtractor, object]:
-    from sae_pipeline.extraction.hf import HFHookExtractor
-    from sae_pipeline.model.loader import load_model_and_tokenizer
-
-    model, tokenizer = load_model_and_tokenizer(cfg.model.model_copy(update={"device_map": {"": device}}))
-    model.eval()
-    requests = site_requests(cfg.target.sites or [])
-    return HFHookExtractor(model, requests, model_device=device, capture_device="cpu"), tokenizer
-
-
-def _vllm_extractor(cfg: PipelineCfg) -> ActivationExtractor:
-    from sae_pipeline.extraction.vllm import VLLMExtractor
-
-    specs = {target.slug: ComponentSpec.parse(target.layer, target.component) for target in cfg.target.sites or []}
-    return VLLMExtractor.from_config(cfg, specs)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -83,11 +65,7 @@ def main() -> None:
     backend = args.backend or cfg.extraction.backend
     token_path = Path(args.token_ids)
 
-    tokenizer = None
-    if backend == "hf_hooks":
-        extractor, tokenizer = _hf_extractor(cfg, args.device)
-    else:
-        extractor = _vllm_extractor(cfg)
+    extractor, tokenizer = build_extractor(cfg, backend, device=args.device)
 
     if token_path.exists():
         token_ids = load_file(str(token_path))["token_ids"]
