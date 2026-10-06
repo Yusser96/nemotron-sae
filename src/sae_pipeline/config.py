@@ -15,9 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 Quant = Literal["auto", "bf16", "fp8", "nf4"]
-# Only JumpReLU is implemented in the current trainer.  Keep unsupported
-# architectures out of the public configuration schema until their trainers,
-# checkpoint semantics and evaluation paths exist.
+# Only JumpReLU has a trainer.
 SAEArch = Literal["jumprelu"]
 CheckpointMode = Literal["finetune", "resume"]
 InputNormalization = Literal["none", "whole_vector"]
@@ -112,9 +110,8 @@ class SAECfg(BaseModel):
     lr_schedule: LRSchedule = "cosine_decay"
     gradient_clip_norm: float | None = None
     normalization_dir: Path | None = None
-    # ``vector_sum`` matches the per-token ||x - x_hat||_2^2 objective used by
-    # the Gemma Scope recipe.  ``coordinate_mean`` is retained for
-    # compatibility with the original trainer.
+    # ``vector_sum``: per-token squared L2 error, as in Gemma Scope.
+    # ``coordinate_mean``: squared error averaged over coordinates.
     reconstruction_loss: ReconstructionLoss = "coordinate_mean"
     l0_penalty_scale: float = 1.0
     seed: int = 42

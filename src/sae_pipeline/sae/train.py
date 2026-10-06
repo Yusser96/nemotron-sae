@@ -1131,8 +1131,6 @@ def train_sae(
     elapsed = time.time() - t_start
     log.info("Training done in %.1fs", elapsed)
 
-    # Auto-generate training plots so the user has something to look at without
-    # remembering to run a separate command.
     refresh_plot(
         plot_training_curves,
         jsonl_path=log_path,

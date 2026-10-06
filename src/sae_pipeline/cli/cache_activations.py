@@ -1,4 +1,4 @@
-"""Phase A: cache activations for one (layer, component) to safetensors shards.
+"""Cache activations for one (layer, component) to safetensors shards.
 
 Usage:
     python -m sae_pipeline.cli.cache_activations \
@@ -216,7 +216,6 @@ def main() -> None:
             manifests[slug] = expected
     log.info("Caching %d sites to %s", len(requests), base_dir)
 
-    # Pick a microbatch dimension that matches tokens_per_fwd / seq_len.
     micro_batch = max(1, cfg.cache.tokens_per_fwd // cfg.data.seq_len)
     languages = {args.language} if args.language else None
     loader = make_token_loader(
