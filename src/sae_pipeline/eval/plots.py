@@ -26,6 +26,18 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
+def refresh_plot(plot_fn, *args, description: str, **kwargs) -> None:
+    """Call ``plot_fn``, logging (never raising) on failure.
+
+    Plotting is a diagnostic side effect of training/evaluation and must
+    never fail the run it is reporting on.
+    """
+    try:
+        plot_fn(*args, **kwargs)
+    except Exception as exc:
+        log.warning("Failed to refresh %s: %s", description, exc, exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Training plots
 # ---------------------------------------------------------------------------

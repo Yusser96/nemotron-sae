@@ -24,7 +24,7 @@ from sae_pipeline.eval.metrics import (
     firing_concentration,
     streaming_reconstruction_metrics,
 )
-from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves
+from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves, refresh_plot
 from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.checkpoint import (
     capture_random_state,
@@ -856,15 +856,14 @@ def train_sae(
         )
         # The JSONL is flushed at every checkpoint step, so this plot remains
         # useful if a later allocation ends before the final checkpoint.
-        try:
-            plot_training_curves(
-                jsonl_path=log_path,
-                out_dir=out_dir / "plots",
-                target_l0=l0_target,
-                title_prefix=f"{arch}  d_sae={d_sae}  L0*={l0_target}",
-            )
-        except Exception as exc:  # plotting must never invalidate a checkpoint
-            log.warning("Failed to refresh training plot at step %d: %s", step, exc)
+        refresh_plot(
+            plot_training_curves,
+            jsonl_path=log_path,
+            out_dir=out_dir / "plots",
+            target_l0=l0_target,
+            title_prefix=f"{arch}  d_sae={d_sae}  L0*={l0_target}",
+            description=f"training plot at step {step}",
+        )
         return saved.weights_path
 
     log_path = out_dir / "train_log.jsonl"
@@ -1104,14 +1103,13 @@ def train_sae(
                         metrics.d_50,
                         metrics.d_90,
                     )
-                try:
-                    plot_validation_curves(
-                        validation_log_path,
-                        out_dir / "plots",
-                        title_prefix=f"{arch} d_sae={d_sae} L0*={l0_target}",
-                    )
-                except Exception as exc:  # plotting is non-load-bearing
-                    log.warning("Failed to refresh validation plot at step %d: %s", step, exc)
+                refresh_plot(
+                    plot_validation_curves,
+                    validation_log_path,
+                    out_dir / "plots",
+                    title_prefix=f"{arch} d_sae={d_sae} L0*={l0_target}",
+                    description=f"validation plot at step {step}",
+                )
                 sae.train()
             if checkpoint_due:
                 # Save after validation so resume restores the latest patience state.
@@ -1131,16 +1129,14 @@ def train_sae(
 
     # Auto-generate training plots so the user has something to look at without
     # remembering to run a separate command.
-    try:
-        plot_dir = Path(out_dir) / "plots"
-        plot_training_curves(
-            jsonl_path=log_path,
-            out_dir=plot_dir,
-            target_l0=l0_target,
-            title_prefix=f"{arch}  d_sae={d_sae}  L0*={l0_target}",
-        )
-    except Exception as e:  # plotting is non-load-bearing; never fail training over it
-        log.warning("Failed to generate training plots: %s", e)
+    refresh_plot(
+        plot_training_curves,
+        jsonl_path=log_path,
+        out_dir=Path(out_dir) / "plots",
+        target_l0=l0_target,
+        title_prefix=f"{arch}  d_sae={d_sae}  L0*={l0_target}",
+        description="training plots",
+    )
 
     if final_checkpoint is None:
         raise ValueError("Training produced no checkpoint; n_steps must be positive")

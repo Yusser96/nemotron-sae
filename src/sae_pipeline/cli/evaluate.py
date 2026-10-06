@@ -22,7 +22,7 @@ from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.eval.metrics import streaming_reconstruction_metrics
-from sae_pipeline.eval.plots import plot_eval_summary
+from sae_pipeline.eval.plots import plot_eval_summary, refresh_plot
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import load_sae_weights, resolve_checkpoint
 from sae_pipeline.sae.normalization import normalization_path
@@ -204,16 +204,15 @@ def main() -> None:
     log.info("Wrote eval arrays to %s", arrays_path)
 
     plot_dir = out_dir / f"{stem}_plots"
-    try:
-        plot_eval_summary(
-            eval_json_path=summary_path,
-            arrays_npz_path=arrays_path,
-            out_dir=plot_dir,
-            target_l0=l0_target,
-            title_prefix=f"{arch}  d_sae={width}  L0*={l0_target}",
-        )
-    except Exception as e:
-        log.warning("Failed to generate eval plots: %s", e)
+    refresh_plot(
+        plot_eval_summary,
+        eval_json_path=summary_path,
+        arrays_npz_path=arrays_path,
+        out_dir=plot_dir,
+        target_l0=l0_target,
+        title_prefix=f"{arch}  d_sae={width}  L0*={l0_target}",
+        description="eval plots",
+    )
 
 
 if __name__ == "__main__":

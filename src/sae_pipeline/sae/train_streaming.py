@@ -26,7 +26,7 @@ from safetensors.torch import save_file
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg, StreamCfg
 from sae_pipeline.eval.metrics import ReconMetrics, streaming_reconstruction_metrics
-from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves
+from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves, refresh_plot
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.checkpoint import (
@@ -361,15 +361,14 @@ def write_checkpoint(site: StreamingSite, step: int) -> Path:
         keep_last=site.cfg.keep_last_checkpoints,
     )
     site.log_f.flush()
-    try:
-        plot_training_curves(
-            jsonl_path=site.log_path,
-            out_dir=site.out_dir / "plots",
-            target_l0=site.l0_target,
-            title_prefix=_plot_title(site),
-        )
-    except Exception as exc:  # plotting must never invalidate a checkpoint
-        log.warning("%s: failed to refresh training plot at step %d: %s", site.slug, step, exc)
+    refresh_plot(
+        plot_training_curves,
+        jsonl_path=site.log_path,
+        out_dir=site.out_dir / "plots",
+        target_l0=site.l0_target,
+        title_prefix=_plot_title(site),
+        description=f"{site.slug} training plot at step {step}",
+    )
     return saved.weights_path
 
 
@@ -420,10 +419,13 @@ def evaluate_and_update(site: StreamingSite, step: int, device: str, early_stopp
         site.early_stop.checks_since_improve, site.early_stop.lr_scale,
         " [new best]" if is_best else "", " [lr reduced]" if lr_reduced else "",
     )
-    try:
-        plot_validation_curves(site.validation_log_path, site.out_dir / "plots", title_prefix=_plot_title(site))
-    except Exception as exc:  # plotting is non-load-bearing
-        log.warning("%s: failed to refresh validation plot at step %d: %s", site.slug, step, exc)
+    refresh_plot(
+        plot_validation_curves,
+        site.validation_log_path,
+        site.out_dir / "plots",
+        title_prefix=_plot_title(site),
+        description=f"{site.slug} validation plot at step {step}",
+    )
     if is_best:
         _write_best(site, step)
     return should_stop
