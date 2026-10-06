@@ -57,12 +57,8 @@ def stream_documents(
         )
 
 
-def _stream_source_documents(
-    cfg: DataCfg,
-    source: DataSourceCfg,
-    partition: str,
-) -> Iterator[str]:
-    """Yield all valid documents from one source without applying a budget."""
+def _load_source_dataset(cfg: DataCfg, source: DataSourceCfg) -> Any:
+    """Load and shuffle one source's raw ``IterableDataset`` (no partition filter)."""
     log.info(
         "Streaming dataset %s name=%s split=%s streaming=%s",
         source.source, source.name, cfg.split, cfg.streaming,
@@ -71,18 +67,33 @@ def _stream_source_documents(
     if source.name is not None:
         load_kwargs["name"] = source.name
     ds = load_dataset(source.source, **load_kwargs)
-
     if cfg.streaming and cfg.shuffle_buffer:
         ds = ds.shuffle(seed=cfg.seed, buffer_size=cfg.shuffle_buffer)
+    return ds
 
+
+def _filtered_documents(
+    ds: Any, source: DataSourceCfg, partition: str, validation_fraction: float
+) -> Iterator[str]:
+    """Yield one partition's document texts from an already-loaded dataset."""
     for ex in ds:
         text = ex.get(source.text_field)
         if not text:
             continue
-        is_validation = _is_validation_document(source, ex, text, cfg.validation_fraction)
+        is_validation = _is_validation_document(source, ex, text, validation_fraction)
         if (partition == "validation") != is_validation:
             continue
         yield text
+
+
+def _stream_source_documents(
+    cfg: DataCfg,
+    source: DataSourceCfg,
+    partition: str,
+) -> Iterator[str]:
+    """Yield all valid documents from one source without applying a budget."""
+    ds = _load_source_dataset(cfg, source)
+    yield from _filtered_documents(ds, source, partition, cfg.validation_fraction)
 
 
 def _pack_token_ids(
