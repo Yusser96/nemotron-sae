@@ -19,13 +19,17 @@ from sae_pipeline.hooks.components import ComponentSpec
 _BOUNDARY_OFFSET = {"resid_pre": 0, "resid_post": 1}
 
 
-def residual_layer_id(spec: ComponentSpec, num_hidden_layers: int) -> int:
-    """The vLLM aux hidden-state id holding ``spec``'s activations."""
+def require_residual_site(spec: ComponentSpec) -> None:
     if spec.kind not in _BOUNDARY_OFFSET or spec.expert_idx is not None or spec.head_idx is not None:
         raise UnsupportedComponentError(
             f"vLLM hidden-state extraction only covers residual-stream sites "
             f"(resid_pre/resid_post), not {spec.slug}"
         )
+
+
+def residual_layer_id(spec: ComponentSpec, num_hidden_layers: int) -> int:
+    """The vLLM aux hidden-state id holding ``spec``'s activations."""
+    require_residual_site(spec)
     if not 0 <= spec.layer < num_hidden_layers:
         raise ValueError(f"{spec.slug}: layer {spec.layer} is outside the model's {num_hidden_layers} layers")
     return spec.layer + _BOUNDARY_OFFSET[spec.kind]
