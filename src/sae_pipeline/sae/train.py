@@ -653,6 +653,95 @@ def _resample_underused_features(
     return n_reset
 
 
+def _restore_resume_state(
+    source_checkpoint,
+    *,
+    optim: torch.optim.Optimizer,
+    ever_fired: torch.Tensor,
+    feature_frequency: torch.Tensor,
+    early_stop_monitor: "_ValidationEarlyStop",
+    buffer: ActivationBuffer,
+    validation_readers: dict[str, ShardReader],
+    validation_cache_signature: dict[str, dict[str, object]],
+    early_stopping: EarlyStoppingCfg,
+    n_steps: int,
+    device: str,
+) -> tuple[int, float | None, int, int | None]:
+    """Restore optimizer, firing stats, early-stop state, buffer and RNG from a resume checkpoint.
+
+    Mutates ``optim``, ``ever_fired``, ``feature_frequency``, ``early_stop_monitor``
+    and ``buffer`` in place, and restores the global RNG state as a side effect.
+    Returns (start_step, frequency_penalty_scale, feature_resets, reset_target_step).
+    """
+    assert source_checkpoint.trainer_state_path is not None
+    trainer_state = load_trainer_state(source_checkpoint.trainer_state_path)
+    state_step = int(trainer_state.get("global_step", -1))
+    if state_step != source_checkpoint.step:
+        raise ValueError(
+            "Checkpoint pair has inconsistent steps: weights filename says "
+            f"{source_checkpoint.step}, trainer state says {state_step}"
+        )
+    optim.load_state_dict(trainer_state["optimizer"])
+    saved_fired = trainer_state["ever_fired"]
+    if not isinstance(saved_fired, torch.Tensor) or saved_fired.shape != ever_fired.shape:
+        raise ValueError(
+            "Dead-feature state dimension mismatch: checkpoint has "
+            f"{getattr(saved_fired, 'shape', None)}, current SAE has {ever_fired.shape}"
+        )
+    ever_fired.copy_(saved_fired.to(device=device, dtype=torch.bool))
+    saved_frequency = trainer_state.get("feature_frequency")
+    if saved_frequency is not None:
+        if not isinstance(saved_frequency, torch.Tensor) or saved_frequency.shape != feature_frequency.shape:
+            raise ValueError(
+                "Feature-frequency state dimension mismatch: checkpoint has "
+                f"{getattr(saved_frequency, 'shape', None)}, current SAE has {feature_frequency.shape}"
+            )
+        feature_frequency.copy_(saved_frequency.to(device=device, dtype=torch.float32))
+    saved_scale = trainer_state.get("frequency_penalty_scale")
+    frequency_penalty_scale = None if saved_scale is None else float(saved_scale)
+    feature_resets = int(trainer_state.get("feature_resets", 0))
+    saved_reset_target_step = trainer_state.get("reset_target_step")
+    reset_target_step = (
+        None if saved_reset_target_step is None else int(saved_reset_target_step)
+    )
+    saved_early_stop = trainer_state.get("validation_early_stop")
+    saved_probe_signature = trainer_state.get("validation_cache_signature")
+    if validation_readers and saved_probe_signature is not None:
+        if saved_probe_signature != validation_cache_signature:
+            raise ValueError(
+                "Validation probe caches differ from the resume checkpoint"
+            )
+    elif validation_readers:
+        log.warning(
+            "Resume checkpoint has no validation-cache signature; "
+            "early-stopping patience restarts"
+        )
+    if (
+        isinstance(saved_early_stop, dict)
+        and (not validation_readers or saved_probe_signature == validation_cache_signature)
+    ):
+        early_stop_monitor.load_state_dict(saved_early_stop)
+    elif early_stopping.enabled and saved_probe_signature is not None:
+        log.warning(
+            "Resume checkpoint has no early-stopping state; stability patience restarts"
+        )
+    buffer.load_state_dict(trainer_state["activation_buffer"])
+    restore_random_state(trainer_state["random_state"])
+    start_step = state_step
+    if start_step > n_steps:
+        raise ValueError(
+            f"Resume checkpoint is at step {start_step}, beyond n_steps target "
+            f"{n_steps}"
+        )
+    log.info(
+        "Resuming training from %s at global step %d (target %d)",
+        source_checkpoint.weights_path,
+        start_step,
+        n_steps,
+    )
+    return start_step, frequency_penalty_scale, feature_resets, reset_target_step
+
+
 def train_sae(
     cfg: SAECfg,
     cache_dir: str | Path,
@@ -760,71 +849,20 @@ def train_sae(
                 raise ValueError("raw_export fine-tuning requires whole_vector input normalisation")
             sae.unfold_raw_export(normalization_scale)
         if is_resume:
-            assert source_checkpoint.trainer_state_path is not None
-            trainer_state = load_trainer_state(source_checkpoint.trainer_state_path)
-            state_step = int(trainer_state.get("global_step", -1))
-            if state_step != source_checkpoint.step:
-                raise ValueError(
-                    "Checkpoint pair has inconsistent steps: weights filename says "
-                    f"{source_checkpoint.step}, trainer state says {state_step}"
+            start_step, frequency_penalty_scale, feature_resets, reset_target_step = (
+                _restore_resume_state(
+                    source_checkpoint,
+                    optim=optim,
+                    ever_fired=ever_fired,
+                    feature_frequency=feature_frequency,
+                    early_stop_monitor=early_stop_monitor,
+                    buffer=buffer,
+                    validation_readers=validation_readers,
+                    validation_cache_signature=validation_cache_signature,
+                    early_stopping=early_stopping,
+                    n_steps=cfg.n_steps,
+                    device=device,
                 )
-            optim.load_state_dict(trainer_state["optimizer"])
-            saved_fired = trainer_state["ever_fired"]
-            if not isinstance(saved_fired, torch.Tensor) or saved_fired.shape != ever_fired.shape:
-                raise ValueError(
-                    "Dead-feature state dimension mismatch: checkpoint has "
-                    f"{getattr(saved_fired, 'shape', None)}, current SAE has {ever_fired.shape}"
-                )
-            ever_fired.copy_(saved_fired.to(device=device, dtype=torch.bool))
-            saved_frequency = trainer_state.get("feature_frequency")
-            if saved_frequency is not None:
-                if not isinstance(saved_frequency, torch.Tensor) or saved_frequency.shape != feature_frequency.shape:
-                    raise ValueError(
-                        "Feature-frequency state dimension mismatch: checkpoint has "
-                        f"{getattr(saved_frequency, 'shape', None)}, current SAE has {feature_frequency.shape}"
-                    )
-                feature_frequency.copy_(saved_frequency.to(device=device, dtype=torch.float32))
-            saved_scale = trainer_state.get("frequency_penalty_scale")
-            frequency_penalty_scale = None if saved_scale is None else float(saved_scale)
-            feature_resets = int(trainer_state.get("feature_resets", 0))
-            saved_reset_target_step = trainer_state.get("reset_target_step")
-            reset_target_step = (
-                None if saved_reset_target_step is None else int(saved_reset_target_step)
-            )
-            saved_early_stop = trainer_state.get("validation_early_stop")
-            saved_probe_signature = trainer_state.get("validation_cache_signature")
-            if validation_readers and saved_probe_signature is not None:
-                if saved_probe_signature != validation_cache_signature:
-                    raise ValueError(
-                        "Validation probe caches differ from the resume checkpoint"
-                    )
-            elif validation_readers:
-                log.warning(
-                    "Resume checkpoint has no validation-cache signature; "
-                    "early-stopping patience restarts"
-                )
-            if (
-                isinstance(saved_early_stop, dict)
-                and (not validation_readers or saved_probe_signature == validation_cache_signature)
-            ):
-                early_stop_monitor.load_state_dict(saved_early_stop)
-            elif early_stopping.enabled and saved_probe_signature is not None:
-                log.warning(
-                    "Resume checkpoint has no early-stopping state; stability patience restarts"
-                )
-            buffer.load_state_dict(trainer_state["activation_buffer"])
-            restore_random_state(trainer_state["random_state"])
-            start_step = state_step
-            if start_step > cfg.n_steps:
-                raise ValueError(
-                    f"Resume checkpoint is at step {start_step}, beyond n_steps target "
-                    f"{cfg.n_steps}"
-                )
-            log.info(
-                "Resuming training from %s at global step %d (target %d)",
-                source_checkpoint.weights_path,
-                start_step,
-                cfg.n_steps,
             )
         else:
             log.info(
