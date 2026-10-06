@@ -143,3 +143,18 @@ def test_early_stopping_config_rejects_invalid_thresholds():
         EarlyStoppingCfg(patience=0)
     with pytest.raises(ValueError, match="positive"):
         EarlyStoppingCfg(fvu_relative_tolerance=0.0)
+
+
+def test_objective_early_stopping_config_validation():
+    cfg = EarlyStoppingCfg(mode="objective", patience=10, lr_plateau_patience=3)
+    assert (cfg.improvement_rel_tol, cfg.lr_reduce_factor, cfg.min_lr_scale) == (0.005, 0.5, 0.05)
+    assert EarlyStoppingCfg().mode == "stability"
+
+    with pytest.raises(ValueError, match="lr_plateau_patience"):
+        EarlyStoppingCfg(mode="objective", patience=3, lr_plateau_patience=3)
+    with pytest.raises(ValueError, match="lr_reduce_factor"):
+        EarlyStoppingCfg(lr_reduce_factor=1.0)
+    with pytest.raises(ValueError, match="min_lr_scale"):
+        EarlyStoppingCfg(min_lr_scale=0.0)
+    with pytest.raises(ValueError, match="positive"):
+        EarlyStoppingCfg(improvement_rel_tol=0.0)

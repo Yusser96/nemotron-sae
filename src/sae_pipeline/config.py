@@ -317,8 +317,18 @@ class EvalCfg(BaseModel):
         return value
 
 
+EarlyStoppingMode = Literal["stability", "objective"]
+
+
 class EarlyStoppingCfg(BaseModel):
-    """Validation-based stopping for fine-tuning runs."""
+    """Validation-based stopping for fine-tuning runs.
+
+    ``mode="stability"`` stops once validation FVU/L0 stop moving between
+    consecutive evaluations. ``mode="objective"`` is for long open-ended runs:
+    it tracks the training loss evaluated on held-out data, reduces the
+    learning rate when that plateaus, and stops after sustained
+    non-improvement.
+    """
 
     enabled: bool = False
     evaluation_interval_steps: int = 10_000
@@ -327,8 +337,18 @@ class EarlyStoppingCfg(BaseModel):
     fvu_relative_tolerance: float = 0.01
     ev_absolute_tolerance: float = 0.005
     l0_relative_tolerance: float = 0.10
+    mode: EarlyStoppingMode = "stability"
+    # ``objective`` mode only: an evaluation improves on the best so far when
+    # it is lower by more than this relative margin; every
+    # ``lr_plateau_patience`` non-improving evaluations scale the learning
+    # rate by ``lr_reduce_factor`` (floored at ``min_lr_scale``), and
+    # ``patience`` non-improving evaluations stop the run.
+    improvement_rel_tol: float = 0.005
+    lr_plateau_patience: int = 3
+    lr_reduce_factor: float = 0.5
+    min_lr_scale: float = 0.05
 
-    @field_validator("evaluation_interval_steps", "patience")
+    @field_validator("evaluation_interval_steps", "patience", "lr_plateau_patience")
     @classmethod
     def _positive_early_stop_counts(cls, value: int) -> int:
         if value <= 0:
@@ -343,13 +363,39 @@ class EarlyStoppingCfg(BaseModel):
         return value
 
     @field_validator(
-        "fvu_relative_tolerance", "ev_absolute_tolerance", "l0_relative_tolerance"
+        "fvu_relative_tolerance",
+        "ev_absolute_tolerance",
+        "l0_relative_tolerance",
+        "improvement_rel_tol",
     )
     @classmethod
     def _positive_early_stop_tolerances(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("early-stopping tolerances must be positive")
         return value
+
+    @field_validator("lr_reduce_factor")
+    @classmethod
+    def _lr_reduce_factor_valid(cls, value: float) -> float:
+        if not 0.0 < value < 1.0:
+            raise ValueError("lr_reduce_factor must be in (0, 1)")
+        return value
+
+    @field_validator("min_lr_scale")
+    @classmethod
+    def _min_lr_scale_valid(cls, value: float) -> float:
+        if not 0.0 < value <= 1.0:
+            raise ValueError("min_lr_scale must be in (0, 1]")
+        return value
+
+    @model_validator(mode="after")
+    def _objective_reduces_lr_before_stopping(self) -> "EarlyStoppingCfg":
+        if self.mode == "objective" and self.patience <= self.lr_plateau_patience:
+            raise ValueError(
+                "patience must exceed lr_plateau_patience so the learning rate is "
+                "reduced before training stops"
+            )
+        return self
 
 
 class LogCfg(BaseModel):
