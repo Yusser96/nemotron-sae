@@ -183,6 +183,7 @@ def test_extraction_config_defaults_to_hf_hooks():
 
     assert cfg.extraction.backend == "hf_hooks"
     assert cfg.extraction.vllm.enable_prefix_caching is False
+    assert cfg.extraction.vllm.enforce_eager is True
     assert cfg.extraction.sink.lifecycle == "consume"
 
 

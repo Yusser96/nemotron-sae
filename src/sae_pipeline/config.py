@@ -448,8 +448,8 @@ class StreamCfg(BaseModel):
 class VLLMCfg(BaseModel):
     """Engine settings for the vLLM extraction backend.
 
-    Chunked prefill is always disabled: vLLM's hidden-state extraction does
-    not support it. Prefix caching stays off unless explicitly validated.
+    Chunked prefill is always disabled so every prompt is prefilled whole in
+    one forward pass. Prefix caching stays off unless explicitly validated.
     """
 
     tensor_parallel_size: int = 1
@@ -459,6 +459,8 @@ class VLLMCfg(BaseModel):
     # Sequences submitted per generate() call; each becomes one vLLM request.
     sequences_per_call: int = 64
     enable_prefix_caching: bool = False
+    # Forward hooks do not run inside replayed CUDA graphs.
+    enforce_eager: bool = True
 
     @field_validator("tensor_parallel_size", "sequences_per_call")
     @classmethod
