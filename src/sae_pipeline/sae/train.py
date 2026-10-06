@@ -117,7 +117,6 @@ class StepLog:
     inverse_simpson_penalty: float = 0.0
 
 
-
 @torch.no_grad()
 def record_firing(
     f: torch.Tensor,
