@@ -42,7 +42,12 @@ from sae_pipeline.sae.normalization import (
     resolve_whole_vector_normalization,
     write_normalization,
 )
-from sae_pipeline.sae.objective import coefficients_at, inverse_simpson_warmup_steps, training_loss
+from sae_pipeline.sae.objective import (
+    coefficients_at,
+    inverse_simpson_warmup_steps,
+    optimizer_step,
+    training_loss,
+)
 from safetensors.torch import save_file
 
 log = logging.getLogger(__name__)
@@ -793,8 +798,6 @@ def train_sae(
             coefficients = coefficients_at(cfg, step, n_steps=cfg.n_steps)
             lr = coefficients.lr
             lam = coefficients.lambda_l0
-            for g in optim.param_groups:
-                g["lr"] = lr
 
             target_l0 = _scheduled_l0_target(step, l0_target, cfg)
             if reset_target_step is not None:
@@ -842,27 +845,7 @@ def train_sae(
                     f"l0_penalty={terms.l0_penalty.detach().item()}"
                 )
 
-            optim.zero_grad(set_to_none=True)
-            loss.backward()
-            with torch.no_grad():
-                z = sae.gate_input(x)  # type: ignore[attr-defined]
-                ste_window_pct = 100.0 * (
-                    (z - sae.theta).abs() < (cfg.bandwidth / 2.0)  # type: ignore[attr-defined]
-                ).float().mean().item()
-                theta_grad = getattr(sae, "log_theta").grad
-                encoder_grad = getattr(sae, "W_enc").grad
-                theta_grad_norm = 0.0 if theta_grad is None else theta_grad.norm().item()
-                encoder_grad_norm = 0.0 if encoder_grad is None else encoder_grad.norm().item()
-            if cfg.gradient_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(sae.parameters(), cfg.gradient_clip_norm)
-            if step <= cfg.decoder_freeze_steps:
-                sae.W_dec.grad = None
-            if cfg.decoder_unit_norm:
-                if step > cfg.decoder_freeze_steps:
-                    sae.project_decoder_grad()
-            optim.step()
-            if cfg.decoder_unit_norm:
-                sae.renormalize_decoder()
+            gradient_stats = optimizer_step(sae, optim, loss, x, cfg, step=step, lr=lr)
 
             with torch.no_grad():
                 ever_fired |= (f > 0).any(dim=0)
@@ -910,9 +893,9 @@ def train_sae(
                     step=step, loss=float(loss.detach()), mse=float(terms.mse.detach()),
                     l0_penalty=float(terms.l0_penalty.detach()), hard_l0=hard_l0,
                     lr=lr, lambda_l0=lam, dead_pct=dead_pct,
-                    ste_window_pct=ste_window_pct,
-                    theta_grad_norm=theta_grad_norm,
-                    encoder_grad_norm=encoder_grad_norm,
+                    ste_window_pct=gradient_stats.ste_window_pct,
+                    theta_grad_norm=gradient_stats.theta_grad_norm,
+                    encoder_grad_norm=gradient_stats.encoder_grad_norm,
                     reconstruction_loss=float(terms.reconstruction.detach()),
                     feature_use_penalty=float(feature_use_penalty.detach()),
                     active_features=concentration.active_features,

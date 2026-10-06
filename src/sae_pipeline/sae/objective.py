@@ -1,8 +1,9 @@
-"""The JumpReLU SAE training objective, shared by every trainer.
+"""The JumpReLU SAE training objective and update, shared by every trainer.
 
 Schedules map a global step to the coefficients of the loss (learning rate,
 L0-penalty weight, Inverse-Simpson weight); :func:`training_loss` evaluates
-the loss itself for one activation batch. The same function scores held-out
+the loss itself for one activation batch, and :func:`optimizer_step` applies
+one constrained Adam update from it. The same loss function scores held-out
 data, so early stopping can track exactly what training optimises.
 """
 
@@ -150,4 +151,51 @@ def training_loss(
         u_is=u_is,
         x_hat=x_hat,
         f=f,
+    )
+
+
+@dataclass
+class GradientStats:
+    ste_window_pct: float
+    theta_grad_norm: float
+    encoder_grad_norm: float
+
+
+def optimizer_step(
+    sae: SparseAutoencoder,
+    optim: torch.optim.Optimizer,
+    loss: torch.Tensor,
+    x: torch.Tensor,
+    cfg: SAECfg,
+    *,
+    step: int,
+    lr: float,
+) -> GradientStats:
+    """Backpropagate ``loss`` and apply one Adam step with the decoder constraints."""
+    for group in optim.param_groups:
+        group["lr"] = lr
+    optim.zero_grad(set_to_none=True)
+    loss.backward()
+    with torch.no_grad():
+        z = sae.gate_input(x)  # type: ignore[attr-defined]
+        ste_window_pct = 100.0 * (
+            (z - sae.theta).abs() < (cfg.bandwidth / 2.0)  # type: ignore[attr-defined]
+        ).float().mean().item()
+        theta_grad = getattr(sae, "log_theta").grad
+        encoder_grad = getattr(sae, "W_enc").grad
+        theta_grad_norm = 0.0 if theta_grad is None else theta_grad.norm().item()
+        encoder_grad_norm = 0.0 if encoder_grad is None else encoder_grad.norm().item()
+    if cfg.gradient_clip_norm is not None:
+        torch.nn.utils.clip_grad_norm_(sae.parameters(), cfg.gradient_clip_norm)
+    if step <= cfg.decoder_freeze_steps:
+        sae.W_dec.grad = None
+    if cfg.decoder_unit_norm and step > cfg.decoder_freeze_steps:
+        sae.project_decoder_grad()
+    optim.step()
+    if cfg.decoder_unit_norm:
+        sae.renormalize_decoder()
+    return GradientStats(
+        ste_window_pct=ste_window_pct,
+        theta_grad_norm=theta_grad_norm,
+        encoder_grad_norm=encoder_grad_norm,
     )

@@ -3,7 +3,13 @@ import torch
 
 from sae_pipeline.config import SAECfg
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
-from sae_pipeline.sae.objective import LossCoefficients, coefficients_at, quad_l0_loss, training_loss
+from sae_pipeline.sae.objective import (
+    LossCoefficients,
+    coefficients_at,
+    optimizer_step,
+    quad_l0_loss,
+    training_loss,
+)
 
 
 def test_coefficients_follow_the_configured_warmups():
@@ -76,3 +82,30 @@ def test_cosine_decay_needs_a_run_length():
     with pytest.raises(ValueError, match="n_steps"):
         coefficients_at(cfg, 5)
     assert coefficients_at(cfg, 10, n_steps=10).lr == pytest.approx(0.1)
+
+
+def _one_update(cfg: SAECfg, *, step: int) -> tuple[JumpReLUSAE, torch.Tensor, torch.optim.Optimizer]:
+    torch.manual_seed(1)
+    sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+    before = sae.W_dec.detach().clone()
+    optim = torch.optim.Adam(sae.parameters(), lr=123.0)
+    x = torch.randn(32, 6)
+    terms = training_loss(sae, x, cfg, LossCoefficients(lr=1e-2, lambda_l0=1.0, lambda_is=0.0), target_l0=3.0)
+    stats = optimizer_step(sae, optim, terms.total, x, cfg, step=step, lr=1e-2)
+    assert 0.0 <= stats.ste_window_pct <= 100.0
+    assert stats.encoder_grad_norm > 0.0
+    return sae, before, optim
+
+
+def test_optimizer_step_sets_lr_and_keeps_unit_norm_decoder():
+    sae, before, optim = _one_update(SAECfg(decoder_unit_norm=True, gradient_clip_norm=1.0), step=1)
+
+    assert all(group["lr"] == 1e-2 for group in optim.param_groups)
+    assert not torch.equal(sae.W_dec, before)
+    torch.testing.assert_close(sae.W_dec.detach().norm(dim=0), torch.ones(12))
+
+
+def test_optimizer_step_freezes_the_decoder_during_the_freeze_window():
+    sae, before, _ = _one_update(SAECfg(decoder_unit_norm=False, decoder_freeze_steps=5), step=5)
+
+    torch.testing.assert_close(sae.W_dec.detach(), before)
