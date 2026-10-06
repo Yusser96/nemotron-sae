@@ -44,6 +44,8 @@ from sae_pipeline.sae.normalization import (
     write_normalization,
 )
 from sae_pipeline.sae.objective import (
+    GradientStats,
+    LossTerms,
     coefficients_at,
     inverse_simpson_warmup_steps,
     optimizer_step,
@@ -94,6 +96,64 @@ class StepLog:
     u_is: float = 0.0
     inverse_simpson_penalty: float = 0.0
 
+
+
+@torch.no_grad()
+def record_firing(
+    f: torch.Tensor,
+    *,
+    feature_frequency: torch.Tensor,
+    ever_fired: torch.Tensor,
+    ema_decay: float,
+) -> None:
+    """Fold one batch of latent activations into the firing statistics."""
+    fired = f.detach() > 0
+    feature_frequency.mul_(ema_decay).add_(fired.float().mean(dim=0), alpha=1.0 - ema_decay)
+    ever_fired |= fired.any(dim=0)
+
+
+@torch.no_grad()
+def step_log(
+    sae: SparseAutoencoder,
+    x: torch.Tensor,
+    *,
+    step: int,
+    loss: torch.Tensor,
+    terms: LossTerms,
+    gradient_stats: GradientStats,
+    lr: float,
+    lambda_l0: float,
+    target_l0: float,
+    ever_fired: torch.Tensor,
+    feature_frequency: torch.Tensor,
+    feature_use_penalty: float = 0.0,
+    feature_resets: int = 0,
+) -> StepLog:
+    """Assemble one training-log row; costs a few device syncs, so call it sparingly."""
+    concentration = firing_concentration(feature_frequency)
+    return StepLog(
+        step=step,
+        loss=float(loss.detach()),
+        mse=float(terms.mse.detach()),
+        l0_penalty=float(terms.l0_penalty.detach()),
+        hard_l0=sae.hard_l0(x).item(),  # type: ignore[attr-defined]
+        lr=lr,
+        lambda_l0=lambda_l0,
+        dead_pct=dead_pct_from_fired(ever_fired),
+        ste_window_pct=gradient_stats.ste_window_pct,
+        theta_grad_norm=gradient_stats.theta_grad_norm,
+        encoder_grad_norm=gradient_stats.encoder_grad_norm,
+        reconstruction_loss=float(terms.reconstruction.detach()),
+        feature_use_penalty=feature_use_penalty,
+        active_features=concentration.active_features,
+        top1_activation_mass_pct=concentration.top1_activation_mass_pct,
+        max_firing_frequency=concentration.max_firing_frequency,
+        feature_resets=feature_resets,
+        target_l0=target_l0,
+        d_is=terms.d_is,
+        u_is=terms.u_is,
+        inverse_simpson_penalty=float(terms.inverse_simpson_penalty.detach()),
+    )
 
 
 @dataclass
@@ -849,12 +909,12 @@ def train_sae(
             terms = training_loss(sae, x, cfg, coefficients, target_l0=target_l0)
             x_hat, f = terms.x_hat, terms.f
 
-            with torch.no_grad():
-                fired = (f.detach() > 0).float()
-                batch_frequency = fired.mean(dim=0)
-                feature_frequency.mul_(cfg.feature_frequency_ema_decay).add_(
-                    batch_frequency, alpha=1.0 - cfg.feature_frequency_ema_decay
-                )
+            record_firing(
+                f,
+                feature_frequency=feature_frequency,
+                ever_fired=ever_fired,
+                ema_decay=cfg.feature_frequency_ema_decay,
+            )
 
             feature_use_penalty = terms.reconstruction.new_zeros(())
             if (
@@ -886,9 +946,6 @@ def train_sae(
                 )
 
             gradient_stats = optimizer_step(sae, optim, loss, x, cfg, step=step, lr=lr)
-
-            with torch.no_grad():
-                ever_fired |= (f > 0).any(dim=0)
 
             if (
                 cfg.feature_use_strategy in {"residual_reset", "frequency_residual_reset"}
@@ -925,27 +982,20 @@ def train_sae(
                 del calibration_x, calibration_residuals
 
             if step % cfg.log_every == 0:
-                with torch.no_grad():
-                    hard_l0 = sae.hard_l0(x).item()  # type: ignore[attr-defined]
-                    dead_pct = dead_pct_from_fired(ever_fired)
-                    concentration = firing_concentration(feature_frequency)
-                entry = StepLog(
-                    step=step, loss=float(loss.detach()), mse=float(terms.mse.detach()),
-                    l0_penalty=float(terms.l0_penalty.detach()), hard_l0=hard_l0,
-                    lr=lr, lambda_l0=lam, dead_pct=dead_pct,
-                    ste_window_pct=gradient_stats.ste_window_pct,
-                    theta_grad_norm=gradient_stats.theta_grad_norm,
-                    encoder_grad_norm=gradient_stats.encoder_grad_norm,
-                    reconstruction_loss=float(terms.reconstruction.detach()),
-                    feature_use_penalty=float(feature_use_penalty.detach()),
-                    active_features=concentration.active_features,
-                    top1_activation_mass_pct=concentration.top1_activation_mass_pct,
-                    max_firing_frequency=concentration.max_firing_frequency,
-                    feature_resets=feature_resets,
+                entry = step_log(
+                    sae,
+                    x,
+                    step=step,
+                    loss=loss,
+                    terms=terms,
+                    gradient_stats=gradient_stats,
+                    lr=lr,
+                    lambda_l0=lam,
                     target_l0=target_l0,
-                    d_is=terms.d_is,
-                    u_is=terms.u_is,
-                    inverse_simpson_penalty=float(terms.inverse_simpson_penalty.detach()),
+                    ever_fired=ever_fired,
+                    feature_frequency=feature_frequency,
+                    feature_use_penalty=float(feature_use_penalty.detach()),
+                    feature_resets=feature_resets,
                 )
                 log_f.write(json.dumps(asdict(entry)) + "\n")
                 log_f.flush()
