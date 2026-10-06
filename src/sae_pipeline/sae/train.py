@@ -69,7 +69,7 @@ def build_sae(
             bandwidth=bandwidth,
             pre_encoder_bias=pre_encoder_bias,
         )
-    raise NotImplementedError(f"SAE arch {arch!r} not yet implemented (registry stub).")
+    raise ValueError(f"Unknown SAE arch {arch!r}")
 
 
 def build_sae_and_optimizer(
