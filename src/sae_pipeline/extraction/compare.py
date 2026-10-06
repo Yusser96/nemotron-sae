@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import torch
 
@@ -22,9 +22,6 @@ class ActivationAgreement:
             and self.cosine_p01 >= min_cosine_p01
             and self.relative_l2 <= max_relative_l2
         )
-
-    def as_dict(self) -> dict[str, float]:
-        return asdict(self)
 
 
 def compare_activations(reference: torch.Tensor, candidate: torch.Tensor) -> ActivationAgreement:

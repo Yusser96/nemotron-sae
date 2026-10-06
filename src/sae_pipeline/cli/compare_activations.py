@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -39,7 +40,7 @@ def compare_dumps(
     per_site = {}
     for slug in sites:
         agreement = compare_activations(reference[slug], candidate[slug])
-        per_site[slug] = {**agreement.as_dict(), "passes": agreement.passes(**gate)}
+        per_site[slug] = {**asdict(agreement), "passes": agreement.passes(**gate)}
     metadata = {}
     for name, path in (("reference", reference_path), ("candidate", candidate_path)):
         with safe_open(str(path), framework="pt") as handle:
