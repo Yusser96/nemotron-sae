@@ -117,3 +117,31 @@ def test_read_waits_until_the_writer_releases_its_lock(tmp_path):
     writer.join()
 
     assert activations["a"].shape == (2, 3)
+
+
+def _step(path: Path, ids, positions, **sites) -> str:
+    save_file({"input_ids": torch.tensor(ids), "positions": torch.tensor(positions), **sites}, str(path))
+    return str(path)
+
+
+def test_collect_reassembles_prompts_across_steps_in_submission_order(tmp_path):
+    sink = _sink(tmp_path)
+    prompts = torch.tensor([[1, 2, 3], [4, 5, 6], [1, 2, 3]])
+    values = torch.arange(9 * 2, dtype=torch.float32).reshape(9, 2)
+    # Step 0 holds prompt 1 then prompt 0 plus a padding row; step 1 holds prompt 2.
+    first = _step(sink.path / "step_0.safetensors", [4, 5, 6, 1, 2, 3, 0], [0, 1, 2, 0, 1, 2, 0],
+                  a=torch.cat([values[3:6], values[0:3], torch.zeros(1, 2)]))
+    second = _step(sink.path / "step_1.safetensors", [1, 2, 3], [0, 1, 2], a=values[6:9])
+
+    activations = sink.collect([first, second], prompts, ["a"], device="cpu")
+
+    torch.testing.assert_close(activations["a"], values)
+    assert list(sink.path.iterdir()) == []  # consumed
+
+
+def test_collect_reports_prompts_that_were_never_captured(tmp_path):
+    sink = _sink(tmp_path)
+    step = _step(sink.path / "step_0.safetensors", [1, 2], [0, 1], a=torch.zeros(2, 2))
+
+    with pytest.raises(RuntimeError, match=r"sequences \[1\]"):
+        sink.collect([step], torch.tensor([[1, 2], [7, 8]]), ["a"], device="cpu")

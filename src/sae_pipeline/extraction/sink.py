@@ -88,6 +88,43 @@ class HiddenStateSink:
             _lock_path(path).unlink(missing_ok=True)
         return activations
 
+    def collect(
+        self,
+        step_paths: list[str],
+        token_ids: torch.Tensor,
+        slugs: list[str],
+        *,
+        device: str | torch.device,
+    ) -> dict[str, torch.Tensor]:
+        """Per-site ``(sequences * seq_len, d)`` activations for ``token_ids``, in row order.
+
+        Each step file (see ``vllm_worker``) holds the rows of one forward pass:
+        whole prompts back to back, each starting at position 0. Rows are matched
+        to the submitted prompts by their token ids; rows that match no prompt
+        (e.g. padding) are ignored.
+        """
+        pending: dict[tuple[int, ...], list[int]] = {}
+        for index, row in enumerate(token_ids.detach().cpu().tolist()):
+            pending.setdefault(tuple(row), []).append(index)
+        found: dict[int, dict[str, torch.Tensor]] = {}
+        for step_path in step_paths:
+            step = load_file(step_path)
+            ids, positions = step["input_ids"], step["positions"]
+            starts = (positions == 0).nonzero().flatten().tolist() + [positions.numel()]
+            for start, end in zip(starts, starts[1:]):
+                matches = pending.get(tuple(ids[start:end].tolist()))
+                if matches:
+                    found[matches.pop(0)] = {slug: step[slug][start:end] for slug in slugs}
+            if self.lifecycle == "consume":
+                Path(step_path).unlink()
+        missing = sorted(set(range(token_ids.shape[0])) - found.keys())
+        if missing:
+            raise RuntimeError(f"No captured activations for submitted sequences {missing}")
+        return {
+            slug: torch.cat([found[index][slug] for index in range(token_ids.shape[0])]).to(device)
+            for slug in slugs
+        }
+
     def cleanup(self) -> None:
         """Remove files a consuming run left behind (e.g. after an interruption)."""
         if self.lifecycle != "consume" or not self.path.exists():
