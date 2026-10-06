@@ -200,7 +200,7 @@ def resolve_checkpoint(
                     step=-1,
                     source=str(local),
                 )
-            step = int(match.group(1)) if match is not None else -1
+            step = int(match.group(1))
             state_path = companion_state_path(weights_path)
             if not state_path.exists():
                 if require_trainer_state:
