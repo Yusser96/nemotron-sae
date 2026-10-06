@@ -1,3 +1,6 @@
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -72,3 +75,45 @@ def test_cleanup_keeps_cached_files(tmp_path):
     sink.cleanup()
 
     assert path.exists()
+
+
+def test_consume_also_removes_the_writer_lock_file(tmp_path):
+    sink = _sink(tmp_path)
+    path = _write(sink.path / "req-0.safetensors", torch.tensor([1, 2]), torch.randn(2, 2, 3))
+    lock = sink.path / "req-0.safetensors.lock"
+    lock.touch()
+
+    sink.read(path, expected_token_ids=torch.tensor([1, 2]), layout=LAYOUT, device="cpu")
+
+    assert not path.exists() and not lock.exists()
+
+
+def test_cleanup_removes_leftover_lock_files(tmp_path):
+    sink = _sink(tmp_path)
+    (sink.path / "req-9.safetensors.lock").touch()
+
+    sink.cleanup()
+
+    assert not sink.path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="flock is POSIX-only")
+def test_read_waits_until_the_writer_releases_its_lock(tmp_path):
+    import fcntl
+
+    sink = _sink(tmp_path)
+    path = sink.path / "req-0.safetensors"
+    lock = open(sink.path / "req-0.safetensors.lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+
+    def write_then_release():
+        time.sleep(0.3)
+        _write(path, torch.tensor([1, 2]), torch.randn(2, 2, 3))
+        lock.close()
+
+    writer = threading.Thread(target=write_then_release)
+    writer.start()
+    activations = sink.read(path, expected_token_ids=torch.tensor([1, 2]), layout=LAYOUT, device="cpu")
+    writer.join()
+
+    assert activations["a"].shape == (2, 3)
