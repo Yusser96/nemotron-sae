@@ -1,0 +1,45 @@
+# HF-hooks vs vLLM activation equivalence on a fixed validation token set.
+# Used with cli.dump_activations (once per backend) and cli.compare_activations.
+run_id: extraction_equivalence
+
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  load_quant: auto
+  trust_remote_code: true
+  device_map: auto
+
+data:
+  sources:
+    - {source: epfml/FineWeb2-HQ, name: deu_Latn, language: de}
+    - {source: nvidia/Nemotron-CC-v2.1, name: High-Quality, language: en}
+  split: train
+  streaming: true
+  total_tokens: 65_536  # 32 sequences x 2048
+  seq_len: 2048
+  shuffle_buffer: 0
+  seed: 42
+  validation_fraction: 0.05
+
+extraction:
+  vllm:
+    # The bf16 weights take ~59 GiB; 0.93 still leaves KV-cache room on an 80 GB GPU.
+    gpu_memory_utilization: 0.93
+    sequences_per_call: 8
+  sink:
+    path: /dev/shm/sae-activations-${SLURM_JOB_ID}
+    lifecycle: consume
+
+# Residual-stream sites spread over the 52 layers, including both ends
+# (aux id 0 = embeddings, id 52 = last layer output before the final norm)
+# and one boundary requested from both sides (L12 resid_post == L13 resid_pre).
+target:
+  sites:
+    - {slug: L0_resid_pre, layer: 0, component: resid_pre, hook_name: backbone.layers.0}
+    - {slug: L0_resid_post, layer: 0, component: resid_post, hook_name: backbone.layers.0}
+    - {slug: L2_resid_post, layer: 2, component: resid_post, hook_name: backbone.layers.2}
+    - {slug: L12_resid_post, layer: 12, component: resid_post, hook_name: backbone.layers.12}
+    - {slug: L13_resid_pre, layer: 13, component: resid_pre, hook_name: backbone.layers.13}
+    - {slug: L26_resid_post, layer: 26, component: resid_post, hook_name: backbone.layers.26}
+    - {slug: L42_resid_post, layer: 42, component: resid_post, hook_name: backbone.layers.42}
+    - {slug: L51_resid_post, layer: 51, component: resid_post, hook_name: backbone.layers.51}
