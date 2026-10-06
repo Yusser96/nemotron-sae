@@ -47,18 +47,19 @@ def _resolve_block(model: nn.Module, layer: int) -> nn.Module:
 
 
 class _BufferList:
-    """Accumulates captured activations into a list of CPU tensors."""
+    """Accumulates captured activations into a list of tensors on one device."""
 
-    def __init__(self) -> None:
+    def __init__(self, device: str | torch.device = "cpu") -> None:
+        self.device = device
         self.buf: list[torch.Tensor] = []
 
     def add(self, x: torch.Tensor) -> None:
-        # Flatten (B, T, D) -> (B*T, D) and move to CPU pinned memory.
+        # Flatten (B, T, D) -> (B*T, D) and move to the target device.
         if x.ndim >= 2:
             flat = x.reshape(-1, x.shape[-1])
         else:
             flat = x
-        self.buf.append(flat.detach().to("cpu", copy=True))
+        self.buf.append(flat.detach().to(self.device, copy=True))
 
     def consume(self) -> torch.Tensor:
         """Return accumulated tensor and reset the buffer."""
@@ -100,13 +101,18 @@ def _capture_handle(
 
 
 @contextmanager
-def capture(model: nn.Module, spec: ComponentSpec, site: HookSite) -> Iterator[_BufferList]:
+def capture(
+    model: nn.Module,
+    spec: ComponentSpec,
+    site: HookSite,
+    device: str | torch.device = "cpu",
+) -> Iterator[_BufferList]:
     """Register a forward hook for `spec` (resolved to `site`) and yield a buffer.
 
     Caller runs the model forward inside the `with`, then calls buffer.consume()
     to retrieve the (n_tokens, d) tensor.
     """
-    buf = _BufferList()
+    buf = _BufferList(device=device)
     handle = _capture_handle(model, spec, site, buf)
 
     try:
@@ -119,9 +125,14 @@ def capture(model: nn.Module, spec: ComponentSpec, site: HookSite) -> Iterator[_
 def capture_many(
     model: nn.Module,
     requests: dict[str, tuple[ComponentSpec, HookSite]],
+    device: str | torch.device = "cpu",
 ) -> Iterator[dict[str, _BufferList]]:
-    """Capture several sites during one frozen-model forward pass."""
-    buffers = {slug: _BufferList() for slug in requests}
+    """Capture several sites during one frozen-model forward pass.
+
+    ``device`` lets a consumer that trains on the GPU capture straight onto
+    it instead of paying a CPU round trip.
+    """
+    buffers = {slug: _BufferList(device=device) for slug in requests}
     handles: list[torch.utils.hooks.RemovableHandle] = []
     for slug, (spec, site) in requests.items():
         handles.append(_capture_handle(model, spec, site, buffers[slug]))

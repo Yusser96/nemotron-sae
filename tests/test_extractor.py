@@ -54,3 +54,16 @@ def test_capture_many_matches_single_site_capture():
     torch.testing.assert_close(captured["post"], single)
     torch.testing.assert_close(captured["post"], expected)
     torch.testing.assert_close(captured["linear"], expected)
+
+
+def test_capture_many_places_buffers_on_the_requested_device():
+    model = _Model()
+    spec = ComponentSpec.parse(0, "resid_post")
+    site = HookSite("resid_post", 0, "<residual:0:post>")
+
+    with capture_many(model, {"post": (spec, site)}, device="meta") as buffers:
+        model(torch.randn(2, 4, 3))
+        captured = buffers["post"].consume()
+
+    assert captured.device.type == "meta"
+    assert captured.shape == (8, 3)
