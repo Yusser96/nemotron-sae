@@ -1,12 +1,17 @@
 import math
 
+import pytest
 import torch
 from safetensors.torch import save_file
 
 from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.sae.normalization import (
+    WholeVectorNormalization,
     _cpu_shard_squared_norm,
+    load_whole_vector_normalization,
+    normalization_path,
     resolve_whole_vector_normalization,
+    write_normalization,
 )
 
 
@@ -54,3 +59,14 @@ def test_parallel_whole_vector_normalization_matches_all_shards(tmp_path):
     assert result.d_activation == 3
     assert math.isclose(result.mean_squared_norm, 32.0)
     assert math.isclose(result.input_scale, 1.0 / math.sqrt(32.0))
+
+
+def test_load_whole_vector_normalization_reads_and_checks_dimension(tmp_path):
+    stored = WholeVectorNormalization(input_scale=0.25, mean_squared_norm=16.0, n_tokens=10, d_activation=3)
+    write_normalization(normalization_path(tmp_path), stored)
+
+    assert load_whole_vector_normalization(tmp_path, d_activation=3) == stored
+    with pytest.raises(ValueError, match="d_activation=3"):
+        load_whole_vector_normalization(tmp_path, d_activation=4)
+    with pytest.raises(FileNotFoundError):
+        load_whole_vector_normalization(tmp_path / "missing", d_activation=3)

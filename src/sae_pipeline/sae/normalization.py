@@ -135,6 +135,27 @@ def resolve_activation_center(
     return result
 
 
+def load_whole_vector_normalization(
+    metadata_dir: str | Path, *, d_activation: int
+) -> WholeVectorNormalization:
+    """Load a precomputed whole-vector normalisation without a cache to verify it against.
+
+    For trainers that have no on-disk training cache (e.g. streaming from a
+    live model): the statistic must already exist, typically from an earlier
+    cached run of the same site, and is only checked for its dimension.
+    """
+
+    path = normalization_path(metadata_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"No precomputed whole-vector normalisation at {path}")
+    result = _read(path)
+    if result.d_activation != d_activation:
+        raise ValueError(
+            f"Normalisation at {path} has d_activation={result.d_activation}, expected {d_activation}"
+        )
+    return result
+
+
 def resolve_whole_vector_normalization(
     cache_dir: str | Path,
     out_dir: str | Path,
