@@ -22,14 +22,23 @@ class FakeMoE(nn.Linear):
 
 
 class _DecoderLayer(nn.Module):
-    """vLLM-style layer: returns (mixer output, running residual)."""
+    """vLLM-style layer: returns (mixer output, running residual).
+
+    Like vLLM's fused add-RMSNorm (here without the norm), it updates its
+    inputs in place: the residual absorbs the previous mixer output, which is
+    then overwritten.
+    """
 
     def __init__(self, mixer: nn.Module) -> None:
         super().__init__()
         self.mixer = mixer
 
     def forward(self, positions, hidden_states, residual):
-        residual = hidden_states if residual is None else hidden_states + residual
+        if residual is None:
+            residual = hidden_states
+        else:
+            residual.add_(hidden_states)
+            hidden_states.copy_(residual)
         return self.mixer(residual), residual
 
 

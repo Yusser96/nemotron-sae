@@ -37,7 +37,7 @@ def _arg(args: tuple, kwargs: dict, index: int, name: str):
 
 def _residual(hidden: torch.Tensor, residual: torch.Tensor | None) -> torch.Tensor:
     # vLLM keeps the residual stream split as (mixer output, running residual).
-    return hidden if residual is None else hidden + residual
+    return hidden.clone() if residual is None else hidden + residual
 
 
 class ActivationHookExtension:
@@ -102,7 +102,8 @@ class ActivationHookExtension:
         self.sae_captured[slug] = _residual(*output)
 
     def _sae_capture_output(self, slug, _module, _args, output) -> None:
-        self.sae_captured[slug] = output
+        # Copy now: the next layer's fused add-RMSNorm overwrites this tensor in place.
+        self.sae_captured[slug] = output.clone()
 
     def _sae_write_step(self, _module, _args, _output) -> None:
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
