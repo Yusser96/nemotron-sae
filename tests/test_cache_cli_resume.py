@@ -73,6 +73,56 @@ target:
     assert manifest.complete is False
 
 
+def test_vllm_backend_caches_without_loading_the_hf_model(tmp_path, monkeypatch):
+    from sae_pipeline.extraction.base import ActivationBatch
+    from sae_pipeline.extraction.vllm import VLLMExtractor
+
+    class _FakeExtractor:
+        closed = False
+
+        def extract(self, token_ids):
+            return ActivationBatch(token_ids, {"L0_resid_post": torch.full((token_ids.numel(), 4), 3.0)})
+
+        def close(self):
+            _FakeExtractor.closed = True
+
+    def _no_hf_model(_cfg):
+        raise AssertionError("the vllm backend must not load the HF model")
+
+    config = tmp_path / "config.yml"
+    config.write_text(
+        f"""run_id: vllm
+data:
+  total_tokens: 4
+  seq_len: 1
+cache:
+  cache_dir: {tmp_path / 'caches'}
+  shard_size_bytes: 16
+  tokens_per_fwd: 2
+extraction:
+  backend: vllm
+target:
+  sites:
+    - {{slug: L0_resid_post, layer: 0, component: resid_post, hook_name: backbone.layers.0}}
+"""
+    )
+    monkeypatch.setattr(cache_activations, "load_model_and_tokenizer", _no_hf_model)
+    monkeypatch.setattr(cache_activations, "load_tokenizer", lambda _cfg: _Tokenizer())
+    monkeypatch.setattr(VLLMExtractor, "from_config", classmethod(lambda cls, cfg, specs: _FakeExtractor()))
+    monkeypatch.setattr(
+        cache_activations,
+        "make_token_loader",
+        lambda *_args, **_kwargs: iter([torch.ones(2, 1, dtype=torch.long), torch.ones(2, 1, dtype=torch.long)]),
+    )
+    monkeypatch.setattr(sys, "argv", ["cache_activations", "--config", str(config), "--all-targets"])
+
+    cache_activations.main()
+
+    manifest = CacheManifest.read(tmp_path / "caches" / "vllm" / "L0_resid_post" / "manifest.json")
+    assert manifest.total_tokens == 4 and manifest.complete is True
+    assert _FakeExtractor.closed
+
+
 def test_interrupted_multi_site_cache_is_repaired_to_common_prefix(tmp_path: Path):
     cache_root = tmp_path / "caches" / "run"
     base_dir = cache_root

@@ -26,9 +26,10 @@ from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.writer import CacheBudget, ShardWriter
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import make_token_loader
+from sae_pipeline.extraction.base import ActivationExtractor
+from sae_pipeline.extraction.hf import HFHookExtractor
 from sae_pipeline.hooks.components import ComponentSpec, resolve
-from sae_pipeline.hooks.extractor import capture_many
-from sae_pipeline.model.loader import load_model_and_tokenizer
+from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import HookSite, dump_topology, enumerate_hooks
 
 log = logging.getLogger(__name__)
@@ -151,10 +152,16 @@ def main() -> None:
     if cfg.cache.tokens_per_fwd % cfg.data.seq_len:
         p.error("cache.tokens_per_fwd must be divisible by data.seq_len")
 
-    model, tokenizer = load_model_and_tokenizer(cfg.model)
-    sites = enumerate_hooks(model)
-    topology_path = Path(cfg.cache.cache_dir) / cfg.run_id / "model_topology.json"
-    dump_topology(sites, topology_path)
+    use_vllm = cfg.extraction.backend == "vllm"
+    model = None
+    sites: list[HookSite] = []
+    if use_vllm:
+        # vLLM loads the model itself; only the tokenizer is needed here.
+        tokenizer = load_tokenizer(cfg.model)
+    else:
+        model, tokenizer = load_model_and_tokenizer(cfg.model)
+        sites = enumerate_hooks(model)
+        dump_topology(sites, Path(cfg.cache.cache_dir) / cfg.run_id / "model_topology.json")
     requests: dict[str, tuple[ComponentSpec, HookSite]] = {}
     components: dict[str, str] = {}
     layers: dict[str, int] = {}
@@ -172,7 +179,8 @@ def main() -> None:
     else:
         assert args.layer is not None and args.component is not None
         spec = ComponentSpec.parse(args.layer, args.component)
-        requests[spec.slug] = (spec, resolve(spec, sites))
+        site = HookSite(args.component, args.layer, "") if use_vllm else resolve(spec, sites)
+        requests[spec.slug] = (spec, site)
         components[spec.slug] = args.component
         layers[spec.slug] = args.layer
 
@@ -180,7 +188,6 @@ def main() -> None:
     base_dir = cache_root if args.partition == "train" else cache_root / "validation" / args.language
     fingerprint = hashlib.sha256(json.dumps(cfg.data.model_dump(), sort_keys=True).encode()).hexdigest()
     manifests: dict[str, CacheManifest] = {}
-    writers: dict[str, ShardWriter] = {}
     target_tokens = (
         cfg.data.total_tokens
         if args.partition == "train"
@@ -257,7 +264,51 @@ def main() -> None:
         raise RuntimeError("Existing cache length must align to tokens_per_fwd for deterministic resume")
     resume_batches = already_cached // cfg.cache.tokens_per_fwd
     log.info("Resuming after %d cached tokens (%d forward passes)", already_cached, resume_batches)
-    device = next(model.parameters()).device
+    extractor: ActivationExtractor
+    if use_vllm:
+        from sae_pipeline.extraction.vllm import VLLMExtractor
+
+        extractor = VLLMExtractor.from_config(cfg, {slug: spec for slug, (spec, _site) in requests.items()})
+    else:
+        assert model is not None
+        extractor = HFHookExtractor(model, requests, model_device=next(model.parameters()).device)
+    try:
+        _cache_forwards(
+            args=args,
+            cfg=cfg,
+            loader=loader,
+            extractor=extractor,
+            requests=requests,
+            manifests=manifests,
+            base_dir=base_dir,
+            budget=budget,
+            target_tokens=target_tokens,
+            already_cached=already_cached,
+            resume_batches=resume_batches,
+            stop_flag=lambda: stop_requested,
+        )
+    finally:
+        extractor.close()
+
+
+def _cache_forwards(
+    *,
+    args: argparse.Namespace,
+    cfg: PipelineCfg,
+    loader,
+    extractor: ActivationExtractor,
+    requests: dict[str, tuple[ComponentSpec, HookSite]],
+    manifests: dict[str, CacheManifest],
+    base_dir: Path,
+    budget: CacheBudget,
+    target_tokens: int | None,
+    already_cached: int,
+    resume_batches: int,
+    stop_flag,
+) -> None:
+    """Extract every forward's activations and append them to each site's shards."""
+    writers: dict[str, ShardWriter] = {}
+    stop_requested = False
     stop_after_seconds = float(os.environ.get("CACHE_STOP_AFTER_SECONDS", "0"))
     if stop_after_seconds < 0:
         raise RuntimeError("CACHE_STOP_AFTER_SECONDS must be non-negative")
@@ -275,11 +326,7 @@ def main() -> None:
                 stop_after_seconds,
             )
             break
-        batch = batch.to(device)
-        with capture_many(model, requests) as buffers:
-            with torch.no_grad():
-                model(batch)
-            captured = {slug: buffer.consume() for slug, buffer in buffers.items()}
+        captured = extractor.extract(batch).activations
 
         for slug, x in captured.items():
             if x.numel() == 0:
@@ -302,7 +349,8 @@ def main() -> None:
                 )
             writers[slug].add(x)
 
-        if stop_requested:
+        if stop_requested or stop_flag():
+            stop_requested = True
             log.info("Stopping cleanly at the next committed cache boundary")
             break
 
