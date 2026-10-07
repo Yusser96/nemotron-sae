@@ -82,6 +82,18 @@ def test_engine_is_configured_for_hooked_whole_prompt_batches(tmp_path):
     assert kwargs["enforce_eager"] is True
     assert kwargs["max_model_len"] == 4
     assert kwargs["max_num_batched_tokens"] == 8 * 4
+    assert kwargs["kv_cache_memory_bytes"] is None
+
+
+def test_the_step_budget_and_kv_pool_can_be_set_apart_from_the_call_size(tmp_path):
+    cfg = _cfg(tmp_path, sequences_per_call=8).with_overrides(
+        **{"extraction.vllm.max_sequences_per_step": 2, "extraction.vllm.kv_cache_gib": 1.5}
+    )
+
+    kwargs = VLLMExtractor(cfg, SPECS, engine_factory=_FakeEngine, sampling_params_factory=str).llm.kwargs
+
+    assert kwargs["max_num_batched_tokens"] == 2 * 4
+    assert kwargs["kv_cache_memory_bytes"] == 3 * 2**29
 
 
 def test_extract_returns_each_sites_rows_in_submission_order_and_consumes_files(tmp_path):

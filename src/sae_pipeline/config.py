@@ -458,15 +458,19 @@ class VLLMCfg(BaseModel):
     max_model_len: int | None = None
     # Sequences submitted per generate() call; each becomes one vLLM request.
     sequences_per_call: int = 64
+    # Sequences per forward pass (the scheduler's token budget); None: sequences_per_call.
+    max_sequences_per_step: int | None = None
+    # vLLM's KV-cache pool (kv_cache_memory_bytes); None: whatever gpu_memory_utilization leaves.
+    kv_cache_gib: float | None = None
     enable_prefix_caching: bool = False
     # Forward hooks do not run inside replayed CUDA graphs.
     enforce_eager: bool = True
 
-    @field_validator("tensor_parallel_size", "sequences_per_call")
+    @field_validator("tensor_parallel_size", "sequences_per_call", "max_sequences_per_step", "kv_cache_gib")
     @classmethod
-    def _positive_counts(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("vllm counts must be positive")
+    def _positive_counts(cls, value: float | None) -> float | None:
+        if value is not None and value <= 0:
+            raise ValueError("vllm counts and sizes must be positive")
         return value
 
     @field_validator("gpu_memory_utilization")

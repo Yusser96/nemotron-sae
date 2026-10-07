@@ -63,9 +63,10 @@ def _start_engine(
         tensor_parallel_size=vllm_cfg.tensor_parallel_size,
         gpu_memory_utilization=vllm_cfg.gpu_memory_utilization,
         max_model_len=vllm_cfg.max_model_len or seq_len + 1,
-        # Whole prompts per forward pass, and all of one call's prompts in one batch.
+        # Whole prompts per forward pass, up to max_sequences_per_step of them.
         enable_chunked_prefill=False,
-        max_num_batched_tokens=vllm_cfg.sequences_per_call * (seq_len + 1),
+        max_num_batched_tokens=(vllm_cfg.max_sequences_per_step or vllm_cfg.sequences_per_call) * (seq_len + 1),
+        kv_cache_memory_bytes=None if vllm_cfg.kv_cache_gib is None else int(vllm_cfg.kv_cache_gib * 2**30),
         enable_prefix_caching=vllm_cfg.enable_prefix_caching,
         enforce_eager=vllm_cfg.enforce_eager,
         worker_extension_cls=WORKER_EXTENSION,
