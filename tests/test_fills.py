@@ -1,5 +1,6 @@
 """The fill directory shared by a producer and its consumers."""
 
+import json
 import shutil
 from pathlib import Path
 
@@ -93,10 +94,12 @@ def test_the_producer_stops_waiting_at_its_deadline(tmp_path):
 
 
 def test_a_producer_with_other_settings_cannot_add_to_the_fills(tmp_path):
-    write_header(tmp_path, {"model": "m", "seq_len": 4})
-    write_header(tmp_path, {"model": "m", "seq_len": 4})
+    write_header(tmp_path, {"model": "m", "seq_len": 4, "slugs": ["a", "b"]})
+    # Dropping a site that stopped training is fine.
+    write_header(tmp_path, {"model": "m", "seq_len": 4, "slugs": ["a"]})
+    assert json.loads((tmp_path / "fills.json").read_text())["slugs"] == ["a"]
     with pytest.raises(ValueError, match="holds fills"):
-        write_header(tmp_path, {"model": "m", "seq_len": 8})
+        write_header(tmp_path, {"model": "m", "seq_len": 8, "slugs": ["a"]})
 
 
 SEQ_LEN = 2

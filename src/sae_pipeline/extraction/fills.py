@@ -42,15 +42,20 @@ def published_fills(root: Path) -> list[int]:
 
 
 def write_header(root: Path, header: dict) -> None:
-    """Record what produces the fills in ``root``; refuse a producer that differs from earlier ones."""
+    """Record what produces the fills in ``root``; refuse a producer whose fills would not mix with earlier ones.
+
+    Only the ``slugs`` may change (sites that stopped training are dropped): each
+    consumer reads just its own sites, and checks them against the header.
+    """
     path = root / HEADER
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
-        if existing != header:
+        if {k: v for k, v in existing.items() if k != "slugs"} != {k: v for k, v in header.items() if k != "slugs"}:
             raise ValueError(f"{root} holds fills of {existing}, not {header}")
-        return
     root.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(header), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(header), encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _consumer_path(root: Path, name: str) -> Path:
