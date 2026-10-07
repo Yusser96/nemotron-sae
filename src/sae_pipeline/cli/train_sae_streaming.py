@@ -135,15 +135,19 @@ def main() -> None:
         tokenizer = load_tokenizer(cfg.model)
     if backend == "fills":
         stop_after = cfg.stream.stop_after_seconds
-        extractor = token_stream = FillStream(
-            args.fills,
-            args.consumer,
-            list(requests),
-            header={"model": cfg.model.name, "seq_len": cfg.data.seq_len},
-            device=cfg.stream.sae_device,
-            # Waiting for a fill ends in a pause before the job's time is up.
-            deadline=None if stop_after is None else time.monotonic() + stop_after,
-        )
+        try:
+            extractor = token_stream = FillStream(
+                args.fills,
+                args.consumer,
+                list(requests),
+                header={"model": cfg.model.name, "seq_len": cfg.data.seq_len},
+                device=cfg.stream.sae_device,
+                # Waiting for a fill ends in a pause before the job's time is up.
+                deadline=None if stop_after is None else time.monotonic() + stop_after,
+            )
+        except TimeoutError as error:
+            log.info("Nothing to train yet: %s", error)
+            return
     elif backend == "vllm_remote":
         extractor = RemoteExtractor(
             host=cfg.extraction.remote.host,
