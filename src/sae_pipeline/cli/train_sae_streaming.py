@@ -87,6 +87,11 @@ def main() -> None:
     parser.add_argument("--fills", type=Path, default=None, help="train from these fills instead of a live model")
     parser.add_argument("--consumer", default=None, help="with --fills: this trainer's name for the producer")
     parser.add_argument("--sites", nargs="+", default=None, help="train only these target.sites slugs")
+    parser.add_argument(
+        "--new-validation",
+        action="store_true",
+        help="resume checkpoints validated on other caches; early stopping starts over on these",
+    )
     args = parser.parse_args()
     if (args.fills is None) != (args.consumer is None):
         parser.error("--fills and --consumer go together")
@@ -211,6 +216,7 @@ def main() -> None:
                 normalization_dir=normalization_dir,
                 checkpoint_filename=checkpoint_filename,
                 resume_checkpoint=resume_checkpoint,
+                new_validation=args.new_validation,
             )
 
         done = run_streaming_training(

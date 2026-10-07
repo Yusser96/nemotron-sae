@@ -138,8 +138,15 @@ def init_streaming_site(
     normalization_dir: str | Path | None = None,
     checkpoint_filename: str | None = None,
     resume_checkpoint=None,
+    new_validation: bool = False,
 ) -> StreamingSite:
-    """Build one site from its warm start, or from its own checkpoint when resuming."""
+    """Build one site from its warm start, or from its own checkpoint when resuming.
+
+    A checkpoint validated on other caches resumes only with ``new_validation``:
+    early stopping then starts over on the new caches (their objectives do not
+    compare with the old ones; the learning-rate scale reached stays), and the
+    old warm-start baseline is set aside, so no deltas are reported.
+    """
 
     _reject_unsupported(sae_cfg, slug)
     out_dir = Path(out_dir)
@@ -166,7 +173,8 @@ def init_streaming_site(
         assert resume_checkpoint.trainer_state_path is not None
         state = load_trainer_state(resume_checkpoint.trainer_state_path)
         saved_signature = state.get("validation_cache_signature")
-        if saved_signature is not None and saved_signature != validation_cache_signature:
+        validation_changed = saved_signature is not None and saved_signature != validation_cache_signature
+        if validation_changed and not new_validation:
             raise ValueError(f"{slug}: validation caches differ from the resume checkpoint")
         step = int(state["global_step"])
         optim.load_state_dict(state["optimizer"])
@@ -176,6 +184,12 @@ def init_streaming_site(
         if "inverse_simpson_usage" in state:
             inverse_simpson_usage.copy_(state["inverse_simpson_usage"].to(device=device, dtype=torch.float32))
         early_stop.load_state_dict(state["early_stop"])
+        if validation_changed:
+            early_stop.best, early_stop.checks_since_improve = None, 0
+            baseline = out_dir / "baseline_metrics.json"
+            if baseline.exists():
+                baseline.replace(out_dir / "baseline_metrics_previous_validation.json")
+            log.warning("%s: new validation caches; early stopping starts over on them", slug)
         stopped = bool(state.get("stopped", False))
         next_milestone_index = int(state.get("next_milestone_index", 0))
         feature_resets = int(state.get("feature_resets", 0))

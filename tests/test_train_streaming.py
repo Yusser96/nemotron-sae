@@ -228,6 +228,28 @@ def test_a_resumed_site_without_a_stored_baseline_reports_no_deltas(tmp_path):
     assert not (site.out_dir / "baseline_metrics.json").exists()
 
 
+def test_a_checkpoint_resumes_on_new_validation_caches_only_when_asked(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"))
+    site = _site(tmp_path, cfg, _validation_dirs(tmp_path / "old"))
+    record_baseline(site, "cpu")
+    site.step = 10
+    site.early_stop.best, site.early_stop.checks_since_improve, site.early_stop.lr_scale = 0.5, 4, 0.25
+    write_checkpoint(site, site.step)
+    site.close()
+    checkpoint = resolve_checkpoint(site.out_dir, require_trainer_state=True)
+    new_dirs = _validation_dirs(tmp_path / "new", n_rows=3 * BATCH)
+
+    with pytest.raises(ValueError, match="validation caches differ"):
+        _site(tmp_path, cfg, new_dirs, resume_checkpoint=checkpoint)
+    resumed = _site(tmp_path, cfg, new_dirs, resume_checkpoint=checkpoint, new_validation=True)
+    resumed.close()
+
+    assert resumed.step == 10
+    assert (resumed.early_stop.best, resumed.early_stop.checks_since_improve, resumed.early_stop.lr_scale) == (None, 0, 0.25)
+    assert not (site.out_dir / "baseline_metrics.json").exists()
+    assert (site.out_dir / "baseline_metrics_previous_validation.json").exists()
+
+
 SEQ_LEN, TOKENS_PER_FWD = 8, 2 * BATCH
 
 
