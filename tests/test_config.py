@@ -185,6 +185,7 @@ def test_extraction_config_defaults_to_hf_hooks():
     assert cfg.extraction.vllm.enable_prefix_caching is False
     assert cfg.extraction.vllm.enforce_eager is True
     assert cfg.extraction.sink.lifecycle == "consume"
+    assert (cfg.extraction.remote.host, cfg.extraction.remote.port) == ("127.0.0.1", 29555)
 
 
 def test_sink_path_expands_environment_variables(monkeypatch):

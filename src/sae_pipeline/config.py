@@ -29,7 +29,7 @@ FeatureUseStrategy = Literal[
     "frequency_residual_reset",
 ]
 ActivationCentering = Literal["none", "mean"]
-ExtractionBackend = Literal["hf_hooks", "vllm"]
+ExtractionBackend = Literal["hf_hooks", "vllm", "vllm_remote"]
 SinkLifecycle = Literal["consume", "cache"]
 
 
@@ -497,10 +497,23 @@ class ActivationSinkCfg(BaseModel):
         return Path(expanded)
 
 
+class RemoteCfg(BaseModel):
+    """Control-store address for ``vllm_remote``: activations come from a producer process.
+
+    The trainer hosts the store and the producer (``cli.serve_activations``,
+    same config) connects to it. Both run on one node, so the activations go
+    GPU to GPU; jobs sharing a node need distinct ports.
+    """
+
+    host: str = "127.0.0.1"
+    port: int = 29555
+
+
 class ExtractionCfg(BaseModel):
     backend: ExtractionBackend = "hf_hooks"
     vllm: VLLMCfg = Field(default_factory=VLLMCfg)
     sink: ActivationSinkCfg = Field(default_factory=ActivationSinkCfg)
+    remote: RemoteCfg = Field(default_factory=RemoteCfg)
 
 
 class LogCfg(BaseModel):
