@@ -3,8 +3,10 @@
 The engine is started with ``vllm_worker.ActivationHookExtension`` as its
 ``worker_extension_cls``; hooks are installed once over ``collective_rpc``.
 Each token sequence is one request, sent as token ids (no re-tokenisation)
-with a single generated token; the workers write every forward pass's rows to
-the sink, and the driver reassembles them per prompt.
+with a single generated token. ``VLLMExtractor`` has the workers write every
+forward pass's rows to the sink and reassembles them per prompt;
+``serve_activations`` instead answers a trainer in another process, with the
+workers sending the rows to it GPU to GPU (see ``remote``).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import torch
 
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.extraction.base import ActivationBatch
+from sae_pipeline.extraction.remote import CALL_SIZE_KEY, open_store, take_tokens
 from sae_pipeline.extraction.sink import ActivationSink
 from sae_pipeline.extraction.vllm_worker import assemble_rows, hookable
 from sae_pipeline.hooks.components import ComponentSpec
@@ -111,3 +114,29 @@ class VLLMExtractor:
         self.llm.collective_rpc("sae_remove_hooks")
         self.llm = None
         self.sink.cleanup()
+
+
+def serve_activations(
+    cfg: PipelineCfg,
+    specs: dict[str, ComponentSpec],
+    *,
+    host: str,
+    port: int,
+    engine_factory: Callable[..., Any] = _vllm_engine,
+    sampling_params_factory: Callable[[], Any] = _one_token_sampling,
+) -> int:
+    """Answer a ``remote.RemoteExtractor``'s token batches until it stops; return how many."""
+    llm = _start_engine(cfg, _hook_sites(specs), out_dir=None, engine_factory=engine_factory)
+    sampling_params = sampling_params_factory()
+    sequences_per_call = cfg.extraction.vllm.sequences_per_call
+    store = open_store(host, port, trainer=False)
+    store.set(CALL_SIZE_KEY, str(sequences_per_call))
+    llm.collective_rpc("sae_join", args=(host, port))
+    served = 0
+    while (token_ids := take_tokens(store, served)) is not None:
+        for chunk in token_ids.split(sequences_per_call):
+            llm.generate(_prompts(chunk), sampling_params, use_tqdm=False)
+            llm.collective_rpc("sae_send", args=(chunk.tolist(),))
+        served += 1
+    llm.collective_rpc("sae_remove_hooks")
+    return served

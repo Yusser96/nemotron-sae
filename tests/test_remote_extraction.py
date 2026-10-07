@@ -1,19 +1,25 @@
 """Producer and trainer over a real TCPStore and a Gloo peer group (the CPU stand-in for NCCL)."""
 
+import json
 import socket
 import threading
 
+import pytest
 import torch
 
 from sae_pipeline.extraction.remote import (
     CALL_SIZE_KEY,
     PRODUCER_RANK,
+    SITES_KEY,
     TRAINER_RANK,
     RemoteExtractor,
     open_store,
     peer_group,
     take_tokens,
 )
+from sae_pipeline.extraction.vllm import serve_activations
+from tests.test_vllm_extractor import SPECS, _cfg, _FakeEngine, _reference
+from tests.test_vllm_worker_extension import D, _Worker
 
 
 def _free_port() -> int:
@@ -52,3 +58,75 @@ def test_token_batches_go_out_and_each_calls_rows_come_back_in_site_order():
     torch.testing.assert_close(batch.activations["a"][:, 0], torch.ones(15))
     torch.testing.assert_close(batch.activations["b"][:, 0], torch.full((15,), 2.0))
     torch.testing.assert_close(batch.activations["b"][:, 1], token_ids.flatten().float())
+
+
+def test_the_trainer_receives_every_sites_rows_from_the_producer(tmp_path):
+    port = _free_port()
+    engines: list[_FakeEngine] = []
+    served: list[int] = []
+
+    def engine(**kwargs):
+        engines.append(_FakeEngine(**kwargs))
+        return engines[-1]
+
+    producer = threading.Thread(
+        target=lambda: served.append(
+            serve_activations(
+                _cfg(tmp_path),
+                SPECS,
+                host="127.0.0.1",
+                port=port,
+                engine_factory=engine,
+                sampling_params_factory=lambda: "one-token",
+            )
+        )
+    )
+    trainer = RemoteExtractor(
+        host="127.0.0.1", port=port, widths={slug: D for slug in SPECS}, dtype=torch.float32, device="cpu"
+    )
+    producer.start()
+    batches = [torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]]), torch.tensor([[9, 8, 7], [6, 5, 4]])]
+
+    received = [trainer.extract(token_ids) for token_ids in batches]
+    trainer.close()
+    producer.join(timeout=60)
+
+    assert served == [2]
+    assert engines[0].kwargs["max_num_batched_tokens"] == 2 * 4
+    assert engines[0].calls == [2, 1, 2]
+    for token_ids, batch in zip(batches, received):
+        expected = _reference(engines[0].model_runner.model, token_ids)
+        for slug in SPECS:
+            torch.testing.assert_close(batch.activations[slug], expected[slug])
+
+
+def _trainer_store(port: int, slugs: list[str], widths: list[int]):
+    store = open_store("127.0.0.1", port, trainer=True)
+    store.set(SITES_KEY, json.dumps({"slugs": slugs, "widths": widths, "dtype": "torch.float32"}))
+    return store
+
+
+def test_a_producer_hooking_other_sites_refuses_to_join():
+    port = _free_port()
+    _store = _trainer_store(port, ["L0_resid_post"], [D])
+    worker = _Worker()
+    worker.sae_install_hooks([("L0_mamba_out", "mamba_out", 0)], None)
+
+    with pytest.raises(ValueError, match="expects sites"):
+        worker.sae_join("127.0.0.1", port)
+
+
+def test_rows_of_another_width_are_not_sent():
+    port = _free_port()
+    store = _trainer_store(port, ["L0_resid_post"], [D + 1])
+    trainer_side = threading.Thread(target=lambda: peer_group(store, TRAINER_RANK, torch.device("cpu")))
+    trainer_side.start()
+    worker = _Worker()
+    worker.sae_install_hooks([("L0_resid_post", "resid_post", 0)], None)
+    worker.sae_join("127.0.0.1", port)
+    trainer_side.join(timeout=60)
+    with torch.no_grad():
+        worker.model_runner.model(torch.tensor([1, 2]), torch.tensor([0, 1]))
+
+    with pytest.raises(ValueError, match="trainer expects torch.float32 width 5"):
+        worker.sae_send([[1, 2]])

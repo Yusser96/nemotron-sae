@@ -4,13 +4,15 @@ vLLM mixes this class into its GPU worker, so the methods run in the worker
 process with the model at hand. ``sae_install_hooks`` registers forward hooks
 on the requested sites of a NemotronH-style model (``model.layers[L]`` and
 ``model.layers[L].mixer``). After every forward pass the captured rows, the
-step's ``input_ids`` and ``positions`` are written to one safetensors file on
-a background thread; ``sae_flush`` waits for the writes and returns the paths.
-All names start with ``sae_`` so they cannot collide with worker attributes.
+step's ``input_ids`` and ``positions`` either are written to one safetensors
+file on a background thread (``sae_flush`` waits for the writes and returns
+the paths) or stay on the GPU until ``sae_send`` hands them to a trainer
+process (see ``remote``). All names start with ``sae_`` so they cannot collide with worker attributes.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
@@ -20,6 +22,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from sae_pipeline.extraction.remote import PRODUCER_RANK, SITES_KEY, TRAINER_RANK, open_store, peer_group
 from sae_pipeline.hooks.components import ComponentSpec
 
 # Component kind -> substring of the mixer class name it must be hooked on.
@@ -72,12 +75,15 @@ class ActivationHookExtension:
         # The only vLLM worker internal this extension relies on.
         return self.model_runner.model  # type: ignore[attr-defined]
 
-    def sae_install_hooks(self, sites: list[tuple[str, str, int]], out_dir: str) -> None:
-        """Hook every ``(slug, component kind, layer)``; files go to ``out_dir``."""
+    def sae_install_hooks(self, sites: list[tuple[str, str, int]], out_dir: str | None) -> None:
+        """Hook every ``(slug, component kind, layer)``; steps go to files in ``out_dir``, or stay on the GPU."""
         model = self._sae_model()
         layers = model.model.layers
-        self.sae_out_dir = Path(out_dir)
-        self.sae_out_dir.mkdir(parents=True, exist_ok=True)
+        self.sae_slugs = [slug for slug, _kind, _layer in sites]
+        self.sae_out_dir = None if out_dir is None else Path(out_dir)
+        if self.sae_out_dir is not None:
+            self.sae_out_dir.mkdir(parents=True, exist_ok=True)
+        self.sae_steps: list[dict[str, torch.Tensor]] = []
         self.sae_step = 0
         self.sae_captured: dict[str, torch.Tensor] = {}
         self.sae_inputs: dict[str, torch.Tensor] = {}
@@ -85,7 +91,7 @@ class ActivationHookExtension:
         self.sae_writer = ThreadPoolExecutor(max_workers=1)
         self.sae_handles = [
             model.register_forward_pre_hook(self._sae_record_inputs, with_kwargs=True),
-            model.register_forward_hook(self._sae_write_step),
+            model.register_forward_hook(self._sae_end_step),
         ]
         for slug, kind, layer in sites:
             if kind == "resid_pre":
@@ -110,6 +116,30 @@ class ActivationHookExtension:
         self.sae_writes = []
         return paths
 
+    def sae_join(self, host: str, port: int) -> None:
+        """Join the trainer's activation group as the producer."""
+        store = open_store(host, port, trainer=False)
+        expected = json.loads(store.get(SITES_KEY))
+        if expected["slugs"] != self.sae_slugs:
+            raise ValueError(f"The trainer expects sites {expected['slugs']}, this producer hooks {self.sae_slugs}")
+        self.sae_expected = dict(zip(expected["slugs"], expected["widths"])), expected["dtype"]
+        self.sae_peer = peer_group(store, PRODUCER_RANK, next(self._sae_model().parameters()).device)
+
+    def sae_send(self, token_ids: list[list[int]]) -> None:
+        """Send the kept steps' rows for these prompts to the trainer, one site at a time."""
+        prompts = torch.tensor(token_ids)
+        widths, dtype = self.sae_expected
+        for slug in self.sae_slugs:
+            rows = assemble_rows(self.sae_steps, prompts, [slug])[slug]
+            if rows.shape[1] != widths[slug] or str(rows.dtype) != dtype:
+                raise ValueError(
+                    f"{slug}: producing {rows.dtype} width {rows.shape[1]}, the trainer expects {dtype} width {widths[slug]}"
+                )
+            self.sae_peer.send([rows], TRAINER_RANK, 0).wait()
+            for step in self.sae_steps:
+                del step[slug]
+        self.sae_steps = []
+
     def sae_remove_hooks(self) -> None:
         self.sae_flush()
         for handle in self.sae_handles:
@@ -132,12 +162,16 @@ class ActivationHookExtension:
         # Copy now: the next layer's fused add-RMSNorm overwrites this tensor in place.
         self.sae_captured[slug] = output.clone()
 
-    def _sae_write_step(self, _module, _args, _output) -> None:
+    def _sae_end_step(self, _module, _args, _output) -> None:
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             return
-        tensors = {**self.sae_inputs, **self.sae_captured}
+        captured, self.sae_captured = self.sae_captured, {}
+        if self.sae_out_dir is None:
+            # vLLM reuses its input buffers for the next step.
+            self.sae_steps.append({**{name: t.clone() for name, t in self.sae_inputs.items()}, **captured})
+            return
+        tensors = {**self.sae_inputs, **captured}
         cpu = {name: tensor.detach().to("cpu").contiguous() for name, tensor in tensors.items()}
-        self.sae_captured = {}
         path = self.sae_out_dir / f"step_{self.sae_step:08d}.safetensors"
         self.sae_step += 1
         self.sae_writes.append((path, self.sae_writer.submit(save_file, cpu, str(path))))
