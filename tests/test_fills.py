@@ -61,6 +61,19 @@ def test_the_producer_waits_for_room_until_the_consumers_read_or_finish(tmp_path
     assert not queue.wait_for_room(50) and queue.all_done()
 
 
+def test_a_full_buffer_waits_only_for_the_fastest_consumer(tmp_path):
+    for index in range(4):
+        _publish(tmp_path, index, nbytes=100)
+    queue = FillQueue(tmp_path, ["fast", "idle"], poll_seconds=0)
+    mark_position(tmp_path, "fast", 2)
+
+    # "idle" never started: the fills "fast" has read go, down to the cap; the rest stay.
+    assert queue.wait_for_room(250)
+    assert published_fills(tmp_path) == [2, 3]
+    assert not queue.wait_for_room(150, deadline=0.0)
+    assert published_fills(tmp_path) == [2, 3]
+
+
 def test_the_producer_stops_waiting_at_its_deadline(tmp_path):
     _publish(tmp_path, 0, nbytes=100)
     assert not FillQueue(tmp_path, ["a"], poll_seconds=0).wait_for_room(50, deadline=0.0)
@@ -149,3 +162,21 @@ def test_a_consumer_refuses_fills_of_another_model_or_without_its_sites(tmp_path
         FillStream(tmp_path, "c0", ["b"], header=HEADER, device="cpu")
     with pytest.raises(ValueError, match="holds fills"):
         FillStream(tmp_path, "c0", ["a"], header={**HEADER, "model": "other"}, device="cpu")
+
+
+def test_a_fill_deleted_while_being_read_is_skipped(tmp_path, monkeypatch):
+    for index in range(3):
+        _write_fill(tmp_path, index, sequences=1, first_token=10 * index)
+    read = FillStream._read
+
+    def deleted_first(self, index):
+        if index == 1:
+            shutil.rmtree(fill_dir(tmp_path, 1), ignore_errors=True)
+        return read(self, index)
+
+    monkeypatch.setattr(FillStream, "_read", deleted_first)
+    stream = _stream(tmp_path)
+
+    assert stream.next_batch(1).tolist() == [[0, 1]]
+    assert stream.next_batch(1).tolist() == [[20, 21]]
+    stream.close()

@@ -91,6 +91,10 @@ class FillQueue:
     def wait_for_room(self, max_bytes: int, *, deadline: float | None = None) -> bool:
         """Release what was read and wait until less than ``max_bytes`` of fills remain.
 
+        A full buffer waits only for the fastest consumer: once it has read
+        the oldest fill, that fill goes, and consumers still behind it skip it
+        (the stream is unbounded, so they train on later tokens instead). A
+        slow consumer, or one waiting for its next job, holds no one back.
         Returns False instead if every consumer is done or ``deadline``
         (``time.monotonic()``) passes first.
         """
@@ -100,6 +104,10 @@ class FillQueue:
                 return False
             if self.buffered_bytes() < max_bytes:
                 return True
+            indices = published_fills(self.root)
+            if len(indices) > 1 and indices[0] < max(self.position(name) for name in self.consumers):
+                shutil.rmtree(fill_dir(self.root, indices[0]))
+                continue
             if deadline is not None and time.monotonic() >= deadline:
                 return False
             time.sleep(self.poll_seconds)
@@ -127,7 +135,8 @@ class FillStream:
     boundaries, and keeps their rows for ``slugs`` for the ``extract`` call
     that follows (``sae.train_streaming.run_streaming_training`` makes them in
     that order). The next fill is read on a thread meanwhile. Its state is the
-    next sequence to hand out; on resume, fills deleted since are skipped.
+    next sequence to hand out. Fills deleted before it reads them (on resume,
+    or when it falls behind a full buffer) are skipped.
     Waiting for a fill past ``deadline`` (``time.monotonic()``) raises
     ``TimeoutError``.
     """
@@ -169,21 +178,29 @@ class FillStream:
 
     def _open(self, index: int) -> None:
         """Make fill ``index`` (or the oldest after it, if it was deleted) the loaded one."""
-        self._wait(lambda: any(i >= index for i in published_fills(self.root)))
-        available = min(i for i in published_fills(self.root) if i >= index)
+        wanted = index
+        while True:
+            self._wait(lambda: any(i >= wanted for i in published_fills(self.root)))
+            available = min(i for i in published_fills(self.root) if i >= wanted)
+            mark_position(self.root, self.name, available)
+            try:
+                if self._next is not None and self._next[0] == available:
+                    token_ids, rows = self._next[1].result()
+                else:
+                    token_ids, rows = self._read(available)
+                break
+            except FileNotFoundError:
+                # Deleted while being read: a full buffer waits only for the fastest consumer.
+                self._next, wanted = None, available + 1
         if available != index:
             log.warning("%s: fills %d-%d were deleted; continuing from fill %d", self.name, index, available - 1, available)
             self.fill, self.sequence = available, 0
-        mark_position(self.root, self.name, available)
-        if self._next is not None and self._next[0] == available:
-            token_ids, rows = self._next[1].result()
-        else:
-            token_ids, rows = self._read(available)
         self._loaded = (available, token_ids, rows)
         self._next = (available + 1, self._reader.submit(self._read_when_published, available + 1))
 
     def _read_when_published(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        self._wait(lambda: index in published_fills(self.root))
+        # A later fill being published means this one was too, though it may be deleted since.
+        self._wait(lambda: any(i >= index for i in published_fills(self.root)))
         return self._read(index)
 
     def next_batch(self, batch_size: int) -> torch.Tensor:
