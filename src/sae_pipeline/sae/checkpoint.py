@@ -336,9 +336,13 @@ def restore_random_state(state: Mapping[str, Any]) -> None:
 def _numpy_rng_safe_globals() -> list[Any]:
     """Globals needed to unpickle the tuple returned by ``np.random.get_state()``."""
 
-    core = getattr(np, "_core", None) or np.core  # numpy >= 2.0 vs < 2.0 layout
+    # numpy 1.26 has a numpy._core alias package whose submodules load only on import.
+    try:
+        from numpy._core.multiarray import _reconstruct
+    except ImportError:  # numpy < 1.26
+        from numpy.core.multiarray import _reconstruct
     globals_: list[Any] = [
-        core.multiarray._reconstruct,
+        _reconstruct,
         np.ndarray,
         np.dtype,
         type(np.dtype(np.uint32)),
