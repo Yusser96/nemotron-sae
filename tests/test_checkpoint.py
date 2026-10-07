@@ -223,3 +223,19 @@ def test_write_raw_export_is_atomic_and_matches_the_export_state(tmp_path: Path)
     assert written.keys() == expected.keys()
     for key, value in expected.items():
         torch.testing.assert_close(written[key], value)
+
+
+@pytest.mark.parametrize("module", [b"numpy.core.multiarray", b"numpy._core.multiarray"])
+def test_trainer_states_written_under_either_numpy_major_version_load(tmp_path: Path, module: bytes):
+    # The legacy format is one plain pickle stream, so the module path of
+    # numpy's array constructor can be rewritten as numpy 1.x or 2.x writes it.
+    path = tmp_path / "trainer_state.pt"
+    state = {"random_state": capture_random_state()}
+    torch.save(state, path, _use_new_zipfile_serialization=False)
+    data = path.read_bytes()
+    assert b"numpy._core.multiarray\n_reconstruct" in data
+    path.write_bytes(data.replace(b"numpy._core.multiarray\n_reconstruct", module + b"\n_reconstruct"))
+
+    loaded = load_trainer_state(path)
+
+    assert (loaded["random_state"]["numpy"][1] == state["random_state"]["numpy"][1]).all()

@@ -342,7 +342,9 @@ def _numpy_rng_safe_globals() -> list[Any]:
     except ImportError:  # numpy < 1.26
         from numpy.core.multiarray import _reconstruct
     globals_: list[Any] = [
-        _reconstruct,
+        # Under both names, so files written under numpy 1.x and 2.x load under either.
+        (_reconstruct, "numpy.core.multiarray._reconstruct"),
+        (_reconstruct, "numpy._core.multiarray._reconstruct"),
         np.ndarray,
         np.dtype,
         type(np.dtype(np.uint32)),
