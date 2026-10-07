@@ -100,6 +100,50 @@ def test_the_trainer_receives_every_sites_rows_from_the_producer(tmp_path):
             torch.testing.assert_close(batch.activations[slug], expected[slug])
 
 
+def test_an_auto_sized_producer_probes_one_step_then_answers_in_calls_that_fit(tmp_path, monkeypatch):
+    # Per sequence: 3 rows of three float32 sites of width D plus int64 ids and positions,
+    # and one site's assembled copy.
+    per_sequence = 3 * (3 * D * 4 + 2 * 8 + D * 4)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (2 * per_sequence + 1, 10**9))
+    cfg = _cfg(tmp_path).with_overrides(
+        **{
+            "extraction.vllm.sequences_per_call": "auto",
+            "extraction.vllm.max_sequences_per_step": 4,
+            "extraction.vllm.vram_headroom_gib": 0,
+        }
+    )
+    port = _free_port()
+    engines: list[_FakeEngine] = []
+
+    def engine(**kwargs):
+        engines.append(_FakeEngine(**kwargs))
+        return engines[-1]
+
+    producer = threading.Thread(
+        target=lambda: serve_activations(
+            cfg, SPECS, host="127.0.0.1", port=port, engine_factory=engine, sampling_params_factory=lambda: "one-token"
+        )
+    )
+    trainer = RemoteExtractor(
+        host="127.0.0.1", port=port, widths={slug: D for slug in SPECS}, dtype=torch.float32, device="cpu"
+    )
+    producer.start()
+    token_ids = torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+
+    batch = trainer.extract(token_ids)
+    trainer.close()
+    producer.join(timeout=60)
+
+    assert engines[0].kwargs["max_num_batched_tokens"] == 4 * 4
+    assert engines[0].calls == [4, 2, 1]
+    expected = _reference(engines[0].model_runner.model, token_ids)
+    for slug in SPECS:
+        torch.testing.assert_close(batch.activations[slug], expected[slug])
+
+
 def _trainer_store(port: int, slugs: list[str], widths: list[int]):
     store = open_store("127.0.0.1", port, trainer=True)
     store.set(SITES_KEY, json.dumps({"slugs": slugs, "widths": widths, "dtype": "torch.float32"}))

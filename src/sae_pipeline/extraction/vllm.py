@@ -11,6 +11,7 @@ workers sending the rows to it GPU to GPU (see ``remote``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -25,6 +26,8 @@ from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import normalize_hf_source
 
 WORKER_EXTENSION = "sae_pipeline.extraction.vllm_worker.ActivationHookExtension"
+
+log = logging.getLogger(__name__)
 
 
 def _vllm_engine(**engine_kwargs: Any) -> Any:
@@ -79,6 +82,32 @@ def _prompts(token_ids: torch.Tensor) -> list[dict[str, list[int]]]:
     return [{"prompt_token_ids": row.tolist()} for row in token_ids]
 
 
+def fit_sequences(memory: dict[str, int], *, seq_len: int, headroom_bytes: int) -> int:
+    """How many sequences' captures fit in one worker's VRAM (``sae_end_probe``'s report)."""
+    per_sequence = (memory["row_bytes"] + memory["largest_site_row_bytes"]) * seq_len
+    fits = (memory["free"] - memory["transient"] - headroom_bytes) // per_sequence
+    if fits < 1:
+        raise RuntimeError(f"Not even one sequence's captures fit next to the engine and the headroom: {memory}")
+    return fits
+
+
+def _sequences_per_call(llm: Any, cfg: PipelineCfg, sampling_params: Any) -> int:
+    """``extraction.vllm.sequences_per_call``, fitted to the free VRAM when it is ``auto``."""
+    vllm_cfg, seq_len = cfg.extraction.vllm, cfg.data.seq_len
+    if vllm_cfg.sequences_per_call != "auto":
+        return vllm_cfg.sequences_per_call
+    # One full step of dummy ids (as in vLLM's own profiling run), so the probe
+    # sees the activation peak every later step reaches.
+    probe = torch.zeros(vllm_cfg.max_sequences_per_step, seq_len, dtype=torch.long)
+    llm.collective_rpc("sae_start_probe")
+    llm.generate(_prompts(probe), sampling_params, use_tqdm=False)
+    memories = llm.collective_rpc("sae_end_probe")
+    headroom = int(vllm_cfg.vram_headroom_gib * 2**30)
+    fits = min(fit_sequences(memory, seq_len=seq_len, headroom_bytes=headroom) for memory in memories)
+    log.info("sequences_per_call: auto -> %d (%s, %.1f GiB headroom)", fits, memories, vllm_cfg.vram_headroom_gib)
+    return fits
+
+
 class VLLMExtractor:
     def __init__(
         self,
@@ -91,6 +120,8 @@ class VLLMExtractor:
     ) -> None:
         """Engine settings come from ``cfg.model``, ``data.seq_len`` and ``extraction.vllm``/``sink``."""
         sites = _hook_sites(specs)
+        if cfg.extraction.vllm.sequences_per_call == "auto":
+            raise ValueError("sequences_per_call: auto sizes captures kept on the GPU; the file sink needs a number")
         self.slugs = list(specs)
         self.sink = ActivationSink(cfg.extraction.sink)
         self.capture_device = capture_device
@@ -129,7 +160,7 @@ def serve_activations(
     """Answer a ``remote.RemoteExtractor``'s token batches until it stops; return how many."""
     llm = _start_engine(cfg, _hook_sites(specs), out_dir=None, engine_factory=engine_factory)
     sampling_params = sampling_params_factory()
-    sequences_per_call = cfg.extraction.vllm.sequences_per_call
+    sequences_per_call = _sequences_per_call(llm, cfg, sampling_params)
     store = open_store(host, port, trainer=False)
     store.set(CALL_SIZE_KEY, str(sequences_per_call))
     llm.collective_rpc("sae_join", args=(host, port))

@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from sae_pipeline.config import PipelineCfg
-from sae_pipeline.extraction.vllm import VLLMExtractor
+from sae_pipeline.extraction.vllm import VLLMExtractor, fit_sequences
 from sae_pipeline.extraction.vllm_worker import ActivationHookExtension
 from sae_pipeline.hooks.components import ComponentSpec
 from tests.test_vllm_worker_extension import _CausalLM
@@ -118,3 +118,21 @@ def test_sites_without_a_module_boundary_are_rejected_before_starting_vllm(tmp_p
             {"L3_expert_7": ComponentSpec.parse(3, "expert.7")},
             engine_factory=lambda **_: pytest.fail("engine must not start"),
         )
+
+
+def test_auto_call_size_is_only_for_captures_kept_on_the_gpu(tmp_path):
+    cfg = _cfg(tmp_path).with_overrides(
+        **{"extraction.vllm.sequences_per_call": "auto", "extraction.vllm.max_sequences_per_step": 2}
+    )
+
+    with pytest.raises(ValueError, match="file sink"):
+        VLLMExtractor(cfg, SPECS, engine_factory=lambda **_: pytest.fail("engine must not start"))
+
+
+def test_the_call_size_fills_the_vram_left_after_the_step_peak_and_headroom():
+    # 10 rows per sequence, each holding 6 bytes plus 2 for one site's assembled copy.
+    memory = {"free": 1000, "transient": 150, "row_bytes": 6, "largest_site_row_bytes": 2}
+
+    assert fit_sequences(memory, seq_len=10, headroom_bytes=50) == (1000 - 150 - 50) // 80
+    with pytest.raises(RuntimeError, match="Not even one"):
+        fit_sequences(memory, seq_len=10, headroom_bytes=800)

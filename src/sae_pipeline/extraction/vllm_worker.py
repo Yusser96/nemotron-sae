@@ -140,6 +140,32 @@ class ActivationHookExtension:
                 del step[slug]
         self.sae_steps = []
 
+    def sae_start_probe(self) -> None:
+        """Start measuring a probe call's memory (see ``sae_end_probe``)."""
+        torch.cuda.reset_peak_memory_stats()
+        self.sae_probe_base = torch.cuda.memory_allocated()
+
+    def sae_end_probe(self) -> dict[str, int]:
+        """Drop the probe call's kept steps and report its memory, in bytes.
+
+        ``free``: VRAM left once they are dropped; ``transient``: the peak above
+        them while a step ran (activations, which later steps reuse);
+        ``row_bytes``: what every kept row holds (captures and inputs);
+        ``largest_site_row_bytes``: the extra copy ``assemble_rows`` makes of one site.
+        """
+        kept = sum(tensor.nbytes for step in self.sae_steps for tensor in step.values())
+        rows = sum(step["input_ids"].numel() for step in self.sae_steps)
+        largest = max(sum(step[slug].nbytes for step in self.sae_steps) for slug in self.sae_slugs)
+        transient = torch.cuda.max_memory_allocated() - self.sae_probe_base - kept
+        self.sae_steps = []
+        torch.cuda.empty_cache()
+        return {
+            "free": torch.cuda.mem_get_info()[0],
+            "transient": max(transient, 0),
+            "row_bytes": kept // rows,
+            "largest_site_row_bytes": largest // rows,
+        }
+
     def sae_remove_hooks(self) -> None:
         self.sae_flush()
         for handle in self.sae_handles:

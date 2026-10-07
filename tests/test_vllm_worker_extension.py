@@ -148,3 +148,22 @@ def test_a_site_on_the_wrong_kind_of_block_is_rejected(tmp_path):
         _Worker().sae_install_hooks([("L0_moe_out", "moe_out", 0)], str(tmp_path))
     with pytest.raises(ValueError, match="no hook point"):
         _Worker().sae_install_hooks([("L0_expert", "expert", 0)], str(tmp_path))
+
+
+def test_a_probe_reports_the_kept_bytes_per_row_and_the_peak_above_them(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 100)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (5000, 9000))
+    worker = _Worker()
+    worker.sae_install_hooks([("L0_resid_post", "resid_post", 0), ("L1_moe_out", "moe_out", 1)], None)
+    worker.sae_start_probe()
+    with torch.no_grad():
+        worker.model_runner.model(torch.tensor([1, 2, 3]), torch.tensor([0, 1, 2]))
+    # Kept per row: two float32 sites of width D plus int64 input_ids and positions.
+    row_bytes = 2 * D * 4 + 2 * 8
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 100 + 3 * row_bytes + 40)
+
+    memory = worker.sae_end_probe()
+
+    assert memory == {"free": 5000, "transient": 40, "row_bytes": row_bytes, "largest_site_row_bytes": D * 4}
+    assert worker.sae_steps == []

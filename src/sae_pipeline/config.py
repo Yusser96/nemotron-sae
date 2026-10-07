@@ -457,7 +457,10 @@ class VLLMCfg(BaseModel):
     # None: data.seq_len + 1 (the prompt plus the single generated token).
     max_model_len: int | None = None
     # Sequences submitted per generate() call; each becomes one vLLM request.
-    sequences_per_call: int = 64
+    # "auto" (when the captures stay on the GPU): as many as the VRAM left after
+    # one probe step holds, keeping vram_headroom_gib free.
+    sequences_per_call: int | Literal["auto"] = 64
+    vram_headroom_gib: float = 5.0
     # Sequences per forward pass (the scheduler's token budget); None: sequences_per_call.
     max_sequences_per_step: int | None = None
     # vLLM's KV-cache pool (kv_cache_memory_bytes); None: whatever gpu_memory_utilization leaves.
@@ -468,10 +471,16 @@ class VLLMCfg(BaseModel):
 
     @field_validator("tensor_parallel_size", "sequences_per_call", "max_sequences_per_step", "kv_cache_gib")
     @classmethod
-    def _positive_counts(cls, value: float | None) -> float | None:
-        if value is not None and value <= 0:
+    def _positive_counts(cls, value: float | str | None) -> float | str | None:
+        if isinstance(value, (int, float)) and value <= 0:
             raise ValueError("vllm counts and sizes must be positive")
         return value
+
+    @model_validator(mode="after")
+    def _auto_needs_a_step_budget(self) -> "VLLMCfg":
+        if self.sequences_per_call == "auto" and self.max_sequences_per_step is None:
+            raise ValueError("vllm.sequences_per_call: auto needs vllm.max_sequences_per_step")
+        return self
 
     @field_validator("gpu_memory_utilization")
     @classmethod

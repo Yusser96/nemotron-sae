@@ -209,6 +209,18 @@ def test_vllm_context_must_hold_a_sequence_plus_one_token():
         cfg.with_overrides(**{"extraction.vllm.gpu_memory_utilization": 0.0})
 
 
+def test_auto_call_size_needs_a_step_budget():
+    cfg = PipelineCfg.from_yaml("configs/dev.yaml")
+
+    auto = cfg.with_overrides(
+        **{"extraction.vllm.sequences_per_call": "auto", "extraction.vllm.max_sequences_per_step": 32}
+    )
+    assert auto.extraction.vllm.sequences_per_call == "auto"
+    assert auto.extraction.vllm.vram_headroom_gib == 5.0
+    with pytest.raises(ValueError, match="max_sequences_per_step"):
+        cfg.with_overrides(**{"extraction.vllm.sequences_per_call": "auto"})
+
+
 def test_streaming_requires_whole_batches_per_forward():
     cfg = PipelineCfg.from_yaml("configs/dev.yaml")
     batch_size = cfg.sae.batch_size
