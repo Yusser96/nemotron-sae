@@ -8,6 +8,9 @@ reads is a fixed per-language validation set, built beforehand with
 Usage:
     python -m sae_pipeline.cli.train_sae_streaming --config <config.yml>
 
+With ``extraction.backend: vllm_remote`` the model runs in a second process on
+another GPU of the same node, ``cli.serve_activations`` with the same config.
+
 Exits 0 both when training is complete (a ``DONE`` marker exists under the
 run's checkpoint root) and when it paused at ``stream.stop_after_seconds``;
 rerun the same command to resume.
@@ -20,12 +23,15 @@ import logging
 import os
 from pathlib import Path
 
+import torch
+
 from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for, validation_manifest_path_for
 from sae_pipeline.cli._process import run_then_hard_exit
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.hf import HFHookExtractor
+from sae_pipeline.extraction.remote import RemoteExtractor
 from sae_pipeline.extraction.vllm_worker import hookable
 from sae_pipeline.hooks.components import site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
@@ -98,16 +104,25 @@ def main() -> None:
     requests = site_requests(cfg.target.sites)
     # Check every validation cache before spending minutes loading the model.
     validation = {target.slug: _validation_cache_dirs(cfg, target, languages) for target in cfg.target.sites}
-    use_vllm = cfg.extraction.backend == "vllm"
+    backend = cfg.extraction.backend
     extractor: ActivationExtractor
-    if use_vllm:
-        from sae_pipeline.extraction.vllm import VLLMExtractor
-
+    if backend in ("vllm", "vllm_remote"):
         # Fail before loading anything if a site has no module boundary in vLLM.
         unsupported = [slug for slug, (spec, _site) in requests.items() if not hookable(spec)]
         if unsupported:
             raise SystemExit(f"vLLM extraction cannot hook {unsupported}")
         tokenizer = load_tokenizer(cfg.model)
+    if backend == "vllm_remote":
+        extractor = RemoteExtractor(
+            host=cfg.extraction.remote.host,
+            port=cfg.extraction.remote.port,
+            widths={slug: d_in for slug, (_dirs, d_in) in validation.items()},
+            dtype=getattr(torch, cfg.model.dtype),
+            device=cfg.stream.sae_device,
+        )
+    elif backend == "vllm":
+        from sae_pipeline.extraction.vllm import VLLMExtractor
+
         # Start the engine before the SAEs allocate: vLLM sizes itself from
         # extraction.vllm.gpu_memory_utilization at startup.
         specs = {slug: spec for slug, (spec, _site) in requests.items()}
