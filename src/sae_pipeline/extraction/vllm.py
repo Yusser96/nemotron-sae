@@ -208,7 +208,10 @@ def produce_fills(
         llm.generate(_prompts(token_ids), sampling_params, use_tqdm=False)
         generate_seconds = time.perf_counter() - started
         vram = min(llm.collective_rpc("sae_vram"), key=lambda worker: worker["min_free"])
-        save = llm.collective_rpc("sae_save", args=(token_ids.tolist(), str(out_dir / f"fill_{index:06d}"), threads))[0]
+        # Returns the previous fill's save, written while this one was generated.
+        saved = llm.collective_rpc("sae_save", args=(token_ids.tolist(), str(out_dir / f"fill_{index:06d}"), threads))[0]
+        if saved is not None:
+            reports[-1].update(_save_rates(saved))
         report = {
             "fill": index,
             "sequences": sequences,
@@ -217,11 +220,19 @@ def produce_fills(
             "tokens_per_s": token_ids.numel() / generate_seconds,
             "min_free_vram_gib": vram["min_free"] / 2**30,
             "total_vram_gib": vram["total"] / 2**30,
-            "saved_gb": save["bytes"] / 1e9,
-            "copy_gb_per_s": save["bytes"] / save["copy_seconds"] / 1e9,
-            "save_gb_per_s": save["bytes"] / save["seconds"] / 1e9,
         }
         log.info("fill %d: %s", index, report)
         reports.append(report)
+    saved = llm.collective_rpc("sae_flush_saves")[0]
+    if saved is not None:
+        reports[-1].update(_save_rates(saved))
     llm.collective_rpc("sae_remove_hooks")
     return reports
+
+
+def _save_rates(saved: dict[str, float]) -> dict[str, float]:
+    return {
+        "saved_gb": saved["bytes"] / 1e9,
+        "copy_gb_per_s": saved["bytes"] / saved["copy_seconds"] / 1e9,
+        "write_gb_per_s": saved["bytes"] / saved["write_seconds"] / 1e9,
+    }

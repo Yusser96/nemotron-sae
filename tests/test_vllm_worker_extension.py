@@ -178,11 +178,35 @@ def test_a_saved_fill_holds_each_sites_rows_in_submission_order(tmp_path):
     prompts = [[1, 2], [4, 5]]
     expected = assemble_rows(worker.sae_steps, torch.tensor(prompts), [slug for slug, _, _ in sites])
 
-    report = worker.sae_save(prompts, str(tmp_path / "fill_0"), threads=2)
+    assert worker.sae_save(prompts, str(tmp_path / "fill_0"), threads=2, extra_files={"state.pt": b"s"}) is None
+    assert worker.sae_steps == []
+
+    report = worker.sae_flush_saves()
 
     assert sorted(p.name for p in tmp_path.iterdir()) == ["fill_0"]
     fill = tmp_path / "fill_0"
     assert load_file(fill / "token_ids.safetensors")["token_ids"].tolist() == prompts
+    assert (fill / "state.pt").read_bytes() == b"s"
     for slug, rows in expected.items():
         torch.testing.assert_close(load_file(fill / f"{slug}.safetensors")["activations"], rows)
-    assert report["bytes"] == 3 * 4 * D * 4 and worker.sae_steps == []
+    assert report["bytes"] == 3 * 4 * D * 4 and worker.sae_flush_saves() is None
+
+
+def test_a_fill_is_published_when_the_next_one_is_saved(tmp_path):
+    worker = _Worker()
+    worker.sae_install_hooks([("L0_resid_post", "resid_post", 0)], None)
+    saved, expected = [], []
+    for index, prompt in enumerate([[1, 2], [4, 5]]):
+        with torch.no_grad():
+            worker.model_runner.model(torch.tensor(prompt), torch.tensor([0, 1]))
+        expected.append(assemble_rows(worker.sae_steps, torch.tensor([prompt]), ["L0_resid_post"])["L0_resid_post"])
+        saved.append(worker.sae_save([prompt], str(tmp_path / f"fill_{index}"), threads=1))
+        # The fill being written stays hidden until the next save publishes it.
+        assert sorted(p.name for p in tmp_path.iterdir()) == [f"fill_{i}" for i in range(index)] + [f"fill_{index}.partial"]
+
+    assert saved[0] is None and saved[1]["bytes"] == 2 * D * 4
+    worker.sae_remove_hooks()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fill_0", "fill_1"]
+    # The host buffers are reused: the first fill was written before the second overwrote them.
+    for index, rows in enumerate(expected):
+        torch.testing.assert_close(load_file(tmp_path / f"fill_{index}" / "L0_resid_post.safetensors")["activations"], rows)
