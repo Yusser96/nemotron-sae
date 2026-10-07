@@ -16,7 +16,13 @@ import os
 import re
 import shutil
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+
+import torch
+from safetensors.torch import load_file
+
+from sae_pipeline.extraction.base import ActivationBatch
 
 log = logging.getLogger(__name__)
 
@@ -106,3 +112,114 @@ def mark_position(root: Path, name: str, index: int) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(str(index), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def mark_done(root: Path, name: str) -> None:
+    path = _consumer_path(root, f"{name}.done")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+
+
+class FillStream:
+    """A consumer's token stream and extractor in one, read from a producer's fills.
+
+    ``next_batch`` hands out the fills' sequences in order, across fill
+    boundaries, and keeps their rows for ``slugs`` for the ``extract`` call
+    that follows (``sae.train_streaming.run_streaming_training`` makes them in
+    that order). The next fill is read on a thread meanwhile. Its state is the
+    next sequence to hand out; on resume, fills deleted since are skipped.
+    Waiting for a fill past ``deadline`` (``time.monotonic()``) raises
+    ``TimeoutError``.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        name: str,
+        slugs: list[str],
+        *,
+        header: dict,
+        device: str,
+        deadline: float | None = None,
+        poll_seconds: float = 10.0,
+    ) -> None:
+        self.root, self.name, self.slugs, self.device = root, name, slugs, device
+        self.deadline, self.poll_seconds = deadline, poll_seconds
+        self.fill, self.sequence = 0, 0
+        self._loaded: tuple[int, torch.Tensor, dict[str, torch.Tensor]] | None = None
+        self._next: tuple[int, Future] | None = None
+        self._batch: tuple[torch.Tensor, dict[str, torch.Tensor]] | None = None
+        self._reader = ThreadPoolExecutor(max_workers=1)
+        self._wait(lambda: (root / HEADER).exists())
+        produced = json.loads((root / HEADER).read_text(encoding="utf-8"))
+        missing = sorted(set(slugs) - set(produced["slugs"]))
+        if missing or {key: produced[key] for key in header} != header:
+            raise ValueError(f"{root} holds fills of {produced}; this consumer needs {header} and sites {slugs}")
+
+    def _wait(self, ready) -> None:
+        while not ready():
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                raise TimeoutError(f"No fill arrived in {self.root} before the deadline")
+            time.sleep(self.poll_seconds)
+
+    def _read(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        fill = fill_dir(self.root, index)
+        token_ids = load_file(fill / "token_ids.safetensors")["token_ids"]
+        return token_ids, {slug: load_file(fill / f"{slug}.safetensors")["activations"] for slug in self.slugs}
+
+    def _open(self, index: int) -> None:
+        """Make fill ``index`` (or the oldest after it, if it was deleted) the loaded one."""
+        self._wait(lambda: any(i >= index for i in published_fills(self.root)))
+        available = min(i for i in published_fills(self.root) if i >= index)
+        if available != index:
+            log.warning("%s: fills %d-%d were deleted; continuing from fill %d", self.name, index, available - 1, available)
+            self.fill, self.sequence = available, 0
+        mark_position(self.root, self.name, available)
+        if self._next is not None and self._next[0] == available:
+            token_ids, rows = self._next[1].result()
+        else:
+            token_ids, rows = self._read(available)
+        self._loaded = (available, token_ids, rows)
+        self._next = (available + 1, self._reader.submit(self._read_when_published, available + 1))
+
+    def _read_when_published(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        self._wait(lambda: index in published_fills(self.root))
+        return self._read(index)
+
+    def next_batch(self, batch_size: int) -> torch.Tensor:
+        token_parts, row_parts = [], {slug: [] for slug in self.slugs}
+        needed = batch_size
+        while needed:
+            if self._loaded is None or self._loaded[0] != self.fill:
+                self._open(self.fill)
+            _index, token_ids, rows = self._loaded
+            take = min(needed, token_ids.shape[0] - self.sequence)
+            token_parts.append(token_ids[self.sequence : self.sequence + take])
+            seq_len = token_ids.shape[1]
+            for slug in self.slugs:
+                row_parts[slug].append(rows[slug][self.sequence * seq_len : (self.sequence + take) * seq_len])
+            self.sequence += take
+            needed -= take
+            if self.sequence == token_ids.shape[0]:
+                self.fill, self.sequence = self.fill + 1, 0
+        batch = torch.cat(token_parts)
+        self._batch = (batch, {slug: torch.cat(parts) for slug, parts in row_parts.items()})
+        return batch
+
+    def extract(self, token_ids: torch.Tensor) -> ActivationBatch:
+        if self._batch is None or self._batch[0] is not token_ids:
+            raise RuntimeError("extract() takes the token ids of the last next_batch()")
+        _token_ids, rows = self._batch
+        self._batch = None
+        return ActivationBatch(token_ids, {slug: value.to(self.device) for slug, value in rows.items()})
+
+    def state_dict(self) -> dict[str, object]:
+        return {"fill": self.fill, "sequence": self.sequence}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.fill, self.sequence = int(state["fill"]), int(state["sequence"])
+
+    def close(self) -> None:
+        # A prefetch may still be waiting for a fill that will never come.
+        self.deadline = 0.0
+        self._reader.shutdown(cancel_futures=True)
