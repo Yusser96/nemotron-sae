@@ -478,6 +478,12 @@ def _finish(sites: list[StreamingSite], reason: str) -> None:
         write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
 
 
+def state_paths(out_root: Path, name: str | None) -> tuple[Path, Path]:
+    """The stream state and ``DONE`` marker of a run, or of its trainer ``name``."""
+    suffix = "" if name is None else f"_{name}"
+    return out_root / f"stream_state{suffix}.pt", out_root / f"DONE{suffix}"
+
+
 def run_streaming_training(
     *,
     sites: dict[str, StreamingSite],
@@ -489,14 +495,18 @@ def run_streaming_training(
     seq_len: int,
     device: str,
     out_root: str | Path,
+    name: str | None = None,
 ) -> bool:
     """Train every site from one continuous stream of model activations.
 
     ``extractor`` maps each ``(sequences, seq_len)`` token batch to
     ``{slug: (tokens, d_in)}`` activations for every site. Returns True once the run is
     complete (every site stopped, hit the token cap, or the corpus ran out);
-    False when it paused at ``stream_cfg.stop_after_seconds`` and should be
-    resumed. State is checkpointed so a resumed run repeats no tokens.
+    False when it paused at ``stream_cfg.stop_after_seconds``, or because the
+    stream timed out waiting for data, and should be resumed. State is
+    checkpointed so a resumed run repeats no tokens. Trainers of different
+    sites sharing ``out_root`` each need a ``name``: the stream state and the
+    ``DONE`` marker are per name (see ``state_paths``).
     """
 
     if early_stopping.enabled and early_stopping.mode != "objective":
@@ -509,7 +519,7 @@ def run_streaming_training(
         raise ValueError("tokens_per_fwd must be a multiple of both sae.batch_size and seq_len")
 
     out_root = Path(out_root)
-    stream_state_path = out_root / "stream_state.pt"
+    stream_state_path, done_path = state_paths(out_root, name)
     tokens_processed = 0
     if stream_state_path.exists():
         saved = load_trainer_state(stream_state_path)
@@ -543,6 +553,12 @@ def run_streaming_training(
         except StopIteration:
             _finish(active, "the training corpus is exhausted")
             done = True
+            break
+        except TimeoutError as error:
+            log.info("Pausing: %s", error)
+            for site in active:
+                write_checkpoint(site, site.step)
+            done = False
             break
 
         captured = extractor.extract(token_batch).activations
@@ -591,5 +607,5 @@ def run_streaming_training(
         site.log_f.flush()
         site.validation_f.flush()
     if done:
-        (out_root / "DONE").touch()
+        done_path.touch()
     return done

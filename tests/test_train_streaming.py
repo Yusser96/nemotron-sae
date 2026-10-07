@@ -258,7 +258,20 @@ class _SeededExtractor:
         return ActivationBatch(token_batch, {"site": torch.randn(token_batch.numel(), D_IN, generator=generator)})
 
 
-def _run(tmp_path: Path, site, stream, *, stream_cfg: StreamCfg, early_stopping=None) -> bool:
+class _StallingStream(_CountingStream):
+    """Runs dry after ``batches`` batches, as a fill stream whose producer stopped."""
+
+    def __init__(self, batches: int) -> None:
+        super().__init__()
+        self.batches = batches
+
+    def next_batch(self, batch_size: int) -> torch.Tensor:
+        if len(self.first_rows) == self.batches:
+            raise TimeoutError("no fill arrived")
+        return super().next_batch(batch_size)
+
+
+def _run(tmp_path: Path, site, stream, *, stream_cfg: StreamCfg, early_stopping=None, name=None) -> bool:
     return run_streaming_training(
         sites={"site": site},
         token_stream=stream,
@@ -269,6 +282,7 @@ def _run(tmp_path: Path, site, stream, *, stream_cfg: StreamCfg, early_stopping=
         seq_len=SEQ_LEN,
         device="cpu",
         out_root=tmp_path,
+        name=name,
     )
 
 
@@ -321,6 +335,29 @@ def test_pauses_at_the_time_limit_and_resumes_without_repeating_tokens(tmp_path,
     assert resumed.step == 8
     assert _logged_steps(resumed) == list(range(1, 9))
     assert set(first.first_rows).isdisjoint(second.first_rows)
+    assert second.first_rows[0] == first.position
+
+
+def test_a_named_trainer_pauses_when_its_stream_times_out_and_resumes_after_it(tmp_path):
+    warm = _warm_start(tmp_path / "warm.safetensors")
+    site = _site(tmp_path, _sae_cfg(warm, ckpt_every=100))
+    first = _StallingStream(batches=2)
+
+    done = _run(tmp_path, site, first, stream_cfg=StreamCfg(enabled=True), name="c0")
+    site.close()
+
+    assert done is False and site.step == 4
+    assert (tmp_path / "stream_state_c0.pt").exists() and not (tmp_path / "stream_state.pt").exists()
+    resumed = _site(
+        tmp_path,
+        _sae_cfg(warm, ckpt_every=100),
+        resume_checkpoint=resolve_checkpoint(site.out_dir, require_trainer_state=True),
+    )
+    second = _CountingStream()
+    done = _run(tmp_path, resumed, second, stream_cfg=StreamCfg(enabled=True, token_cap=6 * BATCH), name="c0")
+    resumed.close()
+
+    assert done is True and (tmp_path / "DONE_c0").exists() and not (tmp_path / "DONE").exists()
     assert second.first_rows[0] == first.position
 
 
