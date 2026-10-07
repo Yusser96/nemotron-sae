@@ -221,6 +221,16 @@ def test_a_rerun_continues_after_the_newest_fill_or_from_a_start_state(tmp_path,
     assert load_file(fills / "fill_000001" / "token_ids.safetensors")["token_ids"][0, 0] == 27
 
 
+def test_a_producer_whose_consumers_stalled_stops_after_its_idle_limit(tmp_path, monkeypatch):
+    queue = FillQueue(tmp_path / "fills", ["c0"], poll_seconds=0)
+
+    # Room for one fill, and the consumer never reads it.
+    reports, _engine = _produce(tmp_path, monkeypatch, queue=queue, max_buffer_bytes=1, max_idle_seconds=0.0)
+
+    assert [report["fill"] for report in reports] == [0, 1]
+    assert not queue.all_done()
+
+
 def test_a_producer_waits_for_its_consumers_and_stops_when_they_are_done(tmp_path, monkeypatch):
     queue = FillQueue(tmp_path / "fills", ["c0"], poll_seconds=0)
     monkeypatch.setattr("time.sleep", lambda _seconds: mark_done(tmp_path / "fills", "c0"))

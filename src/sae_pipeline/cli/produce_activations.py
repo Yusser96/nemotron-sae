@@ -43,6 +43,9 @@ def main() -> None:
     parser.add_argument("--max-buffer-gb", type=float, default=200.0, help="with --consumers: fills kept ahead")
     parser.add_argument("--start-state", type=Path, default=None, help="token stream state for the first fill")
     parser.add_argument("--stop-after-seconds", type=float, default=None)
+    parser.add_argument(
+        "--max-idle-minutes", type=float, default=15.0, help="with --consumers: stop when they have read nothing for this long"
+    )
     parser.add_argument("--threads", type=int, default=8, help="sites written at once")
     parser.add_argument("--sites", nargs="+", default=None, help="hook only these target.sites slugs")
     args = parser.parse_args()
@@ -65,6 +68,7 @@ def main() -> None:
         max_buffer_bytes=int(args.max_buffer_gb * 1e9),
         start_state=args.start_state,
         stop_after_seconds=args.stop_after_seconds,
+        max_idle_seconds=args.max_idle_minutes * 60,
     )
     for report in reports:
         print(json.dumps(report), flush=True)

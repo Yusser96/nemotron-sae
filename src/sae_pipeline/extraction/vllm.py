@@ -209,6 +209,7 @@ def produce_fills(
     max_buffer_bytes: int | None = None,
     start_state: Path | None = None,
     stop_after_seconds: float | None = None,
+    max_idle_seconds: float | None = None,
     engine_factory: Callable[..., Any] = _vllm_engine,
     sampling_params_factory: Callable[[], Any] = _one_token_sampling,
 ) -> list[dict[str, float]]:
@@ -218,8 +219,9 @@ def produce_fills(
     captures stay in VRAM until they are written, with the stream's state
     after it. A rerun continues after the newest fill in ``out_dir``
     (``start_state``, a saved token stream, starts an empty one). Stops after
-    ``fills`` fills, after ``stop_after_seconds``, or once every consumer of
-    ``queue`` is done; while ``max_buffer_bytes`` of fills await them, waits.
+    ``fills`` fills, after ``stop_after_seconds``, once every consumer of
+    ``queue`` is done, or when ``max_buffer_bytes`` of fills have awaited them
+    for ``max_idle_seconds`` (they have stalled: the GPU goes back).
     Returns one report per fill: its size, the generate rate, the lowest free
     VRAM, the write rates and the wait for room.
     """
@@ -237,7 +239,11 @@ def produce_fills(
             if queue.buffered_bytes() >= max_buffer_bytes:
                 # Consumers may be waiting for the fill still being written.
                 _record_save(llm.collective_rpc("sae_flush_saves")[0], reports)
-            if not queue.wait_for_room(max_buffer_bytes, deadline=deadline):
+            limits = [deadline] if deadline is not None else []
+            if max_idle_seconds is not None:
+                limits.append(time.monotonic() + max_idle_seconds)
+            if not queue.wait_for_room(max_buffer_bytes, deadline=min(limits, default=None)):
+                log.info("Stopping: %s", "every consumer is done" if queue.all_done() else "no room for new fills")
                 break
         waited = time.perf_counter() - waited
         if deadline is not None and time.monotonic() >= deadline:
