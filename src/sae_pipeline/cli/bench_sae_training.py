@@ -57,6 +57,7 @@ def _site(slug: str, cfg: PipelineCfg, d_in: int, device: str, out_dir: Path, sc
         probe_tokens=0,
         ever_fired=torch.zeros(d_sae, dtype=torch.bool, device=device),
         feature_frequency=torch.zeros(d_sae, dtype=torch.float32, device=device),
+        inverse_simpson_usage=torch.zeros(d_sae, dtype=torch.float32, device=device),
         log_f=open(os.devnull, "w"),
         validation_f=open(os.devnull, "w"),
     )

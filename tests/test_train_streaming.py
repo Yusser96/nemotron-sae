@@ -25,6 +25,7 @@ from sae_pipeline.sae.train_streaming import (
     record_baseline,
     run_streaming_training,
     streaming_step,
+    write_checkpoint,
 )
 
 D_IN, D_SAE, L0_TARGET, BATCH = 6, 16, 3, 32
@@ -321,6 +322,21 @@ def test_pauses_at_the_time_limit_and_resumes_without_repeating_tokens(tmp_path,
     assert _logged_steps(resumed) == list(range(1, 9))
     assert set(first.first_rows).isdisjoint(second.first_rows)
     assert second.first_rows[0] == first.position
+
+
+def test_a_resumed_site_continues_the_inverse_simpson_window(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), inverse_simpson_window_steps=8)
+    site = _site(tmp_path, cfg)
+    for step in (1, 2):
+        streaming_step(site, torch.randn(BATCH, D_IN, generator=torch.Generator().manual_seed(step)), step)
+    write_checkpoint(site, 2)
+    site.close()
+
+    resumed = _site(tmp_path, cfg, resume_checkpoint=resolve_checkpoint(site.out_dir, require_trainer_state=True))
+    resumed.close()
+
+    assert site.inverse_simpson_usage.sum() > 0
+    torch.testing.assert_close(resumed.inverse_simpson_usage, site.inverse_simpson_usage)
 
 
 def test_stops_early_once_the_validation_objective_plateaus(tmp_path):
