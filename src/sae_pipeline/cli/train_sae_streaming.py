@@ -11,9 +11,15 @@ Usage:
 With ``extraction.backend: vllm_remote`` the model runs in a second process on
 another GPU of the same node, ``cli.serve_activations`` with the same config.
 
-Exits 0 both when training is complete (a ``DONE`` marker exists under the
-run's checkpoint root) and when it paused at ``stream.stop_after_seconds``;
-rerun the same command to resume.
+With ``--fills DIR --consumer NAME`` there is no model at all: the activations
+come from the fills ``cli.produce_activations --consumers NAME ...`` writes
+(see ``extraction.fills``), and ``--sites`` picks the sites this consumer
+trains. Consumers of different sites share the run's checkpoint root.
+
+Exits 0 both when training is complete (a ``DONE`` marker, ``DONE_<consumer>``
+for a consumer, exists under the run's checkpoint root) and when it paused at
+``stream.stop_after_seconds`` or for want of fills; rerun the same command to
+resume.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 from pathlib import Path
 
 import torch
@@ -30,6 +37,7 @@ from sae_pipeline.cli._process import run_then_hard_exit
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
+from sae_pipeline.extraction.fills import FillStream, mark_done
 from sae_pipeline.extraction.hf import HFHookExtractor
 from sae_pipeline.extraction.remote import RemoteExtractor
 from sae_pipeline.extraction.vllm_worker import hookable
@@ -37,7 +45,7 @@ from sae_pipeline.hooks.components import site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import dump_topology, enumerate_hooks
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
-from sae_pipeline.sae.train_streaming import init_streaming_site, run_streaming_training
+from sae_pipeline.sae.train_streaming import TokenStream, init_streaming_site, run_streaming_training, state_paths
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +84,12 @@ def _validation_cache_dirs(cfg: PipelineCfg, target, languages: list[str]) -> tu
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--fills", type=Path, default=None, help="train from these fills instead of a live model")
+    parser.add_argument("--consumer", default=None, help="with --fills: this trainer's name for the producer")
+    parser.add_argument("--sites", nargs="+", default=None, help="train only these target.sites slugs")
     args = parser.parse_args()
+    if (args.fills is None) != (args.consumer is None):
+        parser.error("--fills and --consumer go together")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     cfg = PipelineCfg.from_yaml(args.config)
@@ -88,31 +101,52 @@ def main() -> None:
         )
     if not cfg.target.sites:
         raise SystemExit("Streaming training requires target.sites")
+    targets = cfg.target.sites
+    if args.sites is not None:
+        unknown = sorted(set(args.sites) - {target.slug for target in targets})
+        if unknown:
+            raise SystemExit(f"--sites {unknown} are not in target.sites")
+        targets = [target for target in targets if target.slug in args.sites]
     languages = sorted({source.language for source in (cfg.data.sources or []) if source.language})
     if not languages:
         raise SystemExit("Streaming training needs data.sources with a language for each validation set")
 
     out_root = Path(cfg.sae.ckpt_dir) / cfg.run_id
-    if (out_root / "DONE").exists():
-        log.info("%s is already complete", out_root)
+    done_path = state_paths(out_root, args.consumer)[1]
+    if done_path.exists():
+        log.info("%s is already complete", done_path)
+        if args.fills is not None:
+            mark_done(args.fills, args.consumer)
         return
 
     arch = cfg.sae.arch if isinstance(cfg.sae.arch, str) else cfg.sae.arch[0]
     d_sae = cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0]
     l0_target = cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0]
 
-    requests = site_requests(cfg.target.sites)
+    requests = site_requests(targets)
     # Check every validation cache before spending minutes loading the model.
-    validation = {target.slug: _validation_cache_dirs(cfg, target, languages) for target in cfg.target.sites}
-    backend = cfg.extraction.backend
+    validation = {target.slug: _validation_cache_dirs(cfg, target, languages) for target in targets}
+    backend = "fills" if args.fills is not None else cfg.extraction.backend
     extractor: ActivationExtractor
+    token_stream: TokenStream | None = None
     if backend in ("vllm", "vllm_remote"):
         # Fail before loading anything if a site has no module boundary in vLLM.
         unsupported = [slug for slug, (spec, _site) in requests.items() if not hookable(spec)]
         if unsupported:
             raise SystemExit(f"vLLM extraction cannot hook {unsupported}")
         tokenizer = load_tokenizer(cfg.model)
-    if backend == "vllm_remote":
+    if backend == "fills":
+        stop_after = cfg.stream.stop_after_seconds
+        extractor = token_stream = FillStream(
+            args.fills,
+            args.consumer,
+            list(requests),
+            header={"model": cfg.model.name, "seq_len": cfg.data.seq_len},
+            device=cfg.stream.sae_device,
+            # Waiting for a fill ends in a pause before the job's time is up.
+            deadline=None if stop_after is None else time.monotonic() + stop_after,
+        )
+    elif backend == "vllm_remote":
         extractor = RemoteExtractor(
             host=cfg.extraction.remote.host,
             port=cfg.extraction.remote.port,
@@ -140,7 +174,7 @@ def main() -> None:
 
     sites = {}
     try:
-        for target in cfg.target.sites:
+        for target in targets:
             validation_dirs, d_in = validation[target.slug]
             site_dir = out_root / target.slug
             resume_checkpoint = None
@@ -177,9 +211,9 @@ def main() -> None:
                 resume_checkpoint=resume_checkpoint,
             )
 
-        run_streaming_training(
+        done = run_streaming_training(
             sites=sites,
-            token_stream=ResumableTokenStream(cfg.data, tokenizer),
+            token_stream=token_stream or ResumableTokenStream(cfg.data, tokenizer),
             extractor=extractor,
             stream_cfg=cfg.stream,
             early_stopping=cfg.early_stopping,
@@ -187,7 +221,10 @@ def main() -> None:
             seq_len=cfg.data.seq_len,
             device=cfg.stream.sae_device,
             out_root=out_root,
+            name=args.consumer,
         )
+        if done and args.fills is not None:
+            mark_done(args.fills, args.consumer)
     finally:
         extractor.close()
         for site in sites.values():

@@ -14,6 +14,7 @@ from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.cache.writer import ShardWriter
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg, StreamCfg
 from sae_pipeline.extraction.base import ActivationBatch
+from sae_pipeline.extraction.fills import FillQueue, FillStream, fill_dir, write_header
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.objective import coefficients_at, training_loss
@@ -416,3 +417,38 @@ def test_stops_early_once_the_validation_objective_plateaus(tmp_path):
     rows = [json.loads(line) for line in site.validation_log_path.read_text().splitlines()]
     assert rows[-1]["early_stop_triggered"] is True
     assert resolve_checkpoint(site.out_dir, require_trainer_state=True).step == 3
+
+
+def test_two_consumers_train_their_own_sites_from_one_producers_fills(tmp_path):
+    fills = tmp_path / "fills"
+    write_header(fills, {"model": "m", "seq_len": SEQ_LEN, "slugs": ["a", "b"]})
+    generator = torch.Generator().manual_seed(0)
+    for index in range(3):
+        partial = fills / f"fill_{index:06d}.partial"
+        partial.mkdir()
+        save_file({"token_ids": torch.zeros(6, SEQ_LEN, dtype=torch.long)}, str(partial / "token_ids.safetensors"))
+        for slug in ("a", "b"):
+            save_file({"activations": torch.randn(6 * SEQ_LEN, D_IN, generator=generator)}, str(partial / f"{slug}.safetensors"))
+        partial.rename(fill_dir(fills, index))
+    warm = _warm_start(tmp_path / "warm.safetensors")
+    run = tmp_path / "run"
+
+    for name, slug in (("c0", "a"), ("c1", "b")):
+        site = init_streaming_site(
+            slug=slug, sae_cfg=_sae_cfg(warm), d_in=D_IN, arch="jumprelu", d_sae=D_SAE, l0_target=L0_TARGET,
+            out_dir=run / slug, device="cpu", validation_cache_dirs={}, probe_tokens=BATCH,
+        )
+        stream = FillStream(fills, name, [slug], header={"model": "m", "seq_len": SEQ_LEN}, device="cpu", poll_seconds=0)
+        done = run_streaming_training(
+            sites={slug: site}, token_stream=stream, extractor=stream,
+            stream_cfg=StreamCfg(enabled=True, token_cap=4 * BATCH), early_stopping=EarlyStoppingCfg(),
+            tokens_per_fwd=TOKENS_PER_FWD, seq_len=SEQ_LEN, device="cpu", out_root=run, name=name,
+        )
+        stream.close()
+        site.close()
+        assert done and site.step == 4
+        # Two forward passes of 8 sequences: fills 0 and 1, and 4 sequences of fill 2.
+        assert stream.state_dict() == {"fill": 2, "sequence": 4}
+
+    assert sorted(p.name for p in run.iterdir()) == ["DONE_c0", "DONE_c1", "a", "b", "stream_state_c0.pt", "stream_state_c1.pt"]
+    assert FillQueue(fills, ["c0", "c1"]).release() == 2
