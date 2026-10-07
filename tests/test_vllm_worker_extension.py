@@ -167,3 +167,22 @@ def test_a_probe_reports_the_kept_bytes_per_row_and_the_peak_above_them(monkeypa
 
     assert memory == {"free": 5000, "transient": 40, "row_bytes": row_bytes, "largest_site_row_bytes": D * 4}
     assert worker.sae_steps == []
+
+
+def test_a_saved_fill_holds_each_sites_rows_in_submission_order(tmp_path):
+    worker = _Worker()
+    sites = [("L0_resid_post", "resid_post", 0), ("L0_mamba_out", "mamba_out", 0), ("L1_moe_out", "moe_out", 1)]
+    worker.sae_install_hooks(sites, None)
+    with torch.no_grad():
+        worker.model_runner.model(torch.tensor([4, 5, 1, 2]), torch.tensor([0, 1, 0, 1]))
+    prompts = [[1, 2], [4, 5]]
+    expected = assemble_rows(worker.sae_steps, torch.tensor(prompts), [slug for slug, _, _ in sites])
+
+    report = worker.sae_save(prompts, str(tmp_path / "fill_0"), threads=2)
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fill_0"]
+    fill = tmp_path / "fill_0"
+    assert load_file(fill / "token_ids.safetensors")["token_ids"].tolist() == prompts
+    for slug, rows in expected.items():
+        torch.testing.assert_close(load_file(fill / f"{slug}.safetensors")["activations"], rows)
+    assert report["bytes"] == 3 * 4 * D * 4 and worker.sae_steps == []

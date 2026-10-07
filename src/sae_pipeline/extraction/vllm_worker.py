@@ -7,12 +7,13 @@ on the requested sites of a NemotronH-style model (``model.layers[L]`` and
 step's ``input_ids`` and ``positions`` either are written to one safetensors
 file on a background thread (``sae_flush`` waits for the writes and returns
 the paths) or stay on the GPU until ``sae_send`` hands them to a trainer
-process (see ``remote``). All names start with ``sae_`` so they cannot collide with worker attributes.
+process (see ``remote``) or ``sae_save`` writes them as one fill per site. All names start with ``sae_`` so they cannot collide with worker attributes.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
@@ -139,6 +140,40 @@ class ActivationHookExtension:
             for step in self.sae_steps:
                 del step[slug]
         self.sae_steps = []
+
+    def sae_save(self, token_ids: list[list[int]], out_dir: str, threads: int) -> dict[str, float]:
+        """Write the kept steps' rows for these prompts as one fill directory.
+
+        ``out_dir`` gets ``token_ids.safetensors`` and one ``{slug}.safetensors``
+        per site (key ``activations``), so a consumer reads only its sites. The
+        files are written under ``{out_dir}.partial`` on up to ``threads`` threads
+        and published by renaming it: a reader on another node never sees half a
+        fill. Returns the bytes written, and the seconds taken in all and copying
+        rows to host memory.
+        """
+        started = time.perf_counter()
+        prompts = torch.tensor(token_ids)
+        partial = Path(f"{out_dir}.partial")
+        partial.mkdir(parents=True)
+        save_file({"token_ids": prompts}, str(partial / "token_ids.safetensors"))
+        copy_seconds, nbytes, pending = 0.0, 0, []
+        with ThreadPoolExecutor(max_workers=threads) as writer:
+            for slug in self.sae_slugs:
+                if len(pending) == threads:
+                    # Bounds host memory to `threads` sites in flight.
+                    pending.pop(0).result()
+                copy_started = time.perf_counter()
+                rows = assemble_rows(self.sae_steps, prompts, [slug])[slug].cpu()
+                copy_seconds += time.perf_counter() - copy_started
+                nbytes += rows.nbytes
+                pending.append(writer.submit(save_file, {"activations": rows}, str(partial / f"{slug}.safetensors")))
+                for step in self.sae_steps:
+                    del step[slug]
+            for write in pending:
+                write.result()
+        partial.rename(out_dir)
+        self.sae_steps = []
+        return {"bytes": nbytes, "seconds": time.perf_counter() - started, "copy_seconds": copy_seconds}
 
     def sae_start_probe(self) -> None:
         """Start measuring a probe call's memory (see ``sae_end_probe``)."""
