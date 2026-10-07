@@ -27,9 +27,6 @@ class HFHookExtractor:
         self.model_device = model_device
         self.capture_device = capture_device
 
-    def supports(self, spec: ComponentSpec) -> bool:
-        return True
-
     def extract(self, token_ids: torch.Tensor) -> ActivationBatch:
         with capture_many(self.model, self.requests, device=self.capture_device) as buffers:
             with torch.no_grad():

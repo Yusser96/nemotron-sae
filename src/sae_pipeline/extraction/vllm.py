@@ -102,9 +102,6 @@ class VLLMExtractor:
             **factories,
         )
 
-    def supports(self, spec: ComponentSpec) -> bool:
-        return hookable(spec)
-
     def extract(self, token_ids: torch.Tensor) -> ActivationBatch:
         parts: dict[str, list[torch.Tensor]] = {slug: [] for slug in self.slugs}
         for chunk in token_ids.detach().cpu().split(self.sequences_per_call):

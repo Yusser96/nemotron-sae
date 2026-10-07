@@ -12,12 +12,6 @@ from typing import Protocol
 
 import torch
 
-from sae_pipeline.hooks.components import ComponentSpec
-
-
-class UnsupportedComponentError(ValueError):
-    """A backend cannot extract the requested component."""
-
 
 @dataclass
 class ActivationBatch:
@@ -26,10 +20,6 @@ class ActivationBatch:
 
 
 class ActivationExtractor(Protocol):
-    def supports(self, spec: ComponentSpec) -> bool:
-        """Whether this backend can extract ``spec`` at all."""
-        ...
-
     def extract(self, token_ids: torch.Tensor) -> ActivationBatch:
         """Run the model on ``token_ids`` and return every configured site's activations."""
         ...
