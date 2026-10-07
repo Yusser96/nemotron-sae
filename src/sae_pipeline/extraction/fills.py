@@ -143,8 +143,9 @@ class FillStream:
     that order). The next fill is read on a thread meanwhile. Its state is the
     next sequence to hand out. Fills deleted before it reads them (on resume,
     or when it falls behind a full buffer) are skipped.
-    Waiting for a fill past ``deadline`` (``time.monotonic()``) raises
-    ``TimeoutError``.
+    Waiting for a fill past ``deadline`` (``time.monotonic()``), or for more
+    than ``max_idle_seconds`` at once, raises ``TimeoutError``: a consumer whose
+    producer is gone should give its GPU back rather than hold it idle.
     """
 
     def __init__(
@@ -156,25 +157,31 @@ class FillStream:
         header: dict,
         device: str,
         deadline: float | None = None,
+        max_idle_seconds: float | None = None,
         poll_seconds: float = 10.0,
     ) -> None:
         self.root, self.name, self.slugs, self.device = root, name, slugs, device
-        self.deadline, self.poll_seconds = deadline, poll_seconds
+        self.deadline, self.max_idle_seconds, self.poll_seconds = deadline, max_idle_seconds, poll_seconds
         self.fill, self.sequence = 0, 0
         self._loaded: tuple[int, torch.Tensor, dict[str, torch.Tensor]] | None = None
         self._next: tuple[int, Future] | None = None
         self._batch: tuple[torch.Tensor, dict[str, torch.Tensor]] | None = None
         self._reader = ThreadPoolExecutor(max_workers=1)
-        self._wait(lambda: (root / HEADER).exists())
+        self._wait(lambda: (root / HEADER).exists(), idle_limit=True)
         produced = json.loads((root / HEADER).read_text(encoding="utf-8"))
         missing = sorted(set(slugs) - set(produced["slugs"]))
         if missing or {key: produced[key] for key in header} != header:
             raise ValueError(f"{root} holds fills of {produced}; this consumer needs {header} and sites {slugs}")
 
-    def _wait(self, ready) -> None:
+    def _wait(self, ready, *, idle_limit: bool = False) -> None:
+        """Poll until ``ready()``; with ``idle_limit``, give up after ``max_idle_seconds`` too."""
+        started = time.monotonic()
         while not ready():
-            if self.deadline is not None and time.monotonic() >= self.deadline:
+            now = time.monotonic()
+            if self.deadline is not None and now >= self.deadline:
                 raise TimeoutError(f"No fill arrived in {self.root} before the deadline")
+            if idle_limit and self.max_idle_seconds is not None and now - started >= self.max_idle_seconds:
+                raise TimeoutError(f"No fill arrived in {self.root} for {self.max_idle_seconds:.0f} s")
             time.sleep(self.poll_seconds)
 
     def _read(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -186,7 +193,8 @@ class FillStream:
         """Make fill ``index`` (or the oldest after it, if it was deleted) the loaded one."""
         wanted = index
         while True:
-            self._wait(lambda: any(i >= wanted for i in published_fills(self.root)))
+            # Only this wait idles the consumer: the prefetch waits while it trains.
+            self._wait(lambda: any(i >= wanted for i in published_fills(self.root)), idle_limit=True)
             available = min(i for i in published_fills(self.root) if i >= wanted)
             mark_position(self.root, self.name, available)
             try:

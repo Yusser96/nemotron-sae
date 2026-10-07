@@ -88,6 +88,9 @@ def main() -> None:
     parser.add_argument("--consumer", default=None, help="with --fills: this trainer's name for the producer")
     parser.add_argument("--sites", nargs="+", default=None, help="train only these target.sites slugs")
     parser.add_argument(
+        "--max-idle-minutes", type=float, default=15.0, help="with --fills: pause when no fill arrives for this long"
+    )
+    parser.add_argument(
         "--new-validation",
         action="store_true",
         help="resume checkpoints validated on other caches; early stopping starts over on these",
@@ -149,6 +152,7 @@ def main() -> None:
                 device=cfg.stream.sae_device,
                 # Waiting for a fill ends in a pause before the job's time is up.
                 deadline=None if stop_after is None else time.monotonic() + stop_after,
+                max_idle_seconds=args.max_idle_minutes * 60,
             )
         except TimeoutError as error:
             log.info("Nothing to train yet: %s", error)

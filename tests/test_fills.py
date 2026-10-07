@@ -193,3 +193,13 @@ def test_a_fill_deleted_while_being_read_is_skipped(tmp_path, monkeypatch):
     assert stream.next_batch(1).tolist() == [[0, 1]]
     assert stream.next_batch(1).tolist() == [[20, 21]]
     stream.close()
+
+
+def test_a_consumer_left_without_fills_gives_up_after_its_idle_limit(tmp_path):
+    _write_fill(tmp_path, 0, sequences=1, first_token=0)
+    stream = _stream(tmp_path, max_idle_seconds=0.0)
+    stream.next_batch(1)
+
+    with pytest.raises(TimeoutError, match="for 0 s"):
+        stream.next_batch(1)
+    stream.close()
