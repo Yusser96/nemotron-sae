@@ -17,7 +17,7 @@ import torch
 from sae_pipeline.config import ActivationSinkCfg, PipelineCfg, VLLMCfg
 from sae_pipeline.extraction.base import ActivationBatch
 from sae_pipeline.extraction.sink import ActivationSink
-from sae_pipeline.extraction.vllm_worker import hookable
+from sae_pipeline.extraction.vllm_worker import assemble_rows, hookable
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import normalize_hf_source
 
@@ -111,9 +111,9 @@ class VLLMExtractor:
             prompts = [{"prompt_token_ids": row.tolist()} for row in chunk]
             self.llm.generate(prompts, self.sampling_params, use_tqdm=False)
             step_paths = [path for paths in self.llm.collective_rpc("sae_flush") for path in paths]
-            activations = self.sink.collect(step_paths, chunk, self.slugs, device=self.capture_device)
+            activations = assemble_rows(self.sink.read(step_paths), chunk, self.slugs)
             for slug, value in activations.items():
-                parts[slug].append(value)
+                parts[slug].append(value.to(self.capture_device))
         return ActivationBatch(
             token_ids=token_ids,
             activations={slug: torch.cat(values, dim=0) for slug, values in parts.items()},

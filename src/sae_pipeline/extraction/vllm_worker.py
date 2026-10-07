@@ -11,6 +11,7 @@ All names start with ``sae_`` so they cannot collide with worker attributes.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -29,6 +30,32 @@ RESIDUAL_KINDS = ("resid_pre", "resid_post")
 def hookable(spec: ComponentSpec) -> bool:
     """Whether a site has a module boundary to hook in vLLM's NemotronH."""
     return spec.expert_idx is None and spec.head_idx is None and (spec.kind in RESIDUAL_KINDS or spec.kind in MIXER_KINDS)
+
+
+def assemble_rows(
+    steps: Iterable[dict[str, torch.Tensor]], token_ids: torch.Tensor, slugs: list[str]
+) -> dict[str, torch.Tensor]:
+    """Per-site ``(sequences * seq_len, d)`` activations for ``token_ids``, in row order.
+
+    Each step holds the rows of one forward pass: whole prompts back to back,
+    each starting at position 0. Rows are matched to the submitted prompts by
+    their token ids; rows that match no prompt (e.g. padding) are ignored.
+    """
+    pending: dict[tuple[int, ...], list[int]] = {}
+    for index, row in enumerate(token_ids.detach().cpu().tolist()):
+        pending.setdefault(tuple(row), []).append(index)
+    found: dict[int, dict[str, torch.Tensor]] = {}
+    for step in steps:
+        ids, positions = step["input_ids"].cpu(), step["positions"].cpu()
+        starts = (positions == 0).nonzero().flatten().tolist() + [positions.numel()]
+        for start, end in zip(starts, starts[1:]):
+            matches = pending.get(tuple(ids[start:end].tolist()))
+            if matches:
+                found[matches.pop(0)] = {slug: step[slug][start:end] for slug in slugs}
+    missing = sorted(set(range(token_ids.shape[0])) - found.keys())
+    if missing:
+        raise RuntimeError(f"No captured activations for submitted sequences {missing}")
+    return {slug: torch.cat([found[index][slug] for index in range(token_ids.shape[0])]) for slug in slugs}
 
 
 def _arg(args: tuple, kwargs: dict, index: int, name: str):

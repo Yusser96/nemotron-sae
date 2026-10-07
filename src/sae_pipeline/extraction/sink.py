@@ -1,7 +1,7 @@
-"""Collect the activation files written by the vLLM worker hooks (see ``vllm_worker``).
+"""Read the activation files written by the vLLM worker hooks (see ``vllm_worker``).
 
 The sink directory can be a RAM-backed tmpfs (streaming) or a disk; with the
-``consume`` lifecycle every file is deleted once its rows have been read.
+``consume`` lifecycle every file is deleted once it has been read.
 """
 
 from __future__ import annotations
@@ -23,42 +23,14 @@ class ActivationSink:
         self.path.mkdir(parents=True, exist_ok=True)
         return self.path
 
-    def collect(
-        self,
-        step_paths: list[str],
-        token_ids: torch.Tensor,
-        slugs: list[str],
-        *,
-        device: str | torch.device,
-    ) -> dict[str, torch.Tensor]:
-        """Per-site ``(sequences * seq_len, d)`` activations for ``token_ids``, in row order.
-
-        Each step file holds the rows of one forward pass: whole prompts back
-        to back, each starting at position 0. Rows are matched to the
-        submitted prompts by their token ids; rows that match no prompt (e.g.
-        padding) are ignored.
-        """
-        pending: dict[tuple[int, ...], list[int]] = {}
-        for index, row in enumerate(token_ids.detach().cpu().tolist()):
-            pending.setdefault(tuple(row), []).append(index)
-        found: dict[int, dict[str, torch.Tensor]] = {}
+    def read(self, step_paths: list[str]) -> list[dict[str, torch.Tensor]]:
+        """Load step files in order; ``consume`` deletes each once loaded."""
+        steps = []
         for step_path in step_paths:
-            step = load_file(step_path)
-            ids, positions = step["input_ids"], step["positions"]
-            starts = (positions == 0).nonzero().flatten().tolist() + [positions.numel()]
-            for start, end in zip(starts, starts[1:]):
-                matches = pending.get(tuple(ids[start:end].tolist()))
-                if matches:
-                    found[matches.pop(0)] = {slug: step[slug][start:end] for slug in slugs}
+            steps.append(load_file(step_path))
             if self.lifecycle == "consume":
                 Path(step_path).unlink()
-        missing = sorted(set(range(token_ids.shape[0])) - found.keys())
-        if missing:
-            raise RuntimeError(f"No captured activations for submitted sequences {missing}")
-        return {
-            slug: torch.cat([found[index][slug] for index in range(token_ids.shape[0])]).to(device)
-            for slug in slugs
-        }
+        return steps
 
     def cleanup(self) -> None:
         """Remove files a consuming run left behind (e.g. after an interruption)."""

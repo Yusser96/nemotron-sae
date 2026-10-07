@@ -8,7 +8,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-from sae_pipeline.extraction.vllm_worker import ActivationHookExtension
+from sae_pipeline.extraction.vllm_worker import ActivationHookExtension, assemble_rows
 
 D = 4
 
@@ -120,6 +120,27 @@ def test_flush_returns_only_new_files_and_removed_hooks_stop_capturing(tmp_path)
     with torch.no_grad():
         model(torch.tensor([1, 2]), torch.tensor([0, 1]))
     assert len(list(tmp_path.iterdir())) == 1
+
+
+def _step(ids, positions, **sites) -> dict[str, torch.Tensor]:
+    return {"input_ids": torch.tensor(ids), "positions": torch.tensor(positions), **sites}
+
+
+def test_assemble_rows_reorders_prompts_across_steps_into_submission_order():
+    prompts = torch.tensor([[1, 2, 3], [4, 5, 6], [1, 2, 3]])
+    values = torch.arange(9 * 2, dtype=torch.float32).reshape(9, 2)
+    # Step 0 holds prompt 1 then prompt 0 plus a padding row; step 1 holds prompt 2.
+    steps = [
+        _step([4, 5, 6, 1, 2, 3, 0], [0, 1, 2, 0, 1, 2, 0], a=torch.cat([values[3:6], values[0:3], torch.zeros(1, 2)])),
+        _step([1, 2, 3], [0, 1, 2], a=values[6:9]),
+    ]
+
+    torch.testing.assert_close(assemble_rows(steps, prompts, ["a"])["a"], values)
+
+
+def test_assemble_rows_reports_prompts_that_were_never_captured():
+    with pytest.raises(RuntimeError, match=r"sequences \[1\]"):
+        assemble_rows([_step([1, 2], [0, 1], a=torch.zeros(2, 2))], torch.tensor([[1, 2], [7, 8]]), ["a"])
 
 
 def test_a_site_on_the_wrong_kind_of_block_is_rejected(tmp_path):
