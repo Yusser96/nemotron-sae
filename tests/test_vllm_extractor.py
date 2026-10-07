@@ -7,9 +7,11 @@ import torch
 from safetensors.torch import load_file
 
 from sae_pipeline.config import PipelineCfg
+from sae_pipeline.extraction.fills import FillQueue, mark_done, published_fills
 from sae_pipeline.extraction.vllm import VLLMExtractor, fit_sequences, produce_fills
 from sae_pipeline.extraction.vllm_worker import ActivationHookExtension
 from sae_pipeline.hooks.components import ComponentSpec
+from sae_pipeline.sae.checkpoint import load_trainer_state
 from tests.test_vllm_worker_extension import _CausalLM
 
 SPECS = {
@@ -148,8 +150,14 @@ class _CountingStream:
         self.next_id += 3 * batch_size
         return rows
 
+    def state_dict(self) -> dict[str, int]:
+        return {"next_id": self.next_id}
 
-def test_each_fill_is_one_vram_sized_call_written_one_file_per_site(tmp_path, monkeypatch):
+    def load_state_dict(self, state: dict[str, int]) -> None:
+        self.next_id = state["next_id"]
+
+
+def _produce(tmp_path, monkeypatch, **kwargs):
     for name, value in [("memory_allocated", 0), ("max_memory_allocated", 0), ("memory_reserved", 0), ("max_memory_reserved", 0)]:
         monkeypatch.setattr(torch.cuda, name, lambda value=value: value)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
@@ -169,16 +177,49 @@ def test_each_fill_is_one_vram_sized_call_written_one_file_per_site(tmp_path, mo
         return engines[-1]
 
     reports = produce_fills(
-        cfg, SPECS, _CountingStream(), out_dir=tmp_path / "fills", fills=2, threads=2,
-        engine_factory=engine, sampling_params_factory=lambda: "one-token",
+        cfg, SPECS, _CountingStream(), out_dir=tmp_path / "fills", threads=2,
+        engine_factory=engine, sampling_params_factory=lambda: "one-token", **kwargs,
     )
+    return reports, engines[0]
 
-    assert engines[0].calls == [4, 2, 2]
+
+def test_each_fill_is_one_vram_sized_call_written_one_file_per_site(tmp_path, monkeypatch):
+    reports, engine = _produce(tmp_path, monkeypatch, fills=2)
+
+    assert engine.calls == [4, 2, 2]
     assert [r["sequences"] for r in reports] == [2, 2] and reports[0]["tokens"] == 6
-    assert sorted(p.name for p in (tmp_path / "fills").iterdir()) == ["fill_000000", "fill_000001"]
+    assert all("write_gb_per_s" in report for report in reports)
+    assert sorted(p.name for p in (tmp_path / "fills").iterdir()) == ["fill_000000", "fill_000001", "fills.json"]
     fill = tmp_path / "fills" / "fill_000001"
     token_ids = load_file(fill / "token_ids.safetensors")["token_ids"]
     assert token_ids.tolist() == [[7, 8, 9], [10, 11, 12]]
-    expected = _reference(engines[0].model_runner.model, token_ids)
+    assert load_trainer_state(fill / "stream_state.pt") == {"token_stream": {"next_id": 13}}
+    expected = _reference(engine.model_runner.model, token_ids)
     for slug in SPECS:
         torch.testing.assert_close(load_file(fill / f"{slug}.safetensors")["activations"], expected[slug])
+
+
+def test_a_rerun_continues_after_the_newest_fill_or_from_a_start_state(tmp_path, monkeypatch):
+    start = tmp_path / "stream_state.pt"
+    torch.save({"token_stream": {"next_id": 21}}, start)
+    _produce(tmp_path, monkeypatch, fills=1, start_state=start)
+    (tmp_path / "fills" / "fill_000001.partial").mkdir()
+
+    _produce(tmp_path, monkeypatch, fills=1, start_state=start)
+
+    fills = tmp_path / "fills"
+    assert sorted(p.name for p in fills.iterdir()) == ["fill_000000", "fill_000001", "fills.json"]
+    assert load_file(fills / "fill_000000" / "token_ids.safetensors")["token_ids"][0, 0] == 21
+    assert load_file(fills / "fill_000001" / "token_ids.safetensors")["token_ids"][0, 0] == 27
+
+
+def test_a_producer_waits_for_its_consumers_and_stops_when_they_are_done(tmp_path, monkeypatch):
+    queue = FillQueue(tmp_path / "fills", ["c0"], poll_seconds=0)
+    monkeypatch.setattr("time.sleep", lambda _seconds: mark_done(tmp_path / "fills", "c0"))
+
+    # Room for one fill: the second waits, and the consumer finishes meanwhile.
+    reports, _engine = _produce(tmp_path, monkeypatch, queue=queue, max_buffer_bytes=1)
+
+    assert [report["fill"] for report in reports] == [0, 1]
+    assert all("write_gb_per_s" in report for report in reports)
+    assert published_fills(tmp_path / "fills") == [0, 1]
