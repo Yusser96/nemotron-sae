@@ -11,6 +11,7 @@ from sae_pipeline.extraction.fills import (
     FillQueue,
     FillStream,
     fill_dir,
+    mark_done,
     mark_position,
     published_fills,
     write_header,
@@ -72,6 +73,18 @@ def test_a_full_buffer_waits_only_for_the_fastest_consumer(tmp_path):
     assert published_fills(tmp_path) == [2, 3]
     assert not queue.wait_for_room(150, deadline=0.0)
     assert published_fills(tmp_path) == [2, 3]
+
+
+def test_a_finished_consumer_holds_no_fill_back(tmp_path):
+    for index in range(4):
+        _publish(tmp_path, index, nbytes=100)
+    queue = FillQueue(tmp_path, ["done", "running"], poll_seconds=0)
+    mark_position(tmp_path, "done", 1)
+    mark_done(tmp_path, "done")
+    mark_position(tmp_path, "running", 3)
+
+    assert queue.release() == 3 and published_fills(tmp_path) == [3]
+    assert not queue.all_done()
 
 
 def test_the_producer_stops_waiting_at_its_deadline(tmp_path):

@@ -70,13 +70,19 @@ class FillQueue:
         path = _consumer_path(self.root, name)
         return int(path.read_text(encoding="utf-8")) if path.exists() else 0
 
+    def _active(self) -> list[str]:
+        return [name for name in self.consumers if not _consumer_path(self.root, f"{name}.done").exists()]
+
     def all_done(self) -> bool:
-        return all(_consumer_path(self.root, f"{name}.done").exists() for name in self.consumers)
+        return not self._active()
 
     def release(self) -> int:
-        """Delete the fills every consumer has moved past, keeping the newest; return how many."""
+        """Delete the fills every consumer still training has moved past, keeping the newest; return how many."""
         indices = published_fills(self.root)
-        oldest_needed = min(self.position(name) for name in self.consumers)
+        active = self._active()
+        if not active:
+            return 0
+        oldest_needed = min(self.position(name) for name in active)
         # The newest fill holds the producer's resume state.
         released = [index for index in indices[:-1] if index < oldest_needed]
         for index in released:
@@ -105,7 +111,7 @@ class FillQueue:
             if self.buffered_bytes() < max_bytes:
                 return True
             indices = published_fills(self.root)
-            if len(indices) > 1 and indices[0] < max(self.position(name) for name in self.consumers):
+            if len(indices) > 1 and indices[0] < max(self.position(name) for name in self._active()):
                 shutil.rmtree(fill_dir(self.root, indices[0]))
                 continue
             if deadline is not None and time.monotonic() >= deadline:
