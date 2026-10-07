@@ -62,6 +62,16 @@ def site_requests(sites) -> dict[str, tuple[ComponentSpec, HookSite]]:
     }
 
 
+def select_sites(sites, slugs: list[str] | None) -> list:
+    """The entries of ``sites`` named in ``slugs`` (all of them for None), in config order."""
+    if slugs is None:
+        return list(sites)
+    unknown = sorted(set(slugs) - {target.slug for target in sites})
+    if unknown:
+        raise ValueError(f"Sites {unknown} are not in target.sites")
+    return [target for target in sites if target.slug in slugs]
+
+
 def load_topology(path: str | Path) -> list[HookSite]:
     with open(path, "r") as f:
         payload = json.load(f)

@@ -41,7 +41,7 @@ from sae_pipeline.extraction.fills import FillStream, mark_done
 from sae_pipeline.extraction.hf import HFHookExtractor
 from sae_pipeline.extraction.remote import RemoteExtractor
 from sae_pipeline.extraction.vllm_worker import hookable
-from sae_pipeline.hooks.components import site_requests
+from sae_pipeline.hooks.components import select_sites, site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import dump_topology, enumerate_hooks
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
@@ -101,12 +101,10 @@ def main() -> None:
         )
     if not cfg.target.sites:
         raise SystemExit("Streaming training requires target.sites")
-    targets = cfg.target.sites
-    if args.sites is not None:
-        unknown = sorted(set(args.sites) - {target.slug for target in targets})
-        if unknown:
-            raise SystemExit(f"--sites {unknown} are not in target.sites")
-        targets = [target for target in targets if target.slug in args.sites]
+    try:
+        targets = select_sites(cfg.target.sites, args.sites)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     languages = sorted({source.language for source in (cfg.data.sources or []) if source.language})
     if not languages:
         raise SystemExit("Streaming training needs data.sources with a language for each validation set")

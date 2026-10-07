@@ -30,7 +30,7 @@ from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.fills import FillQueue
 from sae_pipeline.extraction.vllm import produce_fills
-from sae_pipeline.hooks.components import site_requests
+from sae_pipeline.hooks.components import select_sites, site_requests
 from sae_pipeline.model.loader import load_tokenizer
 
 
@@ -44,13 +44,15 @@ def main() -> None:
     parser.add_argument("--start-state", type=Path, default=None, help="token stream state for the first fill")
     parser.add_argument("--stop-after-seconds", type=float, default=None)
     parser.add_argument("--threads", type=int, default=8, help="sites written at once")
+    parser.add_argument("--sites", nargs="+", default=None, help="hook only these target.sites slugs")
     args = parser.parse_args()
     if args.fills is None and args.consumers is None:
         parser.error("give --fills, --consumers or both")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     cfg = PipelineCfg.from_yaml(args.config)
-    specs = {slug: spec for slug, (spec, _site) in site_requests(cfg.target.sites or []).items()}
+    targets = select_sites(cfg.target.sites or [], args.sites)
+    specs = {slug: spec for slug, (spec, _site) in site_requests(targets).items()}
     token_stream = ResumableTokenStream(cfg.data, load_tokenizer(cfg.model))
     reports = produce_fills(
         cfg,
