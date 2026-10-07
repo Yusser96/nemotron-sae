@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from sae_pipeline.config import SAECfg
-from sae_pipeline.sae.jumprelu import JumpReLUSAE
+from sae_pipeline.sae.jumprelu import JumpReLUSAE, inverse_simpson_from_mass
 from sae_pipeline.sae.objective import (
     LossCoefficients,
     coefficients_at,
@@ -64,6 +64,44 @@ def test_training_loss_combines_its_terms(reconstruction_loss):
         terms.total, terms.reconstruction + 0.5 * 2.0 * terms.l0_penalty + terms.inverse_simpson_penalty
     )
     torch.testing.assert_close(terms.f, f)
+
+
+def test_a_usage_window_sets_the_floor_and_keeps_the_batch_gradient():
+    torch.manual_seed(0)
+    sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+    x = torch.randn(32, 6)
+    coefficients = LossCoefficients(lr=1.0, lambda_l0=0.0, lambda_is=3.0)
+    batch_rates = sae.jump_relu_gate(x).mean(dim=0).detach()
+    previous = torch.rand(12)
+    usage = previous.clone()
+
+    windowed = training_loss(
+        sae,
+        x,
+        SAECfg(inverse_simpson_floor=1.0, inverse_simpson_max_scale=3.0, inverse_simpson_window_steps=4),
+        coefficients,
+        target_l0=4.0,
+        usage=usage,
+    )
+    windowed.inverse_simpson_penalty.backward()
+
+    torch.testing.assert_close(usage, previous + (batch_rates - previous) / 4)
+    assert windowed.d_is == pytest.approx(float(inverse_simpson_from_mass(usage, 12)[0]))
+    assert sae.log_theta.grad.abs().sum() > 0
+
+
+def test_a_one_batch_window_measures_each_batch_on_its_own():
+    torch.manual_seed(0)
+    sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+    x = torch.randn(32, 6)
+    cfg = SAECfg(inverse_simpson_floor=1.0, inverse_simpson_max_scale=3.0)
+    coefficients = LossCoefficients(lr=1.0, lambda_l0=0.0, lambda_is=3.0)
+
+    windowed = training_loss(sae, x, cfg, coefficients, target_l0=4.0, usage=torch.rand(12))
+    alone = training_loss(sae, x, cfg, coefficients, target_l0=4.0)
+
+    assert windowed.d_is == pytest.approx(alone.d_is)
+    torch.testing.assert_close(windowed.inverse_simpson_penalty, alone.inverse_simpson_penalty)
 
 
 def test_training_loss_skips_inverse_simpson_without_a_floor():

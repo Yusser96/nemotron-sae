@@ -16,7 +16,7 @@ import torch
 
 from sae_pipeline.config import SAECfg
 from sae_pipeline.sae.base import SparseAutoencoder
-from sae_pipeline.sae.jumprelu import JumpReLUSAE, batch_inverse_simpson
+from sae_pipeline.sae.jumprelu import JumpReLUSAE, inverse_simpson_from_mass
 
 
 def cosine_warmup(step: int, peak_lr: float, warmup_steps: int, total_steps: int) -> float:
@@ -119,8 +119,14 @@ def training_loss(
     coefficients: LossCoefficients,
     *,
     target_l0: float,
+    usage: torch.Tensor | None = None,
 ) -> LossTerms:
-    """Reconstruction + λ_L0·quadratic L0 penalty + λ_IS·Inverse-Simpson floor penalty."""
+    """Reconstruction + λ_L0·quadratic L0 penalty + λ_IS·Inverse-Simpson floor penalty.
+
+    ``usage`` holds each feature's firing rate averaged over the last
+    ``inverse_simpson_window_steps`` batches; it is updated in place and the
+    floor is measured on it. Without it, each batch is measured on its own.
+    """
     x_hat, f = sae(x)
     squared_error = (x - x_hat).pow(2)
     if cfg.reconstruction_loss == "vector_sum":
@@ -132,7 +138,13 @@ def training_loss(
     inverse_simpson_penalty = reconstruction.new_zeros(())
     d_is = u_is = 0.0
     if cfg.inverse_simpson_floor > 0 and cfg.inverse_simpson_max_scale > 0 and isinstance(sae, JumpReLUSAE):
-        d_is_tensor, u_is_tensor = batch_inverse_simpson(sae.jump_relu_gate(x), sae.d_sae)
+        firing = sae.jump_relu_gate(x).mean(dim=0)
+        if usage is not None:
+            with torch.no_grad():
+                usage.lerp_(firing, 1.0 / cfg.inverse_simpson_window_steps)
+            # The window's rates, with this batch's gradient.
+            firing = usage + (firing - firing.detach())
+        d_is_tensor, u_is_tensor, _ = inverse_simpson_from_mass(firing, sae.d_sae)
         d_is = float(d_is_tensor.detach().item())
         u_is = float(u_is_tensor.detach().item())
         gap = torch.clamp(

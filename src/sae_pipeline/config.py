@@ -145,6 +145,9 @@ class SAECfg(BaseModel):
     inverse_simpson_max_scale: float = 0.0
     # None follows l0_warmup_steps so both firing-pattern terms ramp together.
     inverse_simpson_warmup_steps: int | None = None
+    # Batches the firing rates behind the floor are averaged over (an EMA);
+    # 1: each batch on its own. Longer windows apply to streaming training.
+    inverse_simpson_window_steps: int = 1
     n_batches_in_buffer: int = 8
     ckpt_every: int = 5_000
     # Fixed-probe diagnostics cadence. Validation-based stopping has its own
@@ -229,6 +232,7 @@ class SAECfg(BaseModel):
         "residual_reset_every_steps",
         "residual_reset_max_features",
         "residual_reset_pool_size",
+        "inverse_simpson_window_steps",
     )
     @classmethod
     def _intervention_counts_positive(cls, v: int) -> int:

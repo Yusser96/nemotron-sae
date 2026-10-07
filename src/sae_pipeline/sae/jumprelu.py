@@ -242,23 +242,3 @@ def compute_inverse_simpson(
     """Compute ``(D_IS, u_IS)`` from feature firing frequencies or counts."""
     d_is, u_is, _ = inverse_simpson_from_mass(firing_frequency, d_sae, eps)
     return float(d_is.item()), float(u_is.item())
-
-
-def batch_inverse_simpson(
-    gate: torch.Tensor,
-    d_sae: int,
-    eps: float = 1e-12,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Differentiable batch-level Inverse-Simpson computation for training.
-
-    Args:
-        gate: (batch_size, d_sae) binary activation gate with STE gradient.
-        d_sae: Total number of features in dictionary.
-        eps: Small numerical stability constant.
-
-    Returns:
-        (d_is, u_is) as 0D tensors preserving autograd back through the gate.
-    """
-    p_hat = gate.mean(dim=0)
-    d_is, u_is, _ = inverse_simpson_from_mass(p_hat, d_sae, eps)
-    return d_is, u_is

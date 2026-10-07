@@ -791,6 +791,8 @@ def train_sae(
             early_stopping.ev_absolute_tolerance,
             100.0 * early_stopping.l0_relative_tolerance,
         )
+    if cfg.inverse_simpson_window_steps != 1:
+        raise NotImplementedError("inverse_simpson_window_steps applies to streaming training only")
     if cfg.inverse_simpson_floor > 0 and cfg.inverse_simpson_max_scale > 0:
         log.info(
             "Inverse-Simpson regularizer: utilization floor=%.4f, max scale=%.4g, "
