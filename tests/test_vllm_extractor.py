@@ -157,7 +157,7 @@ class _CountingStream:
         self.next_id = state["next_id"]
 
 
-def _produce(tmp_path, monkeypatch, **kwargs):
+def _produce(tmp_path, monkeypatch, vllm_overrides=None, **kwargs):
     for name, value in [("memory_allocated", 0), ("max_memory_allocated", 0), ("memory_reserved", 0), ("max_memory_reserved", 0)]:
         monkeypatch.setattr(torch.cuda, name, lambda value=value: value)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
@@ -168,6 +168,7 @@ def _produce(tmp_path, monkeypatch, **kwargs):
             "extraction.vllm.sequences_per_call": "auto",
             "extraction.vllm.max_sequences_per_step": 4,
             "extraction.vllm.vram_headroom_gib": 0,
+            **{f"extraction.vllm.{key}": value for key, value in (vllm_overrides or {}).items()},
         }
     )
     engines = []
@@ -197,6 +198,13 @@ def test_each_fill_is_one_vram_sized_call_written_one_file_per_site(tmp_path, mo
     expected = _reference(engine.model_runner.model, token_ids)
     for slug in SPECS:
         torch.testing.assert_close(load_file(fill / f"{slug}.safetensors")["activations"], expected[slug])
+
+
+def test_auto_fills_stop_at_max_sequences_per_call(tmp_path, monkeypatch):
+    reports, engine = _produce(tmp_path, monkeypatch, vllm_overrides={"max_sequences_per_call": 1}, fills=2)
+
+    assert engine.calls == [4, 1, 1]
+    assert [r["sequences"] for r in reports] == [1, 1]
 
 
 def test_a_rerun_continues_after_the_newest_fill_or_from_a_start_state(tmp_path, monkeypatch):

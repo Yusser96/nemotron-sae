@@ -113,6 +113,8 @@ def _sequences_per_call(llm: Any, cfg: PipelineCfg, sampling_params: Any) -> int
     memories = llm.collective_rpc("sae_end_probe")
     headroom = int(vllm_cfg.vram_headroom_gib * 2**30)
     fits = min(fit_sequences(memory, seq_len=seq_len, headroom_bytes=headroom) for memory in memories)
+    if vllm_cfg.max_sequences_per_call is not None:
+        fits = min(fits, vllm_cfg.max_sequences_per_call)
     log.info("sequences_per_call: auto -> %d (%s, %.1f GiB headroom)", fits, memories, vllm_cfg.vram_headroom_gib)
     return fits
 

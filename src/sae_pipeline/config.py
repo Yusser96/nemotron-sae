@@ -465,6 +465,8 @@ class VLLMCfg(BaseModel):
     # one probe step holds, keeping vram_headroom_gib free.
     sequences_per_call: int | Literal["auto"] = 64
     vram_headroom_gib: float = 5.0
+    # The most "auto" picks: past the step budget, bigger calls only hold more memory.
+    max_sequences_per_call: int | None = None
     # Sequences per forward pass (the scheduler's token budget); None: sequences_per_call.
     max_sequences_per_step: int | None = None
     # vLLM's KV-cache pool (kv_cache_memory_bytes); None: whatever gpu_memory_utilization leaves.
@@ -473,7 +475,9 @@ class VLLMCfg(BaseModel):
     # Forward hooks do not run inside replayed CUDA graphs.
     enforce_eager: bool = True
 
-    @field_validator("tensor_parallel_size", "sequences_per_call", "max_sequences_per_step", "kv_cache_gib")
+    @field_validator(
+        "tensor_parallel_size", "sequences_per_call", "max_sequences_per_call", "max_sequences_per_step", "kv_cache_gib"
+    )
     @classmethod
     def _positive_counts(cls, value: float | str | None) -> float | str | None:
         if isinstance(value, (int, float)) and value <= 0:
