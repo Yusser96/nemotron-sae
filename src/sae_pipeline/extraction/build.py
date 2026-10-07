@@ -25,4 +25,4 @@ def build_extractor(
     from sae_pipeline.extraction.vllm import VLLMExtractor
 
     specs = {slug: spec for slug, (spec, _site) in requests.items()}
-    return VLLMExtractor.from_config(cfg, specs, capture_device=capture_device), None
+    return VLLMExtractor(cfg, specs, capture_device=capture_device), None

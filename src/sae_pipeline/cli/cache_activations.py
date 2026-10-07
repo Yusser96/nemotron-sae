@@ -279,7 +279,7 @@ def main() -> None:
     if use_vllm:
         from sae_pipeline.extraction.vllm import VLLMExtractor
 
-        extractor = VLLMExtractor.from_config(cfg, {slug: spec for slug, (spec, _site) in requests.items()})
+        extractor = VLLMExtractor(cfg, {slug: spec for slug, (spec, _site) in requests.items()})
     else:
         assert model is not None
         extractor = HFHookExtractor(model, requests, model_device=next(model.parameters()).device)

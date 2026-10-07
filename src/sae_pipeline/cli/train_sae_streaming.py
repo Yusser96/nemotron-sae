@@ -111,7 +111,7 @@ def main() -> None:
         # Start the engine before the SAEs allocate: vLLM sizes itself from
         # extraction.vllm.gpu_memory_utilization at startup.
         specs = {slug: spec for slug, (spec, _site) in requests.items()}
-        extractor = VLLMExtractor.from_config(cfg, specs, capture_device=cfg.stream.sae_device)
+        extractor = VLLMExtractor(cfg, specs, capture_device=cfg.stream.sae_device)
     else:
         # Pin the whole model to one device: with several GPUs visible, a plain
         # "auto" device_map would spread its layers across all of them.

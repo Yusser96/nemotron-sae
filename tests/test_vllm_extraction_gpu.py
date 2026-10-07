@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sae_pipeline.config import ActivationSinkCfg, VLLMCfg
+from sae_pipeline.config import PipelineCfg
 from sae_pipeline.hooks.components import ComponentSpec
 
 pytestmark = [pytest.mark.cuda, pytest.mark.slow]
@@ -36,15 +36,18 @@ def vllm_run(tmp_path_factory):
     from sae_pipeline.extraction.vllm import VLLMExtractor
 
     sink_root = os.environ.get("SAE_TEST_SINK") or str(tmp_path_factory.mktemp("sink"))
-    extractor = VLLMExtractor(
-        model_name=MODEL,
-        dtype="bfloat16",
-        trust_remote_code=True,
-        specs={slug: ComponentSpec.parse(layer, kind) for slug, (layer, kind) in SITES.items()},
-        seq_len=SEQ_LEN,
-        vllm_cfg=VLLMCfg(gpu_memory_utilization=0.9, sequences_per_call=2),
-        sink_cfg=ActivationSinkCfg(path=os.path.join(sink_root, f"vllm-gpu-test-{os.getpid()}")),
+    cfg = PipelineCfg.from_yaml("configs/dev.yaml").with_overrides(
+        **{
+            "model.name": MODEL,
+            "model.dtype": "bfloat16",
+            "model.trust_remote_code": True,
+            "data.seq_len": SEQ_LEN,
+            "extraction.vllm.gpu_memory_utilization": 0.9,
+            "extraction.vllm.sequences_per_call": 2,
+            "extraction.sink.path": os.path.join(sink_root, f"vllm-gpu-test-{os.getpid()}"),
+        }
     )
+    extractor = VLLMExtractor(cfg, {slug: ComponentSpec.parse(layer, kind) for slug, (layer, kind) in SITES.items()})
     token_ids = torch.randint(1_000, 20_000, (N_SEQUENCES, SEQ_LEN), generator=torch.Generator().manual_seed(0))
     batch = extractor.extract(token_ids)
     leftovers = list(extractor.sink.path.iterdir())

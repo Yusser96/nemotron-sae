@@ -75,7 +75,7 @@ target:
 
 def test_vllm_backend_caches_without_loading_the_hf_model(tmp_path, monkeypatch):
     from sae_pipeline.extraction.base import ActivationBatch
-    from sae_pipeline.extraction.vllm import VLLMExtractor
+    from sae_pipeline.extraction import vllm
 
     class _FakeExtractor:
         closed = False
@@ -108,7 +108,7 @@ target:
     )
     monkeypatch.setattr(cache_activations, "load_model_and_tokenizer", _no_hf_model)
     monkeypatch.setattr(cache_activations, "load_tokenizer", lambda _cfg: _Tokenizer())
-    monkeypatch.setattr(VLLMExtractor, "from_config", classmethod(lambda cls, cfg, specs: _FakeExtractor()))
+    monkeypatch.setattr(vllm, "VLLMExtractor", lambda cfg, specs: _FakeExtractor())
     monkeypatch.setattr(
         cache_activations,
         "make_token_loader",

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sae_pipeline.config import ActivationSinkCfg, PipelineCfg, VLLMCfg
+from sae_pipeline.config import PipelineCfg
 from sae_pipeline.extraction.vllm import VLLMExtractor
 from sae_pipeline.extraction.vllm_worker import ActivationHookExtension
 from sae_pipeline.hooks.components import ComponentSpec
@@ -40,15 +40,21 @@ class _FakeEngine(ActivationHookExtension):
         return [object() for _ in prompts]
 
 
+def _cfg(tmp_path, *, sequences_per_call=2) -> PipelineCfg:
+    return PipelineCfg.from_yaml("configs/dev.yaml").with_overrides(
+        **{
+            "model.name": "example/model",
+            "data.seq_len": 3,
+            "extraction.vllm.sequences_per_call": sequences_per_call,
+            "extraction.sink.path": str(tmp_path / "sink"),
+        }
+    )
+
+
 def _extractor(tmp_path, *, sequences_per_call=2) -> VLLMExtractor:
     return VLLMExtractor(
-        model_name="example/model",
-        dtype="bfloat16",
-        trust_remote_code=True,
-        specs=SPECS,
-        seq_len=3,
-        vllm_cfg=VLLMCfg(sequences_per_call=sequences_per_call),
-        sink_cfg=ActivationSinkCfg(path=str(tmp_path / "sink")),
+        _cfg(tmp_path, sequences_per_call=sequences_per_call),
+        SPECS,
         engine_factory=_FakeEngine,
         sampling_params_factory=lambda: "one-token",
     )
@@ -70,6 +76,7 @@ def _reference(model, token_ids: torch.Tensor) -> dict[str, torch.Tensor]:
 def test_engine_is_configured_for_hooked_whole_prompt_batches(tmp_path):
     kwargs = _extractor(tmp_path, sequences_per_call=8).llm.kwargs
 
+    assert kwargs["model"] == "example/model"
     assert kwargs["worker_extension_cls"] == "sae_pipeline.extraction.vllm_worker.ActivationHookExtension"
     assert kwargs["enable_chunked_prefill"] is False
     assert kwargs["enforce_eager"] is True
@@ -95,26 +102,7 @@ def test_extract_returns_each_sites_rows_in_submission_order_and_consumes_files(
 def test_sites_without_a_module_boundary_are_rejected_before_starting_vllm(tmp_path):
     with pytest.raises(ValueError, match="L3_expert_7"):
         VLLMExtractor(
-            model_name="example/model",
-            dtype="bfloat16",
-            trust_remote_code=True,
-            specs={"L3_expert_7": ComponentSpec.parse(3, "expert.7")},
-            seq_len=3,
-            vllm_cfg=VLLMCfg(),
-            sink_cfg=ActivationSinkCfg(path=str(tmp_path / "sink")),
+            _cfg(tmp_path),
+            {"L3_expert_7": ComponentSpec.parse(3, "expert.7")},
             engine_factory=lambda **_: pytest.fail("engine must not start"),
         )
-
-
-def test_from_config_takes_the_engine_and_sink_settings(tmp_path):
-    cfg = PipelineCfg.from_yaml("configs/dev.yaml").with_overrides(
-        **{"model.name": "example/model", "extraction.sink.path": str(tmp_path / "sink"), "data.seq_len": 3}
-    )
-
-    extractor = VLLMExtractor.from_config(
-        cfg, SPECS, engine_factory=_FakeEngine, sampling_params_factory=lambda: "one-token"
-    )
-
-    assert extractor.llm.kwargs["model"] == "example/model"
-    assert extractor.llm.kwargs["max_model_len"] == 4
-    assert extractor.sink.path == tmp_path / "sink"

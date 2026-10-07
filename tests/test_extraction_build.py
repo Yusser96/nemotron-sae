@@ -6,11 +6,10 @@ from sae_pipeline.extraction.vllm import VLLMExtractor
 def test_vllm_backend_gets_one_spec_per_target_site(monkeypatch):
     seen = {}
 
-    def fake_from_config(cls, cfg, specs, *, capture_device):
+    def fake_init(self, cfg, specs, *, capture_device):
         seen.update(specs=specs, capture_device=capture_device)
-        return "extractor"
 
-    monkeypatch.setattr(VLLMExtractor, "from_config", classmethod(fake_from_config))
+    monkeypatch.setattr(VLLMExtractor, "__init__", fake_init)
     cfg = PipelineCfg.from_yaml("configs/dev.yaml").with_overrides(
         target={
             "sites": [
@@ -22,7 +21,7 @@ def test_vllm_backend_gets_one_spec_per_target_site(monkeypatch):
 
     extractor, tokenizer = build_extractor(cfg, "vllm", capture_device="cuda:1")
 
-    assert (extractor, tokenizer) == ("extractor", None)
+    assert isinstance(extractor, VLLMExtractor) and tokenizer is None
     assert {slug: (spec.layer, spec.kind) for slug, spec in seen["specs"].items()} == {
         "L1_moe_out": (1, "moe_out"),
         "L2_resid_post": (2, "resid_post"),
