@@ -4,9 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from safetensors.torch import load_file
 
 from sae_pipeline.config import PipelineCfg
-from sae_pipeline.extraction.vllm import VLLMExtractor, fit_sequences
+from sae_pipeline.extraction.vllm import VLLMExtractor, fit_sequences, produce_fills
 from sae_pipeline.extraction.vllm_worker import ActivationHookExtension
 from sae_pipeline.hooks.components import ComponentSpec
 from tests.test_vllm_worker_extension import _CausalLM
@@ -136,3 +137,48 @@ def test_the_call_size_fills_the_vram_left_after_the_step_peak_and_headroom():
     assert fit_sequences(memory, seq_len=10, headroom_bytes=50) == (1000 - 150 - 50) // 80
     with pytest.raises(RuntimeError, match="Not even one"):
         fit_sequences(memory, seq_len=10, headroom_bytes=800)
+
+
+class _CountingStream:
+    def __init__(self) -> None:
+        self.next_id = 1
+
+    def next_batch(self, batch_size: int) -> torch.Tensor:
+        rows = torch.arange(self.next_id, self.next_id + 3 * batch_size).reshape(batch_size, 3)
+        self.next_id += 3 * batch_size
+        return rows
+
+
+def test_each_fill_is_one_vram_sized_call_written_one_file_per_site(tmp_path, monkeypatch):
+    for name, value in [("memory_allocated", 0), ("max_memory_allocated", 0), ("memory_reserved", 0), ("max_memory_reserved", 0)]:
+        monkeypatch.setattr(torch.cuda, name, lambda value=value: value)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    # Two sequences' captures fit: 3 rows of three float32 sites of width 4, ids, positions and one site's copy.
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (2 * 3 * (3 * 16 + 16 + 16), 10**9))
+    cfg = _cfg(tmp_path).with_overrides(
+        **{
+            "extraction.vllm.sequences_per_call": "auto",
+            "extraction.vllm.max_sequences_per_step": 4,
+            "extraction.vllm.vram_headroom_gib": 0,
+        }
+    )
+    engines = []
+
+    def engine(**kwargs):
+        engines.append(_FakeEngine(**kwargs))
+        return engines[-1]
+
+    reports = produce_fills(
+        cfg, SPECS, _CountingStream(), out_dir=tmp_path / "fills", fills=2, threads=2,
+        engine_factory=engine, sampling_params_factory=lambda: "one-token",
+    )
+
+    assert engines[0].calls == [4, 2, 2]
+    assert [r["sequences"] for r in reports] == [2, 2] and reports[0]["tokens"] == 6
+    assert sorted(p.name for p in (tmp_path / "fills").iterdir()) == ["fill_000000", "fill_000001"]
+    fill = tmp_path / "fills" / "fill_000001"
+    token_ids = load_file(fill / "token_ids.safetensors")["token_ids"]
+    assert token_ids.tolist() == [[7, 8, 9], [10, 11, 12]]
+    expected = _reference(engines[0].model_runner.model, token_ids)
+    for slug in SPECS:
+        torch.testing.assert_close(load_file(fill / f"{slug}.safetensors")["activations"], expected[slug])

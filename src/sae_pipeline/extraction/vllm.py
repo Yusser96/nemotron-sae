@@ -6,14 +6,17 @@ Each token sequence is one request, sent as token ids (no re-tokenisation)
 with a single generated token. ``VLLMExtractor`` has the workers write every
 forward pass's rows to the sink and reassembles them per prompt;
 ``serve_activations`` instead answers a trainer in another process, with the
-workers sending the rows to it GPU to GPU (see ``remote``).
+workers sending the rows to it GPU to GPU (see ``remote``); ``produce_fills``
+has them write VRAM-sized fills, one file per site, for consumers elsewhere.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -24,6 +27,9 @@ from sae_pipeline.extraction.sink import ActivationSink
 from sae_pipeline.extraction.vllm_worker import assemble_rows, hookable
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import normalize_hf_source
+
+if TYPE_CHECKING:
+    from sae_pipeline.sae.train_streaming import TokenStream
 
 WORKER_EXTENSION = "sae_pipeline.extraction.vllm_worker.ActivationHookExtension"
 
@@ -172,3 +178,50 @@ def serve_activations(
         served += 1
     llm.collective_rpc("sae_remove_hooks")
     return served
+
+
+def produce_fills(
+    cfg: PipelineCfg,
+    specs: dict[str, ComponentSpec],
+    token_stream: TokenStream,
+    *,
+    out_dir: Path,
+    fills: int,
+    threads: int,
+    engine_factory: Callable[..., Any] = _vllm_engine,
+    sampling_params_factory: Callable[[], Any] = _one_token_sampling,
+) -> list[dict[str, float]]:
+    """Write ``fills`` fills of ``token_stream`` sequences to ``out_dir/fill_{i}`` (see ``sae_save``).
+
+    Each fill is one ``generate`` call of ``sequences_per_call`` sequences whose
+    captures stay in VRAM until they are written. Returns one report per fill:
+    its size, the generate rate, the lowest free VRAM and the write rates.
+    """
+    llm = _start_engine(cfg, _hook_sites(specs), out_dir=None, engine_factory=engine_factory)
+    sampling_params = sampling_params_factory()
+    sequences = _sequences_per_call(llm, cfg, sampling_params)
+    reports = []
+    for index in range(fills):
+        token_ids = token_stream.next_batch(sequences)
+        llm.collective_rpc("sae_vram")
+        started = time.perf_counter()
+        llm.generate(_prompts(token_ids), sampling_params, use_tqdm=False)
+        generate_seconds = time.perf_counter() - started
+        vram = min(llm.collective_rpc("sae_vram"), key=lambda worker: worker["min_free"])
+        save = llm.collective_rpc("sae_save", args=(token_ids.tolist(), str(out_dir / f"fill_{index:06d}"), threads))[0]
+        report = {
+            "fill": index,
+            "sequences": sequences,
+            "tokens": token_ids.numel(),
+            "generate_seconds": generate_seconds,
+            "tokens_per_s": token_ids.numel() / generate_seconds,
+            "min_free_vram_gib": vram["min_free"] / 2**30,
+            "total_vram_gib": vram["total"] / 2**30,
+            "saved_gb": save["bytes"] / 1e9,
+            "copy_gb_per_s": save["bytes"] / save["copy_seconds"] / 1e9,
+            "save_gb_per_s": save["bytes"] / save["seconds"] / 1e9,
+        }
+        log.info("fill %d: %s", index, report)
+        reports.append(report)
+    llm.collective_rpc("sae_remove_hooks")
+    return reports

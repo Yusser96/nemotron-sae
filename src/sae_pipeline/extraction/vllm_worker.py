@@ -175,6 +175,13 @@ class ActivationHookExtension:
         self.sae_steps = []
         return {"bytes": nbytes, "seconds": time.perf_counter() - started, "copy_seconds": copy_seconds}
 
+    def sae_vram(self) -> dict[str, int]:
+        """Total VRAM and the least of it free since the last call (torch keeps what it reserved)."""
+        free, total = torch.cuda.mem_get_info()
+        lowest = free - (torch.cuda.max_memory_reserved() - torch.cuda.memory_reserved())
+        torch.cuda.reset_peak_memory_stats()
+        return {"min_free": lowest, "total": total}
+
     def sae_start_probe(self) -> None:
         """Start measuring a probe call's memory (see ``sae_end_probe``)."""
         torch.cuda.reset_peak_memory_stats()
