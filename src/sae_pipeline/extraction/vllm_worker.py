@@ -36,10 +36,10 @@ def hookable(spec: ComponentSpec) -> bool:
     return spec.expert_idx is None and spec.head_idx is None and (spec.kind in RESIDUAL_KINDS or spec.kind in MIXER_KINDS)
 
 
-def assemble_rows(
-    steps: Iterable[dict[str, torch.Tensor]], token_ids: torch.Tensor, slugs: list[str]
-) -> dict[str, torch.Tensor]:
-    """Per-site ``(sequences * seq_len, d)`` activations for ``token_ids``, in row order.
+def match_rows(
+    steps: Iterable[dict[str, torch.Tensor]], token_ids: torch.Tensor
+) -> list[tuple[dict[str, torch.Tensor], int, int]]:
+    """For each prompt of ``token_ids``, in order: the step holding its rows and their span.
 
     Each step holds the rows of one forward pass: whole prompts back to back,
     each starting at position 0. Rows are matched to the submitted prompts by
@@ -48,18 +48,26 @@ def assemble_rows(
     pending: dict[tuple[int, ...], list[int]] = {}
     for index, row in enumerate(token_ids.detach().cpu().tolist()):
         pending.setdefault(tuple(row), []).append(index)
-    found: dict[int, dict[str, torch.Tensor]] = {}
+    found: dict[int, tuple[dict[str, torch.Tensor], int, int]] = {}
     for step in steps:
         ids, positions = step["input_ids"].cpu(), step["positions"].cpu()
         starts = (positions == 0).nonzero().flatten().tolist() + [positions.numel()]
         for start, end in zip(starts, starts[1:]):
             matches = pending.get(tuple(ids[start:end].tolist()))
             if matches:
-                found[matches.pop(0)] = {slug: step[slug][start:end] for slug in slugs}
+                found[matches.pop(0)] = (step, start, end)
     missing = sorted(set(range(token_ids.shape[0])) - found.keys())
     if missing:
         raise RuntimeError(f"No captured activations for submitted sequences {missing}")
-    return {slug: torch.cat([found[index][slug] for index in range(token_ids.shape[0])]) for slug in slugs}
+    return [found[index] for index in range(token_ids.shape[0])]
+
+
+def assemble_rows(
+    steps: Iterable[dict[str, torch.Tensor]], token_ids: torch.Tensor, slugs: list[str]
+) -> dict[str, torch.Tensor]:
+    """Per-site ``(sequences * seq_len, d)`` activations for ``token_ids``, in row order (see ``match_rows``)."""
+    spans = match_rows(steps, token_ids)
+    return {slug: torch.cat([step[slug][start:end] for step, start, end in spans]) for slug in slugs}
 
 
 def _write_rows(rows: torch.Tensor, path: Path) -> float:
@@ -174,14 +182,21 @@ class ActivationHookExtension:
         for name, data in (extra_files or {}).items():
             (partial / name).write_bytes(data)
         nbytes = 0
+        spans = match_rows(self.sae_steps, prompts)
         for slug in self.sae_slugs:
-            rows = assemble_rows(self.sae_steps, prompts, [slug])[slug]
+            # Each prompt's rows go straight to host memory: no assembled copy on the GPU.
+            parts = [step[slug][start:end] for step, start, end in spans]
+            shape = (sum(part.shape[0] for part in parts), parts[0].shape[1])
             host = self.sae_host.get(slug)
-            if host is None or host.shape != rows.shape or host.dtype != rows.dtype:
-                host = torch.empty(rows.shape, dtype=rows.dtype, pin_memory=torch.cuda.is_available())
+            if host is None or host.shape != shape or host.dtype != parts[0].dtype:
+                host = torch.empty(shape, dtype=parts[0].dtype, pin_memory=torch.cuda.is_available())
                 self.sae_host[slug] = host
-            host.copy_(rows)
-            nbytes += rows.nbytes
+            offset = 0
+            for part in parts:
+                host[offset : offset + part.shape[0]].copy_(part)
+                offset += part.shape[0]
+            nbytes += host.nbytes
+            del parts
             for step in self.sae_steps:
                 del step[slug]
         self.sae_steps = []
