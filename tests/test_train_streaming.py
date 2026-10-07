@@ -339,6 +339,31 @@ def test_a_resumed_site_continues_the_inverse_simpson_window(tmp_path):
     torch.testing.assert_close(resumed.inverse_simpson_usage, site.inverse_simpson_usage)
 
 
+def test_streaming_resets_resample_unused_features_and_survive_a_resume(tmp_path):
+    cfg = _sae_cfg(
+        _warm_start(tmp_path / "warm.safetensors"),
+        feature_use_strategy="residual_reset",
+        residual_reset_start_step=2,
+        residual_reset_every_steps=10,
+        residual_reset_max_features=4,
+        residual_reset_pool_size=BATCH,
+    )
+    site = _site(tmp_path, cfg)
+    with torch.no_grad():
+        site.sae.log_theta[:4] = 10.0  # four features that never fire
+    for step in (1, 2):
+        streaming_step(site, torch.randn(BATCH, D_IN, generator=torch.Generator().manual_seed(step)), step)
+    write_checkpoint(site, 2)
+    site.close()
+
+    resumed = _site(tmp_path, cfg, resume_checkpoint=resolve_checkpoint(site.out_dir, require_trainer_state=True))
+    resumed.close()
+
+    assert site.feature_resets == 4
+    assert bool((site.sae.log_theta[:4] < 10.0).all())  # recalibrated to fire again
+    assert (resumed.feature_resets, resumed.last_reset_step) == (4, 2)
+
+
 def test_stops_early_once_the_validation_objective_plateaus(tmp_path):
     cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), lr=0.0, eval_interval_steps=1)
     site = _site(tmp_path, cfg, _validation_dirs(tmp_path))

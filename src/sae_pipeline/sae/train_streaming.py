@@ -54,6 +54,9 @@ from sae_pipeline.sae.train import (
     _validation_batches,
     build_sae_and_optimizer,
     record_firing,
+    resample_underused_features,
+    reset_l0_allowance,
+    residual_reset_due,
     step_log,
 )
 
@@ -85,6 +88,8 @@ class StreamingSite:
     step: int = 0
     stopped: bool = False
     next_milestone_index: int = 0
+    feature_resets: int = 0
+    last_reset_step: int | None = None
     # Validation FVU/objective of the warm start, per language: reported next
     # to (never instead of) every evaluation's absolute numbers.
     baseline: dict[str, dict[str, float]] | None = None
@@ -106,7 +111,7 @@ class StreamingSite:
 
 
 def _reject_unsupported(cfg: SAECfg, slug: str) -> None:
-    if cfg.feature_use_strategy != "none":
+    if cfg.feature_use_strategy not in {"none", "residual_reset"}:
         raise NotImplementedError(
             f"{slug}: streaming training does not implement feature_use_strategy {cfg.feature_use_strategy!r}"
         )
@@ -154,6 +159,7 @@ def init_streaming_site(
     inverse_simpson_usage = torch.zeros(d_sae, dtype=torch.float32, device=device)
     early_stop = ObjectiveEarlyStop()
     step, stopped, next_milestone_index = 0, False, 0
+    feature_resets, last_reset_step = 0, None
 
     if resume_checkpoint is not None:
         load_sae_weights(sae, resume_checkpoint.weights_path)
@@ -172,6 +178,8 @@ def init_streaming_site(
         early_stop.load_state_dict(state["early_stop"])
         stopped = bool(state.get("stopped", False))
         next_milestone_index = int(state.get("next_milestone_index", 0))
+        feature_resets = int(state.get("feature_resets", 0))
+        last_reset_step = state.get("last_reset_step")
         log.info("%s: resumed at step %d", slug, step)
     else:
         if sae_cfg.checkpoint_source is None:
@@ -211,6 +219,8 @@ def init_streaming_site(
         step=step,
         stopped=stopped,
         next_milestone_index=next_milestone_index,
+        feature_resets=feature_resets,
+        last_reset_step=last_reset_step,
     )
 
 
@@ -224,7 +234,7 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     if site.normalization_scale != 1.0:
         x = x * site.normalization_scale
 
-    target_l0 = float(site.l0_target)
+    target_l0 = site.l0_target + reset_l0_allowance(cfg, step, site.last_reset_step)
     terms = training_loss(site.sae, x, cfg, coefficients, target_l0=target_l0, usage=site.inverse_simpson_usage)
     if not torch.isfinite(terms.total):
         raise FloatingPointError(f"{site.slug}: non-finite training loss at step {step}")
@@ -235,6 +245,14 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
         ema_decay=cfg.feature_frequency_ema_decay,
     )
     gradient_stats = optimizer_step(site.sae, site.optim, terms.total, x, cfg, step=step, lr=lr)
+    if residual_reset_due(cfg, step):
+        # No cache to calibrate on (residual_reset_calibration_tokens is for
+        # train_sae): new directions and thresholds come from this batch.
+        assert isinstance(site.sae, JumpReLUSAE)
+        site.feature_resets += resample_underused_features(
+            site.sae, site.optim, x, terms.x_hat.detach(), site.feature_frequency, site.ever_fired, cfg
+        )
+        site.last_reset_step = step
     if step % cfg.log_every:
         return None
     return step_log(
@@ -249,6 +267,7 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
         target_l0=target_l0,
         ever_fired=site.ever_fired,
         feature_frequency=site.feature_frequency,
+        feature_resets=site.feature_resets,
     )
 
 
@@ -355,6 +374,8 @@ def write_checkpoint(site: StreamingSite, step: int) -> Path:
             "early_stop": site.early_stop.state_dict(),
             "stopped": site.stopped,
             "next_milestone_index": site.next_milestone_index,
+            "feature_resets": site.feature_resets,
+            "last_reset_step": site.last_reset_step,
             "validation_cache_signature": site.validation_cache_signature,
         },
         keep_last=site.cfg.keep_last_checkpoints,
