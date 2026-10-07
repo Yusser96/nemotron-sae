@@ -563,8 +563,24 @@ def _zero_optimizer_slices(
             value[indices] = 0
 
 
+def residual_reset_due(cfg: SAECfg, step: int) -> bool:
+    """Whether a ``residual_reset`` strategy resamples features after ``step``."""
+    return (
+        cfg.feature_use_strategy in {"residual_reset", "frequency_residual_reset"}
+        and step >= cfg.residual_reset_start_step
+        and (step - cfg.residual_reset_start_step) % cfg.residual_reset_every_steps == 0
+    )
+
+
+def reset_l0_allowance(cfg: SAECfg, step: int, reset_step: int | None) -> float:
+    """Extra target L0 for the features revived at ``reset_step``, annealed to zero."""
+    if reset_step is None or step - reset_step >= cfg.residual_reset_anneal_steps:
+        return 0.0
+    return cfg.residual_reset_delta_l0 * (1.0 - (step - reset_step) / max(1, cfg.residual_reset_anneal_steps))
+
+
 @torch.no_grad()
-def _resample_underused_features(
+def resample_underused_features(
     sae: JumpReLUSAE,
     optim: torch.optim.Optimizer,
     x: torch.Tensor,
@@ -971,13 +987,7 @@ def train_sae(
             lr = coefficients.lr
             lam = coefficients.lambda_l0
 
-            target_l0 = _scheduled_l0_target(step, l0_target, cfg)
-            if reset_target_step is not None:
-                elapsed = step - reset_target_step
-                if elapsed < cfg.residual_reset_anneal_steps:
-                    target_l0 += cfg.residual_reset_delta_l0 * (
-                        1.0 - elapsed / max(1, cfg.residual_reset_anneal_steps)
-                    )
+            target_l0 = _scheduled_l0_target(step, l0_target, cfg) + reset_l0_allowance(cfg, step, reset_target_step)
             terms = training_loss(sae, x, cfg, coefficients, target_l0=target_l0)
             x_hat, f = terms.x_hat, terms.f
 
@@ -1019,11 +1029,7 @@ def train_sae(
 
             gradient_stats = optimizer_step(sae, optim, loss, x, cfg, step=step, lr=lr)
 
-            if (
-                cfg.feature_use_strategy in {"residual_reset", "frequency_residual_reset"}
-                and step >= cfg.residual_reset_start_step
-                and (step - cfg.residual_reset_start_step) % cfg.residual_reset_every_steps == 0
-            ):
+            if residual_reset_due(cfg, step):
                 calibration_x = None
                 calibration_residuals = None
                 if cfg.residual_reset_calibration_tokens > 0:
@@ -1038,7 +1044,7 @@ def train_sae(
                         device=device,
                     )
                     feature_frequency.copy_(calibrated_frequency.to(dtype=torch.float32))
-                feature_resets += _resample_underused_features(
+                feature_resets += resample_underused_features(
                     sae,
                     optim,
                     x,

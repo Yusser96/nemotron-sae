@@ -10,8 +10,10 @@ from sae_pipeline.config import EarlyStoppingCfg, SAECfg
 from sae_pipeline.sae.objective import cosine_warmup_constant, quad_l0_loss
 from sae_pipeline.sae.train import (
     _ValidationEarlyStop,
-    _resample_underused_features,
+    resample_underused_features,
     _scheduled_l0_target,
+    reset_l0_allowance,
+    residual_reset_due,
 )
 
 
@@ -202,7 +204,7 @@ def test_residual_reset_replaces_columns_and_clears_adam_moments():
     old_decoder = sae.W_dec.detach().clone()
     frequency = torch.zeros(16)
     ever_fired = torch.ones(16, dtype=torch.bool)
-    count = _resample_underused_features(
+    count = resample_underused_features(
         sae, optim, x, recon.detach(), frequency, ever_fired,
         SAECfg(residual_reset_max_features=4, residual_reset_pool_size=16),
     )
@@ -255,3 +257,18 @@ def test_normalised_coordinates_and_raw_export_are_functionally_equivalent():
 
     torch.testing.assert_close(canonical_features > 0, raw_features > 0)
     torch.testing.assert_close(canonical_recon, raw_recon * scale, atol=1e-5, rtol=1e-5)
+
+
+def test_resets_come_on_schedule_and_their_l0_allowance_anneals_away():
+    cfg = SAECfg(
+        feature_use_strategy="residual_reset",
+        residual_reset_start_step=10,
+        residual_reset_every_steps=5,
+        residual_reset_delta_l0=2.0,
+        residual_reset_anneal_steps=4,
+    )
+
+    assert [step for step in range(25) if residual_reset_due(cfg, step)] == [10, 15, 20]
+    assert not residual_reset_due(SAECfg(), 10)
+    assert [reset_l0_allowance(cfg, step, 10) for step in (10, 12, 14)] == [2.0, 1.0, 0.0]
+    assert reset_l0_allowance(cfg, 12, None) == 0.0
