@@ -228,3 +228,10 @@ def test_streaming_requires_whole_batches_per_forward():
     cfg.with_overrides(**{"stream.enabled": True, "cache.tokens_per_fwd": 2 * batch_size})
     with pytest.raises(ValueError, match="multiple of sae.batch_size"):
         cfg.with_overrides(**{"stream.enabled": True, "cache.tokens_per_fwd": batch_size + 1})
+
+
+@pytest.mark.parametrize("field", ["divergence_l0_factor", "divergence_objective_factor"])
+def test_divergence_factors_must_exceed_one_or_be_off(field):
+    assert getattr(EarlyStoppingCfg(**{field: None}), field) is None
+    with pytest.raises(ValueError, match="above 1"):
+        EarlyStoppingCfg(**{field: 1.0})

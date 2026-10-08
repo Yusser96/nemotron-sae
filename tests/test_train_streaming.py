@@ -1,7 +1,9 @@
 """Streaming SAE training: per-step parity with cached training, evaluation, loop."""
 
+import dataclasses
 import itertools
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +22,7 @@ from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.objective import coefficients_at, training_loss
 from sae_pipeline.sae.train import train_sae
 from sae_pipeline.sae.train_streaming import (
+    SiteEvaluation,
     evaluate_and_update,
     evaluate_site,
     init_streaming_site,
@@ -199,12 +202,12 @@ def test_evaluation_logs_absolute_and_baseline_relative_metrics_and_saves_best(t
     streaming_step(site, torch.randn(BATCH, D_IN), step=1)
     site.step = 1
 
-    should_stop = evaluate_and_update(
+    stop = evaluate_and_update(
         site, 1, "cpu", EarlyStoppingCfg(enabled=True, mode="objective", minimum_steps=0, patience=4)
     )
     site.close()
 
-    assert should_stop is False
+    assert stop is None
     rows = [json.loads(line) for line in site.validation_log_path.read_text().splitlines()]
     assert {row["language"] for row in rows} == {"de", "en"}
     for row in rows:
@@ -439,6 +442,55 @@ def test_stops_early_once_the_validation_objective_plateaus(tmp_path):
     rows = [json.loads(line) for line in site.validation_log_path.read_text().splitlines()]
     assert rows[-1]["early_stop_triggered"] is True
     assert resolve_checkpoint(site.out_dir, require_trainer_state=True).step == 3
+
+
+def _evaluations(monkeypatch, *, l0=None, objective=None):
+    """Make every evaluation report this L0 and/or objective."""
+    real = evaluate_site
+
+    def changed(site, device):
+        evaluation = real(site, device)
+        metrics = {k: dataclasses.replace(m, l0=m.l0 if l0 is None else l0) for k, m in evaluation.metrics.items()}
+        objectives = {k: v if objective is None else objective for k, v in evaluation.objective.items()}
+        return SiteEvaluation(metrics, objectives)
+
+    monkeypatch.setattr("sae_pipeline.sae.train_streaming.evaluate_site", changed)
+
+
+def test_a_site_whose_l0_runs_away_stops_without_a_final_export_even_without_early_stopping(tmp_path, monkeypatch):
+    _evaluations(monkeypatch, l0=4 * L0_TARGET)
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), eval_interval_steps=2, l0_warmup_steps=0)
+    site = _site(tmp_path, cfg, _validation_dirs(tmp_path))
+
+    done = _run(tmp_path, site, _CountingStream(), stream_cfg=StreamCfg(enabled=True, token_cap=10 * BATCH))
+    site.close()
+
+    assert done is True and site.stopped and site.step == 2
+    rows = [json.loads(line) for line in site.validation_log_path.read_text().splitlines()]
+    assert all(row["diverged"].startswith("validation L0 12.0 above 3x") for row in rows)
+    assert not list(site.out_dir.glob("*_final.safetensors"))
+    assert resolve_checkpoint(site.out_dir, require_trainer_state=True).step == 2
+
+
+def test_l0_is_not_checked_during_the_l0_warmup(tmp_path, monkeypatch):
+    _evaluations(monkeypatch, l0=4 * L0_TARGET)
+    site = _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), l0_warmup_steps=10), _validation_dirs(tmp_path))
+
+    assert evaluate_and_update(site, 2, "cpu", EarlyStoppingCfg(mode="objective", patience=4)) is None
+    site.close()
+
+
+@pytest.mark.parametrize("objective", [math.nan, 50.0])
+def test_a_site_whose_objective_explodes_or_is_not_finite_diverges(tmp_path, monkeypatch, objective):
+    site = _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors")), _validation_dirs(tmp_path))
+    site.early_stop.best = 1.0
+    _evaluations(monkeypatch, objective=objective)
+
+    stop = evaluate_and_update(site, 2, "cpu", EarlyStoppingCfg(mode="objective", patience=4))
+    site.close()
+
+    assert stop.diverged and "validation objective" in stop.reason
+    assert site.early_stop.best == 1.0
 
 
 def test_two_consumers_train_their_own_sites_from_one_producers_fills(tmp_path):

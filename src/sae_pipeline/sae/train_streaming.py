@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from collections.abc import Iterable, Iterator
@@ -417,14 +418,50 @@ def _write_best(site: StreamingSite, step: int) -> None:
     (best_dir / "step.json").write_text(json.dumps({"step": step, "tokens": site.tokens_seen()}))
 
 
-def evaluate_and_update(site: StreamingSite, step: int, device: str, early_stopping: EarlyStoppingCfg) -> bool:
-    """Validate, update the plateau/stop state, log, and save a new best. Returns should_stop."""
+@dataclass
+class Stop:
+    """Why a site stops after an evaluation; a diverged one gets no final export."""
+
+    reason: str
+    diverged: bool = False
+
+
+def _divergence(site: StreamingSite, evaluation: SiteEvaluation, step: int, cfg: EarlyStoppingCfg) -> str | None:
+    """How this evaluation shows ``site`` diverging, if it does (see ``EarlyStoppingCfg``)."""
+    objective = evaluation.mixed_objective
+    if not math.isfinite(objective):
+        return f"validation objective {objective}"
+    l0 = max(metrics.l0 for metrics in evaluation.metrics.values())
+    if (
+        cfg.divergence_l0_factor is not None
+        and step >= site.cfg.l0_warmup_steps
+        and l0 > cfg.divergence_l0_factor * site.l0_target
+    ):
+        return f"validation L0 {l0:.1f} above {cfg.divergence_l0_factor:g}x the target {site.l0_target}"
+    best = site.early_stop.best
+    if cfg.divergence_objective_factor is not None and best is not None and objective > cfg.divergence_objective_factor * best:
+        return f"validation objective {objective:.4g} above {cfg.divergence_objective_factor:g}x its best {best:.4g}"
+    return None
+
+
+def evaluate_and_update(
+    site: StreamingSite, step: int, device: str, early_stopping: EarlyStoppingCfg
+) -> Stop | None:
+    """Validate, update the plateau/stop state, log, and save a new best.
+
+    Returns why the site should stop: it diverged (always checked), or it
+    stopped improving (with early stopping enabled); None to go on.
+    """
 
     evaluation = evaluate_site(site, device)
     objective = evaluation.mixed_objective
-    is_best, lr_reduced, should_stop = site.early_stop.update(
-        objective, early_stopping, eligible=step >= early_stopping.minimum_steps
-    )
+    divergence = _divergence(site, evaluation, step, early_stopping)
+    if divergence is None:
+        is_best, lr_reduced, should_stop = site.early_stop.update(
+            objective, early_stopping, eligible=step >= early_stopping.minimum_steps
+        )
+    else:
+        is_best, lr_reduced, should_stop = False, False, False
     for language, metrics in evaluation.metrics.items():
         row = {
             **asdict(metrics),
@@ -438,6 +475,7 @@ def evaluate_and_update(site: StreamingSite, step: int, device: str, early_stopp
             "lr_scale": site.early_stop.lr_scale,
             "checks_since_improve": site.early_stop.checks_since_improve,
             "early_stop_triggered": should_stop,
+            "diverged": divergence,
         }
         if site.baseline is not None and language in site.baseline:
             baseline = site.baseline[language]
@@ -449,7 +487,7 @@ def evaluate_and_update(site: StreamingSite, step: int, device: str, early_stopp
     site.validation_f.flush()
     log.info(
         "%s eval step=%d tokens=%d objective=%.6g best=%.6g stale=%d lr_scale=%.3g%s%s",
-        site.slug, step, site.tokens_seen(), objective, site.early_stop.best,
+        site.slug, step, site.tokens_seen(), objective, math.nan if site.early_stop.best is None else site.early_stop.best,
         site.early_stop.checks_since_improve, site.early_stop.lr_scale,
         " [new best]" if is_best else "", " [lr reduced]" if lr_reduced else "",
     )
@@ -462,7 +500,11 @@ def evaluate_and_update(site: StreamingSite, step: int, device: str, early_stopp
     )
     if is_best:
         _write_best(site, step)
-    return should_stop
+    if divergence is not None:
+        return Stop(f"diverged: {divergence}", diverged=True)
+    if should_stop and early_stopping.enabled:
+        return Stop("stopped improving")
+    return None
 
 
 class TokenStream(Protocol):
@@ -484,12 +526,15 @@ def _save_stream_state(path: Path, token_stream: TokenStream, tokens_processed: 
     os.replace(temporary, path)
 
 
-def _finish(sites: list[StreamingSite], reason: str) -> None:
+def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = True) -> None:
     log.info("Stopping %d site(s): %s", len(sites), reason)
     for site in sites:
         site.stopped = True
         write_checkpoint(site, site.step)
-        write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
+        if final_export:
+            write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
+        else:
+            log.warning("%s: no final export from diverged weights; its result is %s", site.slug, site.out_dir / "best")
 
 
 def state_paths(out_root: Path, name: str | None) -> tuple[Path, Path]:
@@ -593,9 +638,9 @@ def run_streaming_training(
                     site.log_f.write(json.dumps(asdict(entry)) + "\n")
 
                 eval_interval = site.cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
-                stop_now = False
+                stop = None
                 if site.validation_readers and step % eval_interval == 0:
-                    stop_now = evaluate_and_update(site, step, device, early_stopping) and early_stopping.enabled
+                    stop = evaluate_and_update(site, step, device, early_stopping)
                     checkpointed = True
                     write_checkpoint(site, step)
                 elif step % site.cfg.ckpt_every == 0:
@@ -609,8 +654,8 @@ def run_streaming_training(
                     milestone = milestones[site.next_milestone_index]
                     write_export(site, site.out_dir / f"sae_export_step_{step:07d}_milestone_{milestone}.safetensors")
                     site.next_milestone_index += 1
-                if stop_now:
-                    _finish([site], f"{site.slug} stopped improving at step {step}")
+                if stop is not None:
+                    _finish([site], f"{site.slug} {stop.reason} at step {step}", final_export=not stop.diverged)
                     checkpointed = True
                     break
         if checkpointed:

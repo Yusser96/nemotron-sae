@@ -354,6 +354,19 @@ class EarlyStoppingCfg(BaseModel):
     lr_plateau_patience: int = 3
     lr_reduce_factor: float = 0.5
     min_lr_scale: float = 0.05
+    # Streaming only, and whether or not ``enabled``: a site whose validation L0
+    # exceeds this multiple of its target once the L0 warmup is over, or whose
+    # objective exceeds this multiple of its best (or is not finite), has
+    # diverged and stops. None turns a check off.
+    divergence_l0_factor: float | None = 3.0
+    divergence_objective_factor: float | None = 10.0
+
+    @field_validator("divergence_l0_factor", "divergence_objective_factor")
+    @classmethod
+    def _divergence_factors_above_one(cls, value: float | None) -> float | None:
+        if value is not None and value <= 1.0:
+            raise ValueError("divergence factors must be above 1")
+        return value
 
     @field_validator("evaluation_interval_steps", "patience", "lr_plateau_patience")
     @classmethod
