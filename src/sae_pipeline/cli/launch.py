@@ -13,7 +13,8 @@ import logging
 import os
 import shlex
 import subprocess
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
 
 from sae_pipeline.config import PipelineCfg
 
@@ -71,24 +72,41 @@ def _gpus_from_env() -> list[str]:
 
 
 def run_local(jobs: list[list[str]], gpus: list[str]) -> int:
-    """Run jobs in parallel; pin each to one GPU via CUDA_VISIBLE_DEVICES."""
-    n_workers = max(1, len(gpus))
+    """Run cache, train and evaluation phases with exclusive GPU leases.
+
+    A failed phase prevents its dependent phases from starting. Threads only
+    supervise subprocesses; model and training work runs in those processes.
+    """
+    if not gpus or len(set(gpus)) != len(gpus):
+        raise ValueError("Provide at least one GPU, with no duplicate IDs")
+    available: Queue[str] = Queue()
+    for gpu in gpus:
+        available.put(gpu)
     failures = 0
 
-    def _run(job_and_gpu):
-        cmd, gpu = job_and_gpu
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = gpu
-        log.info("[GPU %s] %s", gpu, " ".join(map(shlex.quote, cmd)))
-        return subprocess.run(cmd, env=env, check=False).returncode
+    def _run(cmd):
+        gpu = available.get()
+        try:
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = gpu
+            log.info("[GPU %s] %s", gpu, " ".join(map(shlex.quote, cmd)))
+            return subprocess.run(cmd, env=env, check=False).returncode
+        finally:
+            available.put(gpu)
 
-    # Round-robin GPU assignment.
-    tagged = [(cmd, gpus[i % n_workers]) for i, cmd in enumerate(jobs)]
-    with ProcessPoolExecutor(max_workers=n_workers) as ex:
-        futures = [ex.submit(_run, t) for t in tagged]
-        for fut in as_completed(futures):
-            if fut.result() != 0:
-                failures += 1
+    modules = ("cache_activations", "train_sae", "evaluate")
+    def phase(cmd):
+        module = cmd[2].rsplit(".", 1)[-1] if len(cmd) > 2 and cmd[1] == "-m" else ""
+        return modules.index(module) if module in modules else 0
+
+    with ThreadPoolExecutor(max_workers=len(gpus)) as ex:
+        for index in range(len(modules)):
+            futures = [ex.submit(_run, cmd) for cmd in jobs if phase(cmd) == index]
+            for fut in as_completed(futures):
+                if fut.result() != 0:
+                    failures += 1
+            if failures:
+                break
     return failures
 
 
