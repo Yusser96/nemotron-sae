@@ -165,3 +165,35 @@ def test_interrupted_multi_site_cache_is_repaired_to_common_prefix(tmp_path: Pat
     recovery_dirs = list(cache_root.parent.glob(".run.recovery-*"))
     assert len(recovery_dirs) == 1
     assert (recovery_dirs[0] / "site_a" / "shard_00001.safetensors").exists()
+
+
+def test_cache_recipe_and_storage_dtype_are_validated(tmp_path):
+    import argparse
+    import pytest
+    from sae_pipeline.config import PipelineCfg
+    from sae_pipeline.hooks.components import ComponentSpec
+    from sae_pipeline.model.topology import HookSite
+    from sae_pipeline.cache.writer import ShardWriter
+    from safetensors.torch import load_file
+
+    cfg = PipelineCfg(run_id="identity", data={"total_tokens": 4}, target={"layer": 0, "component": "resid_post"}).with_overrides(**{
+        "cache.cache_dir": str(tmp_path), "model.dtype": "float16"
+    })
+    args = argparse.Namespace(partition="train", language=None)
+    spec = ComponentSpec.parse(0, "resid_post")
+    requests = {spec.slug: (spec, HookSite("resid_post", 0, "layers.0"))}
+    def reconcile(config=cfg, selected=requests):
+        return cache_activations._reconcile_manifests(config, args, selected, {spec.slug: spec.component}, {spec.slug: 0})
+    _, base, manifests, _ = reconcile()
+    with ShardWriter(out_dir=base / spec.slug, d_activation=4, shard_size_bytes=16,
+                     dtype=getattr(torch, cfg.model.dtype), manifest=manifests[spec.slug]) as writer:
+        writer.add(torch.ones(2, 4))
+    saved = CacheManifest.read(base / spec.slug / "manifest.json")
+    assert load_file(str(base / spec.slug / saved.shard_paths[0]))["x"].dtype == torch.float16
+    reconcile()
+    for overrides in ({"model.dtype": "float32"}, {"extraction.backend": "vllm"}, {"model.load_quant": "nf4"}):
+        with pytest.raises(RuntimeError, match="incompatible"):
+            reconcile(cfg.with_overrides(**overrides))
+    with pytest.raises(RuntimeError, match="extraction_fingerprint"):
+        reconcile(selected={spec.slug: (spec, HookSite("resid_post", 0, "other.0"))})
+

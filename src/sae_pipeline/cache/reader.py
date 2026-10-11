@@ -188,6 +188,7 @@ class ActivationBuffer:
                 "total_tokens": self._reader.manifest.total_tokens,
                 "shard_paths": list(self._reader.manifest.shard_paths),
                 "dataset_fingerprint": self._reader.manifest.dataset_fingerprint,
+                "extraction_fingerprint": self._reader.manifest.extraction_fingerprint,
             },
             "buffer": None if self._buf is None else self._buf.detach().cpu().clone(),
             "cursor": self._cursor,
@@ -218,6 +219,7 @@ class ActivationBuffer:
             "total_tokens": self._reader.manifest.total_tokens,
             "shard_paths": list(self._reader.manifest.shard_paths),
             "dataset_fingerprint": self._reader.manifest.dataset_fingerprint,
+            "extraction_fingerprint": self._reader.manifest.extraction_fingerprint,
         }
         if saved_manifest != current_manifest:
             raise ValueError(

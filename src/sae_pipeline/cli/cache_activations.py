@@ -132,6 +132,18 @@ def _reconcile_manifests(
         else cfg.data.validation_tokens_per_language
     )
     for slug in requests:
+        spec, site = requests[slug]
+        extraction_recipe = {
+            "model": {key: value for key, value in cfg.model.model_dump().items() if key != "device_map"},
+            "backend": cfg.extraction.backend,
+            "vllm": cfg.extraction.vllm.model_dump() if cfg.extraction.backend == "vllm" else None,
+            "component": spec.component,
+            "hook_name": site.module_path,
+            "hook_semantics_version": 2,
+        }
+        extraction_fingerprint = hashlib.sha256(
+            json.dumps(extraction_recipe, sort_keys=True).encode("utf-8")
+        ).hexdigest()
         out_dir = base_dir / slug
         out_dir.mkdir(parents=True, exist_ok=True)
         expected = CacheManifest(
@@ -143,13 +155,14 @@ def _reconcile_manifests(
             d_activation=-1,
             shuffle_seed=cfg.cache.shuffle_seed,
             dataset_fingerprint=fingerprint,
+            extraction_fingerprint=extraction_fingerprint,
             partition=args.partition,
             language=args.language,
         )
         existing_path = out_dir / "manifest.json"
         if existing_path.exists():
             existing = CacheManifest.read(existing_path)
-            for field in ("run_id", "model", "layer", "component", "dataset_fingerprint", "partition", "language"):
+            for field in ("run_id", "model", "dtype", "shuffle_seed", "layer", "component", "dataset_fingerprint", "extraction_fingerprint", "partition", "language"):
                 if getattr(existing, field) != getattr(expected, field):
                     raise RuntimeError(f"Existing cache {existing_path} has incompatible {field}")
             if target_tokens is not None and existing.total_tokens > target_tokens:
@@ -360,7 +373,7 @@ def _cache_forwards(
                     out_dir=base_dir / slug,
                     d_activation=x.shape[-1],
                     shard_size_bytes=cfg.cache.shard_size_bytes,
-                    dtype=torch.bfloat16 if cfg.model.dtype == "bfloat16" else torch.float32,
+                    dtype=getattr(torch, cfg.model.dtype),
                     shuffle_seed=cfg.cache.shuffle_seed,
                     manifest=manifests[slug],
                     cache_budget=budget,

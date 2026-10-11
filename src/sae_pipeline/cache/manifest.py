@@ -26,6 +26,7 @@ class CacheManifest:
     shard_paths: list[str] = field(default_factory=list)
     shuffle_seed: int = 42
     dataset_fingerprint: str = ""
+    extraction_fingerprint: str = ""
     partition: str = "train"
     language: str | None = None
     complete: bool = False
