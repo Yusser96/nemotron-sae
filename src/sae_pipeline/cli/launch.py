@@ -13,6 +13,7 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 
@@ -26,8 +27,10 @@ def _aslist(x):
 
 
 def materialize_jobs(cfg: PipelineCfg, config_path: str) -> list[list[str]]:
-    layers = _aslist(cfg.target.layer)
-    components = _aslist(cfg.target.component)
+    selectors = ([['--site', target.slug] for target in cfg.target.sites]
+                 if cfg.target.sites else
+                 [['--layer', str(layer), '--component', component]
+                  for layer, component in itertools.product(_aslist(cfg.target.layer), _aslist(cfg.target.component))])
     arches = _aslist(cfg.sae.arch)
     widths = _aslist(cfg.sae.d_sae)
     l0s = _aslist(cfg.sae.l0_target)
@@ -35,30 +38,31 @@ def materialize_jobs(cfg: PipelineCfg, config_path: str) -> list[list[str]]:
     jobs: list[list[str]] = []
 
     # Cache jobs: one per (layer, component) — independent of (arch, width, l0).
-    for L, C in itertools.product(layers, components):
+    for selector in selectors:
         jobs.append([
-            "python", "-m", "sae_pipeline.cli.cache_activations",
+            sys.executable, "-m", "sae_pipeline.cli.cache_activations",
             "--config", config_path,
-            "--layer", str(L),
-            "--component", str(C),
+            *selector,
         ])
+        if cfg.data.validation_tokens_per_language and (cfg.validation_run_id or cfg.run_id) == cfg.run_id:
+            for language in sorted({s.language for s in (cfg.data.sources or []) if s.language}):
+                jobs.append([sys.executable, "-m", "sae_pipeline.cli.cache_activations",
+                             "--config", config_path, *selector, "--partition", "validation", "--language", language])
 
     # Train + eval jobs: full cartesian product over the SAE knobs.
-    for L, C, arch, w, l0 in itertools.product(layers, components, arches, widths, l0s):
+    for selector, arch, w, l0 in itertools.product(selectors, arches, widths, l0s):
         jobs.append([
-            "python", "-m", "sae_pipeline.cli.train_sae",
+            sys.executable, "-m", "sae_pipeline.cli.train_sae",
             "--config", config_path,
-            "--layer", str(L),
-            "--component", str(C),
+            *selector,
             "--arch", str(arch),
             "--width", str(w),
             "--l0", str(l0),
         ])
         jobs.append([
-            "python", "-m", "sae_pipeline.cli.evaluate",
+            sys.executable, "-m", "sae_pipeline.cli.evaluate",
             "--config", config_path,
-            "--layer", str(L),
-            "--component", str(C),
+            *selector,
             "--arch", str(arch),
             "--width", str(w),
             "--l0", str(l0),

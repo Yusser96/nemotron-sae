@@ -25,6 +25,7 @@ from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.writer import CacheBudget, ShardWriter
 from sae_pipeline.cli._process import run_then_hard_exit
 from sae_pipeline.config import PipelineCfg
+from sae_pipeline.cli._site import cli_site
 from sae_pipeline.data.streaming import make_token_loader
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.hf import HFHookExtractor
@@ -165,6 +166,7 @@ def main() -> None:
     p.add_argument("--config", required=True)
     p.add_argument("--layer", type=int)
     p.add_argument("--component", help="e.g. resid_post, moe_out, expert.42")
+    p.add_argument("--site", help="Exact target.sites slug")
     p.add_argument("--all-targets", action="store_true",
                    help="Capture every exact hook listed in target.sites in one forward pass.")
     p.add_argument("--partition", choices=["train", "validation"], default="train")
@@ -173,8 +175,8 @@ def main() -> None:
                    help="Cap the number of forward passes (debugging).")
     args = p.parse_args()
 
-    if args.all_targets == (args.layer is not None or args.component is not None):
-        p.error("Use either --all-targets or both --layer and --component")
+    if sum((args.all_targets, bool(args.site), args.layer is not None or args.component is not None)) != 1:
+        p.error("Use --all-targets, --site, or both --layer and --component")
     if (args.layer is None) != (args.component is None):
         p.error("--layer and --component must be supplied together")
     if args.partition == "validation" and not args.language:
@@ -197,6 +199,13 @@ def main() -> None:
     signal.signal(signal.SIGTERM, request_stop)
 
     cfg = PipelineCfg.from_yaml(args.config)
+    selected_spec, exact_site = (None, None) if args.all_targets else cli_site(cfg, args, p)
+    selected_components = ([s.component for s in (cfg.target.sites or [])]
+                           if args.all_targets else [selected_spec.component])
+    if any(ComponentSpec.parse(0, component).kind == "expert" for component in selected_components):
+        p.error("Routed expert caches are unsupported: sparse rows require per-forward resume accounting; use dump_activations for diagnostic expert captures")
+    if cfg.extraction.backend == "vllm_remote":
+        p.error("cache_activations supports hf_hooks or vllm; vllm_remote is for streaming training")
     if cfg.cache.tokens_per_fwd <= 0:
         p.error("cache.tokens_per_fwd must be positive")
     if cfg.cache.tokens_per_fwd % cfg.data.seq_len:
@@ -222,12 +231,11 @@ def main() -> None:
         components = {target.slug: target.component for target in cfg.target.sites}
         layers = {target.slug: target.layer for target in cfg.target.sites}
     else:
-        assert args.layer is not None and args.component is not None
-        spec = ComponentSpec.parse(args.layer, args.component)
-        site = HookSite(args.component, args.layer, "") if use_vllm else resolve(spec, sites)
+        spec = selected_spec
+        site = exact_site or (HookSite(spec.component, spec.layer, "") if use_vllm else resolve(spec, sites))
         requests[spec.slug] = (spec, site)
-        components[spec.slug] = args.component
-        layers[spec.slug] = args.layer
+        components[spec.slug] = spec.component
+        layers[spec.slug] = spec.layer
 
     cache_root, base_dir, manifests, target_tokens = _reconcile_manifests(
         cfg, args, requests, components, layers

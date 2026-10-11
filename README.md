@@ -320,3 +320,8 @@ prelinear-labelled caches must not be reused for the corrected prelinear hook.
 Preprocessing metadata now records cache identity and scale. Legacy metadata
 without this provenance must be regenerated in a fresh metadata directory before
 use with cached training; existing model weights remain usable for fine-tuning.
+
+Exact sites can be selected consistently with `--site <slug>` in cache, train,
+evaluate and plot CLIs; the sweep launcher preserves configured slugs and hook
+paths. Routed-expert cache materialization is explicitly unsupported because
+its sparse row count cannot safely use the dense cache's resume offset.

@@ -21,6 +21,7 @@ import torch
 from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import PipelineCfg
+from sae_pipeline.cli._site import add_site_arguments, cli_site
 from sae_pipeline.eval.metrics import streaming_reconstruction_metrics
 from sae_pipeline.eval.plots import plot_eval_summary, refresh_plot
 from sae_pipeline.hooks.components import ComponentSpec
@@ -34,8 +35,7 @@ log = logging.getLogger(__name__)
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
-    p.add_argument("--layer", type=int, required=True)
-    p.add_argument("--component", required=True)
+    add_site_arguments(p)
     p.add_argument("--arch", default=None)
     p.add_argument("--width", type=int, default=None)
     p.add_argument("--l0", type=int, default=None)
@@ -66,7 +66,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = PipelineCfg.from_yaml(args.config)
-    spec = ComponentSpec.parse(args.layer, args.component)
+    spec, _site = cli_site(cfg, args, p)
     arch = args.arch or (cfg.sae.arch if isinstance(cfg.sae.arch, str) else cfg.sae.arch[0])
     width = args.width or (cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0])
     l0_target = args.l0 or (cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0])

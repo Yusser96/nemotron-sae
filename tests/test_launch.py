@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from sae_pipeline.cli.launch import run_local
+from sae_pipeline.cli.launch import materialize_jobs
+from sae_pipeline.config import PipelineCfg
 
 
 def _job(module, name):
@@ -51,3 +53,12 @@ def test_failed_cache_prevents_training(monkeypatch):
 def test_invalid_gpu_assignments_are_rejected(gpus):
     with pytest.raises(ValueError):
         run_local([], gpus)
+
+
+def test_explicit_sites_keep_their_slugs_and_validation_jobs():
+    cfg = PipelineCfg.from_yaml("configs/finetuning.example.yml")
+    jobs = materialize_jobs(cfg, "config.yml")
+    assert all("None" not in job for job in jobs)
+    assert all("--site" in job for job in jobs)
+    assert any("--partition" in job for job in jobs)
+    assert {job[job.index("--site") + 1] for job in jobs} == {s.slug for s in cfg.target.sites}

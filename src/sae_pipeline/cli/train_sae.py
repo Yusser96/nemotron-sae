@@ -20,6 +20,7 @@ from sae_pipeline.cache.manifest import (
     validation_manifest_path_for,
 )
 from sae_pipeline.config import PipelineCfg
+from sae_pipeline.cli._site import add_site_arguments, cli_site
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.train import train_sae
 
@@ -29,7 +30,7 @@ log = logging.getLogger(__name__)
 def _validation_manifest_site_mismatch(
     manifest: CacheManifest, spec: ComponentSpec
 ) -> str | None:
-    expected = (spec.layer, spec.kind)
+    expected = (spec.layer, spec.component)
     actual = (manifest.layer, manifest.component)
     if actual == expected:
         return None
@@ -39,8 +40,7 @@ def _validation_manifest_site_mismatch(
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
-    p.add_argument("--layer", type=int, required=True)
-    p.add_argument("--component", required=True)
+    add_site_arguments(p)
     p.add_argument("--arch", default=None)
     p.add_argument("--width", type=int, default=None, help="Override SAE.d_sae")
     p.add_argument("--l0", type=int, default=None, help="Override SAE.l0_target")
@@ -93,7 +93,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     cfg = PipelineCfg.from_yaml(args.config)
-    spec = ComponentSpec.parse(args.layer, args.component)
+    spec, _site = cli_site(cfg, args, p)
     arch = args.arch or (cfg.sae.arch if isinstance(cfg.sae.arch, str) else cfg.sae.arch[0])
     width = args.width or (cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0])
     l0_target = args.l0 or (cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0])
@@ -184,6 +184,8 @@ def main() -> None:
     )
     sae_cfg = cfg.sae
     checkpoint_updates = {}
+    if cfg.sae.checkpoint_filename_template is not None:
+        checkpoint_updates["checkpoint_filename"] = cfg.sae.checkpoint_filename_template.format(slug=spec.slug)
     if args.checkpoint_filename is not None:
         checkpoint_updates["checkpoint_filename"] = args.checkpoint_filename
     if args.checkpoint_source is not None:
