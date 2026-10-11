@@ -23,6 +23,7 @@ from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.cli._site import add_site_arguments, cli_site
 from sae_pipeline.eval.metrics import streaming_reconstruction_metrics
+from sae_pipeline.eval.output import evaluation_directory
 from sae_pipeline.eval.plots import plot_eval_summary, refresh_plot
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import load_sae_weights, resolve_checkpoint
@@ -166,11 +167,8 @@ def main() -> None:
     )
     log.info("Eval: %s", metrics)
 
-    out_dir = Path(cfg.log.log_dir) / (args.output_id or cfg.run_id) / spec.slug / args.partition
-    if args.language:
-        out_dir = out_dir / args.language
-    if args.output_tag:
-        out_dir = out_dir / args.output_tag
+    out_dir = evaluation_directory(cfg.log.log_dir, args.output_id or cfg.run_id,
+                                   spec.slug, args.partition, args.language, args.output_tag)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{arch}_w{width}_l0_{l0_target}"
 

@@ -19,6 +19,7 @@ from pathlib import Path
 
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.cli._site import add_site_arguments, cli_site
+from sae_pipeline.eval.output import evaluation_directory
 from sae_pipeline.eval.plots import plot_eval_summary, plot_training_curves
 from sae_pipeline.hooks.components import ComponentSpec
 
@@ -36,7 +37,15 @@ def main() -> None:
                    help="Only regenerate training plots (skip eval histograms).")
     p.add_argument("--eval-only", action="store_true",
                    help="Only regenerate eval histograms (skip training plots).")
+    p.add_argument("--partition", choices=["train", "validation"], default="train")
+    p.add_argument("--language")
+    p.add_argument("--output-id")
+    p.add_argument("--output-tag")
     args = p.parse_args()
+    if args.training_only and args.eval_only:
+        p.error("--training-only and --eval-only are mutually exclusive")
+    if (args.partition == "validation") != bool(args.language):
+        p.error("--language is required only for --partition validation")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -48,7 +57,8 @@ def main() -> None:
 
     stem = f"{arch}_w{width}_l0_{l0_target}"
     ckpt_dir = Path(cfg.sae.ckpt_dir) / cfg.run_id / spec.slug / stem
-    log_dir = Path(cfg.log.log_dir) / cfg.run_id / spec.slug
+    log_dir = evaluation_directory(cfg.log.log_dir, args.output_id or cfg.run_id,
+                                   spec.slug, args.partition, args.language, args.output_tag)
 
     if not args.eval_only:
         train_log = ckpt_dir / "train_log.jsonl"
