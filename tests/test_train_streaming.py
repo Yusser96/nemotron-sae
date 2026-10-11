@@ -560,3 +560,29 @@ def test_cached_training_rejects_unimplemented_objective_stop_before_io(tmp_path
                   arch="jumprelu", d_sae=D_SAE, l0_target=L0_TARGET, out_dir=tmp_path / "out",
                   early_stopping=EarlyStoppingCfg(enabled=True, mode="objective", patience=4))
     assert not (tmp_path / "out").exists()
+
+
+def test_normalized_streaming_checkpoints_and_best_carry_metadata(tmp_path):
+    from sae_pipeline.sae.normalization import WholeVectorNormalization, write_normalization
+    warm = _warm_start(tmp_path / "warm.safetensors")
+    metadata = tmp_path / "norm"
+    metadata.mkdir()
+    statistic = WholeVectorNormalization(0.5, 4.0, 64, D_IN)
+    write_normalization(metadata / "normalization.json", statistic)
+    cfg = _sae_cfg(warm, input_normalization="whole_vector")
+    validation = _validation_dirs(tmp_path)
+    site = _site(tmp_path, cfg, validation, normalization_dir=metadata)
+    evaluate_and_update(site, 0, "cpu", EarlyStoppingCfg(divergence_l0_factor=None))
+    write_checkpoint(site, 0)
+    site.close()
+    expected = json.loads((metadata / "normalization.json").read_text())
+    assert json.loads((site.out_dir / "normalization.json").read_text()) == expected
+    assert json.loads((site.out_dir / "best" / "normalization.json").read_text()) == expected
+    resumed = _site(tmp_path, cfg, validation, resume_checkpoint=resolve_checkpoint(site.out_dir, require_trainer_state=True))
+    assert resumed.normalization_scale == 0.5
+    resumed.close()
+    write_normalization(metadata / "normalization.json", dataclasses.replace(statistic, input_scale=0.25))
+    with pytest.raises(ValueError, match="normalization scale differs"):
+        _site(tmp_path, cfg, validation, normalization_dir=metadata,
+              resume_checkpoint=resolve_checkpoint(site.out_dir, require_trainer_state=True))
+    assert json.loads((site.out_dir / "normalization.json").read_text()) == expected

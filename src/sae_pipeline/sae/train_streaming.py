@@ -40,7 +40,7 @@ from sae_pipeline.sae.checkpoint import (
     write_raw_export,
 )
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
-from sae_pipeline.sae.normalization import load_whole_vector_normalization
+from sae_pipeline.sae.normalization import load_whole_vector_normalization, normalization_path, write_normalization
 from sae_pipeline.sae.objective import (
     LossCoefficients,
     coefficients_at,
@@ -157,9 +157,11 @@ def init_streaming_site(
 
     normalization_scale = 1.0
     if sae_cfg.input_normalization == "whole_vector":
-        if normalization_dir is None:
-            raise ValueError(f"{slug}: whole_vector normalisation needs a precomputed normalization_dir")
-        normalization_scale = load_whole_vector_normalization(normalization_dir, d_activation=d_in).input_scale
+        metadata_dir = normalization_dir if normalization_dir is not None else out_dir
+        statistic = load_whole_vector_normalization(metadata_dir, d_activation=d_in)
+        normalization_scale = statistic.input_scale
+        if not math.isfinite(normalization_scale) or normalization_scale <= 0:
+            raise ValueError(f"{slug}: normalization scale must be finite and positive")
 
     _seed_training(sae_cfg.seed)
     sae, optim = build_sae_and_optimizer(sae_cfg, arch=arch, d_in=d_in, d_sae=d_sae, device=device)
@@ -176,6 +178,8 @@ def init_streaming_site(
         load_sae_weights(sae, resume_checkpoint.weights_path)
         assert resume_checkpoint.trainer_state_path is not None
         state = load_trainer_state(resume_checkpoint.trainer_state_path)
+        if state.get("normalization_scale", normalization_scale) != normalization_scale:
+            raise ValueError(f"{slug}: normalization scale differs from the resume checkpoint")
         saved_signature = state.get("validation_cache_signature")
         validation_changed = saved_signature is not None and saved_signature != validation_cache_signature
         if validation_changed and not new_validation:
@@ -215,6 +219,8 @@ def init_streaming_site(
             sae.unfold_raw_export(normalization_scale)
         log.info("%s: fine-tuning %s with a fresh optimizer", slug, source.weights_path)
 
+    if sae_cfg.input_normalization == "whole_vector":
+        write_normalization(normalization_path(out_dir), statistic)
     mode = "a" if resume_checkpoint is not None else "w"
     return StreamingSite(
         slug=slug,
@@ -395,6 +401,7 @@ def write_checkpoint(site: StreamingSite, step: int) -> Path:
             "feature_resets": site.feature_resets,
             "last_reset_step": site.last_reset_step,
             "validation_cache_signature": site.validation_cache_signature,
+            "normalization_scale": site.normalization_scale,
         },
         keep_last=site.cfg.keep_last_checkpoints,
     )
@@ -417,6 +424,9 @@ def _write_best(site: StreamingSite, step: int) -> None:
         {key: value.detach().cpu().contiguous() for key, value in site.sae.state_dict().items()},
         str(best_dir / "sae_weights.safetensors"),
     )
+    if site.cfg.input_normalization == "whole_vector":
+        statistic = load_whole_vector_normalization(site.out_dir, d_activation=site.sae.d_in)
+        write_normalization(normalization_path(best_dir), statistic)
     write_export(site, best_dir / "sae_export.safetensors")
     (best_dir / "step.json").write_text(json.dumps({"step": step, "tokens": site.tokens_seen()}))
 
