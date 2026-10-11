@@ -897,9 +897,10 @@ def train_sae(
 
     activation_center: torch.Tensor | None = None
     if cfg.activation_centering == "mean":
+        centre_metadata_dir = Path(cfg.centering_dir) if cfg.centering_dir else metadata_dir
         centre = resolve_activation_center(
             cache_dir,
-            metadata_dir,
+            centre_metadata_dir,
             sample_tokens=cfg.centering_sample_tokens,
             input_scale=normalization_scale,
         )
@@ -910,8 +911,8 @@ def train_sae(
             with torch.no_grad():
                 # A resumed canonical checkpoint is already centred.
                 sae.b_dec.sub_(activation_center)
-        if centering_path(out_dir) != centering_path(metadata_dir):
-            shutil.copyfile(centering_path(metadata_dir), centering_path(out_dir))
+        if centering_path(out_dir) != centering_path(centre_metadata_dir):
+            shutil.copyfile(centering_path(centre_metadata_dir), centering_path(out_dir))
 
     active_subspace = None
     if cfg.active_subspace_rank is not None:

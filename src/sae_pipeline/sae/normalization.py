@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import uuid
@@ -25,6 +26,7 @@ class WholeVectorNormalization:
     mean_squared_norm: float
     n_tokens: int
     d_activation: int
+    cache_signature: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,13 @@ class ActivationCenter:
     n_tokens: int
     d_activation: int
     sample_tokens: int
+    input_scale: float = 1.0
+    cache_signature: str | None = None
+
+
+def cache_signature(manifest: CacheManifest) -> str:
+    """Identify the immutable activation recipe and ordered shard prefix."""
+    return hashlib.sha256(manifest.to_json().encode("utf-8")).hexdigest()
 
 
 def normalization_path(out_dir: str | Path) -> Path:
@@ -98,17 +107,22 @@ def resolve_activation_center(
 
     cache_dir = Path(cache_dir)
     manifest = CacheManifest.read(cache_dir / "manifest.json")
+    signature = cache_signature(manifest)
+    limit = min(sample_tokens, manifest.total_tokens)
     path = centering_path(out_dir)
     if path.exists():
         with path.open() as handle:
             saved = ActivationCenter(**json.load(handle))
-        if saved.d_activation != manifest.d_activation:
-            raise ValueError(f"Centring metadata at {path} has the wrong dimension")
+        if (saved.d_activation != manifest.d_activation
+                or saved.n_tokens != manifest.total_tokens
+                or saved.sample_tokens != limit
+                or saved.input_scale != input_scale
+                or saved.cache_signature != signature):
+            raise ValueError(f"Centring metadata at {path} does not match cache, scale or sample; use a fresh metadata directory")
         return saved
 
     total = torch.zeros(manifest.d_activation, dtype=torch.float64)
     seen = 0
-    limit = min(sample_tokens, manifest.total_tokens)
     for shard in ShardReader(cache_dir).iter_shards():
         if seen >= limit:
             break
@@ -122,6 +136,8 @@ def resolve_activation_center(
         n_tokens=manifest.total_tokens,
         d_activation=manifest.d_activation,
         sample_tokens=seen,
+        input_scale=input_scale,
+        cache_signature=signature,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -184,6 +200,8 @@ def resolve_whole_vector_normalization(
                 f"saved ({result.n_tokens}, {result.d_activation}), cache "
                 f"({manifest.total_tokens}, {manifest.d_activation})"
             )
+        if result.cache_signature != cache_signature(manifest):
+            raise ValueError(f"Normalisation at {path} has stale or unverified cache identity; use a fresh metadata directory")
         return result
 
     manifest_shards = [cache_dir / name for name in manifest.shard_paths]
@@ -226,6 +244,7 @@ def resolve_whole_vector_normalization(
         mean_squared_norm=mean_squared_norm,
         n_tokens=n_tokens,
         d_activation=manifest.d_activation,
+        cache_signature=cache_signature(manifest),
     )
     _write_atomic(path, result)
     return result

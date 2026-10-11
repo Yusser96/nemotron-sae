@@ -12,6 +12,7 @@ from sae_pipeline.sae.normalization import (
     normalization_path,
     resolve_whole_vector_normalization,
     write_normalization,
+    resolve_activation_center,
 )
 
 
@@ -70,3 +71,21 @@ def test_load_whole_vector_normalization_reads_and_checks_dimension(tmp_path):
         load_whole_vector_normalization(tmp_path, d_activation=4)
     with pytest.raises(FileNotFoundError):
         load_whole_vector_normalization(tmp_path / "missing", d_activation=3)
+
+
+@pytest.mark.parametrize("change", ["scale", "sample", "recipe"])
+def test_center_rejects_changed_preprocessing(tmp_path, change):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    save_file({"x": torch.tensor([[2., 4.], [4., 8.]])}, str(cache / "x.safetensors"))
+    manifest = CacheManifest("run", "model", "float32", 0, "resid_post", 2,
+                             total_tokens=2, shard_paths=["x.safetensors"])
+    manifest.write(cache / "manifest.json")
+    resolve_activation_center(cache, tmp_path / "metadata", sample_tokens=2)
+    if change == "recipe":
+        manifest.dataset_fingerprint = "changed"
+        manifest.write(cache / "manifest.json")
+    with pytest.raises(ValueError, match="does not match"):
+        resolve_activation_center(cache, tmp_path / "metadata",
+                                  sample_tokens=1 if change == "sample" else 2,
+                                  input_scale=.5 if change == "scale" else 1.)
