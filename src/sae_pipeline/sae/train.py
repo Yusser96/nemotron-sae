@@ -350,6 +350,7 @@ def _probe_cache_signature(readers: dict[str, ShardReader]) -> dict[str, dict[st
             "total_tokens": reader.manifest.total_tokens,
             "shard_paths": list(reader.manifest.shard_paths),
             "dataset_fingerprint": reader.manifest.dataset_fingerprint,
+            "extraction_fingerprint": reader.manifest.extraction_fingerprint,
         }
         for language, reader in sorted(readers.items())
     }
@@ -780,6 +781,8 @@ def train_sae(
     validation_dead_tokens: int = 50_000,
     early_stopping: EarlyStoppingCfg | None = None,
 ) -> Path:
+    if early_stopping is not None and early_stopping.enabled and early_stopping.mode != "stability":
+        raise ValueError("Cached training supports early_stopping.mode='stability'; use streaming training for objective mode")
     _seed_training(cfg.seed)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(out_dir)

@@ -52,6 +52,8 @@ from sae_pipeline.sae.train import (
     ObjectiveEarlyStop,
     StepLog,
     _probe_cache_signature,
+    _seed_training,
+    _scheduled_l0_target,
     _validation_batches,
     build_sae_and_optimizer,
     record_firing,
@@ -159,6 +161,7 @@ def init_streaming_site(
             raise ValueError(f"{slug}: whole_vector normalisation needs a precomputed normalization_dir")
         normalization_scale = load_whole_vector_normalization(normalization_dir, d_activation=d_in).input_scale
 
+    _seed_training(sae_cfg.seed)
     sae, optim = build_sae_and_optimizer(sae_cfg, arch=arch, d_in=d_in, d_sae=d_sae, device=device)
     validation_readers = {lang: ShardReader(path) for lang, path in sorted(validation_cache_dirs.items())}
     validation_cache_signature = _probe_cache_signature(validation_readers)
@@ -249,7 +252,7 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     if site.normalization_scale != 1.0:
         x = x * site.normalization_scale
 
-    target_l0 = site.l0_target + reset_l0_allowance(cfg, step, site.last_reset_step)
+    target_l0 = _scheduled_l0_target(step, site.l0_target, cfg) + reset_l0_allowance(cfg, step, site.last_reset_step)
     terms = training_loss(site.sae, x, cfg, coefficients, target_l0=target_l0, usage=site.inverse_simpson_usage)
     if not torch.isfinite(terms.total):
         raise FloatingPointError(f"{site.slug}: non-finite training loss at step {step}")
@@ -458,7 +461,7 @@ def evaluate_and_update(
     divergence = _divergence(site, evaluation, step, early_stopping)
     if divergence is None:
         is_best, lr_reduced, should_stop = site.early_stop.update(
-            objective, early_stopping, eligible=step >= early_stopping.minimum_steps
+            objective, early_stopping, eligible=early_stopping.enabled and step >= early_stopping.minimum_steps
         )
     else:
         is_best, lr_reduced, should_stop = False, False, False
@@ -588,6 +591,8 @@ def run_streaming_training(
         log.info("Resumed the token stream after %d model tokens", tokens_processed)
 
     for site in sites.values():
+        if not early_stopping.enabled:
+            site.early_stop.lr_scale = 1.0
         if site.validation_readers:
             record_baseline(site, device)
 

@@ -526,3 +526,37 @@ def test_two_consumers_train_their_own_sites_from_one_producers_fills(tmp_path):
 
     assert sorted(p.name for p in run.iterdir()) == ["DONE_c0", "DONE_c1", "a", "b", "stream_state_c0.pt", "stream_state_c1.pt"]
     assert FillQueue(fills, ["c0", "c1"]).release() == 2
+
+
+def test_disabled_early_stopping_keeps_learning_rate_on_plateau(tmp_path):
+    site = _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors")), _validation_dirs(tmp_path))
+    cfg = EarlyStoppingCfg(enabled=False, minimum_steps=0, lr_plateau_patience=1,
+                           divergence_l0_factor=None, divergence_objective_factor=None)
+    for step in range(1, 5):
+        assert evaluate_and_update(site, step, "cpu", cfg) is None
+    site.close()
+    assert site.early_stop.lr_scale == 1.0
+    assert site.early_stop.checks_since_improve == 0
+
+
+def test_streaming_seed_and_target_schedule_match_cached_recipe(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), seed=123,
+                   l0_target_start=9, l0_target_warmup_steps=4)
+    site = _site(tmp_path, cfg)
+    first_random = torch.rand(5)
+    x = torch.randn(BATCH, D_IN, generator=torch.Generator().manual_seed(0))
+    entry = streaming_step(site, x, 1)
+    site.close()
+    torch.manual_seed(999)
+    again = _site(tmp_path, cfg)
+    torch.testing.assert_close(torch.rand(5), first_random)
+    again.close()
+    assert entry.target_l0 == 7.5
+
+
+def test_cached_training_rejects_unimplemented_objective_stop_before_io(tmp_path):
+    with pytest.raises(ValueError, match="stability"):
+        train_sae(cfg=SAECfg(), cache_dir=tmp_path / "missing", d_in=D_IN,
+                  arch="jumprelu", d_sae=D_SAE, l0_target=L0_TARGET, out_dir=tmp_path / "out",
+                  early_stopping=EarlyStoppingCfg(enabled=True, mode="objective", patience=4))
+    assert not (tmp_path / "out").exists()
