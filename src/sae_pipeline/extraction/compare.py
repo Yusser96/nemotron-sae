@@ -28,9 +28,14 @@ def compare_activations(reference: torch.Tensor, candidate: torch.Tensor) -> Act
     """Per-token agreement of two ``(tokens, d)`` activation matrices, in float64."""
     if reference.shape != candidate.shape:
         raise ValueError(f"Shape mismatch: reference {tuple(reference.shape)} vs candidate {tuple(candidate.shape)}")
+    if reference.ndim != 2 or reference.shape[0] == 0 or reference.shape[1] == 0:
+        raise ValueError("Expected non-empty (tokens, width) activation matrices")
     ref = reference.to(torch.float64)
     cand = candidate.to(torch.float64)
     cosine = torch.nn.functional.cosine_similarity(ref, cand, dim=-1, eps=1e-12)
+    # Identical zero vectors agree; a zero/nonzero pair retains cosine zero.
+    both_zero = (ref == 0).all(dim=-1) & (cand == 0).all(dim=-1)
+    cosine = torch.where(both_zero, torch.ones_like(cosine), cosine)
     return ActivationAgreement(
         n_tokens=ref.shape[0],
         cosine_mean=float(cosine.mean()),

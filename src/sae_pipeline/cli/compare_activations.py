@@ -28,6 +28,7 @@ def compare_dumps(
     min_cosine_mean: float = 0.999,
     min_cosine_p01: float = 0.99,
     max_relative_l2: float = 2e-2,
+    allow_missing_sites: bool = False,
 ) -> dict[str, object]:
     reference = load_file(str(reference_path))
     candidate = load_file(str(candidate_path))
@@ -52,7 +53,8 @@ def compare_dumps(
         "only_in_reference": sorted(reference.keys() - candidate.keys()),
         "only_in_candidate": sorted(candidate.keys() - reference.keys()),
         "sites": per_site,
-        "passes": all(site["passes"] for site in per_site.values()),
+        "passes": (allow_missing_sites or reference.keys() == candidate.keys())
+        and all(site["passes"] for site in per_site.values()),
     }
 
 
@@ -64,6 +66,8 @@ def main() -> None:
     parser.add_argument("--min-cosine-mean", type=float, default=0.999)
     parser.add_argument("--min-cosine-p01", type=float, default=0.99)
     parser.add_argument("--max-relative-l2", type=float, default=2e-2)
+    parser.add_argument("--allow-missing-sites", action="store_true",
+                        help="Compare the intersection only; default requires matching sites.")
     args = parser.parse_args()
 
     report = compare_dumps(
@@ -72,6 +76,7 @@ def main() -> None:
         min_cosine_mean=args.min_cosine_mean,
         min_cosine_p01=args.min_cosine_p01,
         max_relative_l2=args.max_relative_l2,
+        allow_missing_sites=args.allow_missing_sites,
     )
     text = json.dumps(report, indent=2)
     print(text)

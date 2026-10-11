@@ -38,3 +38,11 @@ def test_relative_l2_and_max_error_are_measured_against_the_reference():
 def test_shape_mismatch_is_an_error():
     with pytest.raises(ValueError, match="Shape mismatch"):
         compare_activations(torch.zeros(3, 2), torch.zeros(4, 2))
+
+
+def test_zero_pairs_agree_but_zero_nonzero_pairs_fail():
+    x = torch.zeros(4, 3)
+    assert compare_activations(x, x).passes(**GATE)
+    assert not compare_activations(x, torch.ones_like(x)).passes(**GATE)
+    mixed = torch.cat([x, torch.ones_like(x)])
+    assert compare_activations(mixed, mixed).passes(**GATE)

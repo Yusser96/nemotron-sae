@@ -19,7 +19,8 @@ def test_matching_dumps_pass_and_report_every_shared_site(tmp_path):
 
     report = compare_dumps(reference, candidate)
 
-    assert report["passes"] is True
+    assert report["passes"] is False
+    assert compare_dumps(reference, candidate, allow_missing_sites=True)["passes"] is True
     assert sorted(report["sites"]) == ["L1", "L2"]
     assert report["only_in_reference"] == ["extra"]
     assert report["metadata"]["candidate"] == {"backend": "vllm"}
