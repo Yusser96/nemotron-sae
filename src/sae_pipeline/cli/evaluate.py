@@ -141,7 +141,7 @@ def main() -> None:
             if input_center.numel() != manifest.d_activation:
                 raise ValueError(f"Centring metadata at {centre_path} has the wrong dimension")
 
-    target = cfg.eval.fvu_n_tokens
+    target = max(cfg.eval.fvu_n_tokens, cfg.eval.dead_n_tokens)
     batch_size = min(cfg.sae.batch_size, 4096)
 
     def batches():
@@ -163,6 +163,7 @@ def main() -> None:
         sae,
         batches(),
         dead_threshold_tokens=cfg.eval.dead_n_tokens,
+        max_tokens=cfg.eval.fvu_n_tokens,
         return_arrays=True,
     )
     log.info("Eval: %s", metrics)

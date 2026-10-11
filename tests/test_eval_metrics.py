@@ -86,3 +86,19 @@ def test_validation_preprocessing_does_not_modify_cpu_shards():
     torch.testing.assert_close(probe(), original * 0.5 - 1)
     torch.testing.assert_close(probe(), original * 0.5 - 1)
     assert torch.equal(shard, original)
+
+
+def test_support_window_can_exceed_reconstruction_window():
+    sae = JumpReLUSAE(d_in=2, d_sae=2)
+    with torch.no_grad():
+        sae.W_enc.copy_(torch.eye(2)); sae.W_dec.copy_(torch.eye(2))
+        sae.b_enc.zero_(); sae.b_dec.zero_(); sae.log_theta.fill_(-5)
+    x = torch.tensor([[1., 0.], [2., 0.], [0., 1.], [0., 2.], [0., 3.]])
+    metrics, arrays = streaming_reconstruction_metrics(sae, x.split(3), max_tokens=2,
+                                                      dead_threshold_tokens=4, return_arrays=True)
+    reference = reconstruction_metrics(sae, x[:2])
+    assert metrics.n_tokens == 2 and metrics.support_n_tokens == 4
+    assert metrics.fvu == reference.fvu and metrics.l0 == reference.l0
+    assert metrics.dead_pct == 0 and reference.dead_pct == 50
+    assert len(arrays.recon_err_per_token) == 2
+    np.testing.assert_allclose(arrays.firing_frequency, [0.5, 0.5])

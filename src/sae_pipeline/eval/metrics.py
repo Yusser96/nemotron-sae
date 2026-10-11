@@ -155,7 +155,13 @@ def streaming_reconstruction_metrics(
     ``activation_batches`` yields CPU or device tensors of shape ``(N, d_in)``.
     Reconstruction, support counts and moments are accumulated batch by batch,
     which makes million-token support evaluation practical for wide SAEs.
+    ``max_tokens`` bounds reconstruction/L0 independently of the support window;
+    the stream is read through the larger requested window.
     """
+    if max_tokens is not None and max_tokens <= 0:
+        raise ValueError("max_tokens must be positive")
+    if dead_threshold_tokens <= 0:
+        raise ValueError("dead_threshold_tokens must be positive")
     sae.eval()
     device = next(sae.parameters()).device
     n_total = 0
@@ -172,19 +178,24 @@ def streaming_reconstruction_metrics(
         if batch.numel() == 0:
             continue
         activations = batch.to(device, dtype=torch.float32, non_blocking=True)
-        if max_tokens is not None and max_tokens > 0:
-            remaining = max_tokens - n_total
+        if max_tokens is not None:
+            remaining = max(max_tokens - n_total, dead_threshold_tokens - support_seen)
             if remaining <= 0:
                 break
-            if activations.shape[0] > remaining:
-                activations = activations[:remaining]
+            activations = activations[:remaining]
         f = sae.encode(activations)
-        x_hat = sae.decode(f)
         active = f > 0
-        l0_per_token = active.sum(dim=-1)
+        take = min(activations.shape[0], max(0, dead_threshold_tokens - support_seen))
+        if take:
+            support_counts.add_(active[:take].sum(dim=0, dtype=torch.float64))
+            support_seen += take
+        n_batch = activations.shape[0] if max_tokens is None else min(activations.shape[0], max_tokens - n_total)
+        if n_batch <= 0:
+            continue
+        activations = activations[:n_batch]
+        x_hat = sae.decode(f[:n_batch])
+        l0_per_token = active[:n_batch].sum(dim=-1)
         err_per_token = (activations - x_hat).pow(2).sum(dim=-1)
-
-        n_batch = activations.shape[0]
         l0_sum += float(l0_per_token.sum().item())
         err_sum += float(err_per_token.sum().item())
         # Merge centred second moments in float64. E[x²] - E[x]² loses
@@ -204,10 +215,6 @@ def streaming_reconstruction_metrics(
             x_mean += delta * (n_batch / combined_n)
         n_total += n_batch
 
-        take = min(n_batch, max(0, dead_threshold_tokens - support_seen))
-        if take:
-            support_counts.add_(active[:take].sum(dim=0, dtype=torch.float64))
-            support_seen += take
         if return_arrays:
             l0_parts.append(l0_per_token.detach().cpu().to(torch.int32))
             err_parts.append(err_per_token.detach().cpu().float())
