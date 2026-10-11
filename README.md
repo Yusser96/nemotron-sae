@@ -22,7 +22,7 @@ runs without reloading the LM.
   clipping are available for recipe-aligned fine-tuning.
 
 - **Hookable components** (per layer, where applicable):
-  `resid_pre`, `resid_post`, `mamba_out`, `attn_out_prelinear`,
+  `resid_pre`, `resid_post`, `mamba_out`, `attn_out`, `attn_out_prelinear`,
   `attn_head.<h>`, `moe_out`, `expert.<e>`, `shared_expert.<s>`.
   Module paths are introspected at load time (`model_topology.json`), since the
   model uses `trust_remote_code` and the modeling file is the source of truth.
@@ -122,7 +122,7 @@ python -m sae_pipeline.cli.evaluate \
     --arch jumprelu --width 4096 --l0 30
 ```
 
-Components: `resid_pre`, `resid_post`, `mamba_out`, `attn_out_prelinear`,
+Components: `resid_pre`, `resid_post`, `mamba_out`, `attn_out`, `attn_out_prelinear`,
 `moe_out`, `expert.<e>`, `shared_expert.<s>`, `attn_head.<h>`.
 
 ## Fine-tuning and exact resume
@@ -274,8 +274,9 @@ data-induced bug surfaces in dev too.
 - Activation buffer is bounded:
   `n_batches_in_buffer × batch_size × d_model × 4 B` ≈ 360 MB at defaults.
 - Shards are memory-mapped, never fully loaded.
-- For per-expert hooks, only the routed-token activations are kept
-  (≈ 6/128 ≈ 4.7 % occupancy), so per-expert caches are naturally tiny.
+- Diagnostic per-expert captures keep only routed-token activations. Dense
+  cache materialization rejects routed-expert hooks until sparse resume
+  accounting is implemented.
 - One SAE training process per `(layer, component, arch, width, L0)` combination,
   pinned to a single GPU; the launcher spreads jobs across visible GPUs.
 
@@ -325,3 +326,30 @@ Exact sites can be selected consistently with `--site <slug>` in cache, train,
 evaluate and plot CLIs; the sweep launcher preserves configured slugs and hook
 paths. Routed-expert cache materialization is explicitly unsupported because
 its sparse row count cannot safely use the dense cache's resume offset.
+
+### Audit fixes and migration
+
+The [audit fix ledger](docs/audit-fixes.md) maps each finding to its focused
+commit and regression coverage. Cache manifests now identify the hook path,
+backend, quantization and storage dtype. Legacy manifests cannot establish that
+identity: build caches under a fresh run ID instead of relabelling old shards.
+
+Streaming resumes select the exact site pairs named in `stream_state*.pt`.
+Checkpoints carry a snapshot suffix, and retention runs only after all pairs and
+the token cursor are published. Legacy stream states lack this transaction
+marker and are rejected for exact resume; their weights can still be used as a
+warm start for a new run. A token cap must be divisible by `sae.batch_size` and
+may stop within a forward pass. Whole-vector streaming checkpoints and best
+weights include `normalization.json`; resuming rejects a changed scale.
+
+Cached training supports stability early stopping; objective stopping is
+available in streaming training. Disabling early stopping disables plateau
+learning-rate adaptation. Streaming still checks configured divergence limits.
+Streaming honors `sae.seed` and the scheduled L0 target. Explicit residual reset
+firing frequencies override the bounded batch-derived default; the unused
+`dead_freq_threshold` setting is rejected with its replacement setting named.
+
+Evaluation can read more tokens for feature support than for reconstruction.
+The plot CLI accepts the same `--partition`, `--language`, `--output-id` and
+`--output-tag` selectors as evaluation. Activation comparisons require all sites
+unless `--allow-missing-sites` explicitly requests an intersection comparison.
