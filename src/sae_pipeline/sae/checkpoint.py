@@ -275,6 +275,7 @@ def load_sae_weights(model: torch.nn.Module, checkpoint: str | Path) -> None:
 
     state = dict(load_file(str(checkpoint), device="cpu"))
     expected = model.state_dict()
+    public_layout = "threshold" in state and "log_theta" not in state
     # SAE-Lens JumpReLU releases use `threshold` and store W_dec as
     # (d_sae, d_in).  The trainer keeps thresholds in log space so positivity
     # is structural; adapt the public format at this boundary.
@@ -283,7 +284,7 @@ def load_sae_weights(model: torch.nn.Module, checkpoint: str | Path) -> None:
     if "theta" in state and "log_theta" in expected and "log_theta" not in state:
         state["log_theta"] = state.pop("theta").clamp_min(1e-12).log()
     if "W_dec" in state and "W_dec" in expected:
-        if state["W_dec"].shape != expected["W_dec"].shape and state["W_dec"].T.shape == expected["W_dec"].shape:
+        if public_layout or (state["W_dec"].shape != expected["W_dec"].shape and state["W_dec"].T.shape == expected["W_dec"].shape):
             state["W_dec"] = state["W_dec"].T.contiguous()
     missing = sorted(set(expected) - set(state))
     unexpected = sorted(set(state) - set(expected))

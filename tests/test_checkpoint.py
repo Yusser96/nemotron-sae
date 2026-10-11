@@ -92,6 +92,22 @@ def test_sae_lens_jumprelu_weights_are_adapted(tmp_path: Path):
     assert torch.equal(loaded.theta, state["threshold"])
 
 
+def test_square_raw_export_preserves_reconstruction_and_native_layout(tmp_path):
+    source = build_sae("jumprelu", d_in=3, d_sae=3)
+    with torch.no_grad():
+        source.b_dec.copy_(torch.tensor([1., 2., 3.]))
+    x = torch.randn(16, 3)
+    raw = write_raw_export(source, tmp_path / "raw.safetensors", input_scale=1.)
+    loaded = build_sae("jumprelu", 3, 3, pre_encoder_bias=False)
+    load_sae_weights(loaded, raw)
+    torch.testing.assert_close(source(x)[0], loaded(x)[0])
+    native = tmp_path / "native.safetensors"
+    save_file({k: v.contiguous() for k, v in source.state_dict().items()}, str(native))
+    canonical = build_sae("jumprelu", 3, 3)
+    load_sae_weights(canonical, native)
+    assert torch.equal(source.W_dec, canonical.W_dec)
+
+
 def test_hf_explicit_arbitrary_filename_is_allowed_for_finetuning(monkeypatch, tmp_path: Path):
     downloaded = tmp_path / "sae_weights.safetensors"
     _write_weights(downloaded)
