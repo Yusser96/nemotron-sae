@@ -135,12 +135,12 @@ class SAECfg(BaseModel):
     residual_reset_max_features: int = 512
     residual_reset_frequency_threshold: float = 1.0e-6
     residual_reset_pool_size: int = 8_192
-    residual_reset_target_frequency: float = 1.0e-3
+    # None distributes residual_reset_delta_l0 over the replaced features.
+    residual_reset_target_frequency: float | None = None
     residual_reset_delta_l0: float = 2.0
     residual_reset_calibration_tokens: int = 1_048_576
     residual_reset_anneal_steps: int = 10_000
     feature_frequency_penalty_multiplier: float = 1.0
-    dead_freq_threshold: float = 0.1  # direct frequency penalization on >10% latents
     inverse_simpson_floor: float = 0.0
     inverse_simpson_max_scale: float = 0.0
     # None follows l0_warmup_steps so both firing-pattern terms ramp together.
@@ -221,10 +221,19 @@ class SAECfg(BaseModel):
 
     @field_validator("feature_frequency_threshold", "residual_reset_target_frequency")
     @classmethod
-    def _frequency_valid(cls, v: float) -> float:
+    def _frequency_valid(cls, v: float | None) -> float | None:
+        if v is None:
+            return v
         if not 0.0 < v <= 1.0:
             raise ValueError("feature frequency thresholds must be in (0, 1]")
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_unused_frequency_setting(cls, values):
+        if isinstance(values, dict) and "dead_freq_threshold" in values:
+            raise ValueError("dead_freq_threshold was unused; use feature_frequency_threshold")
+        return values
 
     @field_validator(
         "feature_frequency_start_step",

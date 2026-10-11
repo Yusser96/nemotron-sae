@@ -606,7 +606,12 @@ def resample_underused_features(
     ).flatten()
     if candidates.numel() == 0:
         return 0
-    n_reset = min(cfg.residual_reset_max_features, int(candidates.numel()))
+    available = (calibration_residuals.shape[0]
+                 if calibration_x is not None and calibration_residuals is not None
+                 else min(cfg.residual_reset_pool_size, x.shape[0]))
+    n_reset = min(cfg.residual_reset_max_features, int(candidates.numel()), available)
+    if n_reset == 0:
+        return 0
     candidates = candidates[torch.randperm(candidates.numel(), device=x.device)[:n_reset]]
 
     residual = x - x_hat
@@ -655,7 +660,9 @@ def resample_underused_features(
     calibration = x if calibration_x is None else calibration_x
     centred = calibration - sae.b_dec if sae.pre_encoder_bias else calibration
     projection = torch.relu(centred @ sae.W_enc[:, candidates] + sae.b_enc[candidates])
-    target_frequency = cfg.residual_reset_delta_l0 / max(1, n_reset)
+    target_frequency = (cfg.residual_reset_target_frequency
+                        if cfg.residual_reset_target_frequency is not None
+                        else min(1.0, cfg.residual_reset_delta_l0 / n_reset))
     quantile = torch.quantile(projection, 1.0 - target_frequency, dim=0)
     threshold = quantile.clamp_min(max(cfg.bandwidth, 1.0e-6))
     sae.log_theta[candidates] = threshold.log()
