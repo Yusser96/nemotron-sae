@@ -89,6 +89,8 @@ def enumerate_hooks(model: nn.Module) -> list[HookSite]:
                 continue
             extra = {"expert_idx": ei}
         if kind == "shared_expert":
+            if isinstance(module, (nn.ModuleList, nn.ModuleDict)):
+                continue  # containers have no forward boundary
             match = re.search(r"\.(\d+)$", name)
             extra = {"shared_expert_idx": int(match[1]) if match else 0}
         sites.append(HookSite(component_kind=kind, layer=layer, module_path=name, extra=extra))

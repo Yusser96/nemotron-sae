@@ -63,3 +63,14 @@ def test_keyword_residual_input_is_captured():
     with capture(model, ComponentSpec.parse(0, "resid_pre"), HookSite("resid_pre", 0, "layers.0")) as buf:
         model.layers[0](hidden_states=x)
         torch.testing.assert_close(buf.consume(), x.reshape(-1, 3))
+
+
+def test_shared_expert_container_does_not_shadow_indexed_children():
+    from sae_pipeline.model.topology import enumerate_hooks
+    from sae_pipeline.hooks.components import ComponentSpec, resolve
+    model = nn.Module()
+    model.layers = nn.ModuleList([nn.Module()])
+    model.layers[0].shared_experts = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])
+    sites = enumerate_hooks(model)
+    assert resolve(ComponentSpec.parse(0, "shared_expert.0"), sites).module_path == "layers.0.shared_experts.0"
+    assert resolve(ComponentSpec.parse(0, "shared_expert.1"), sites).module_path == "layers.0.shared_experts.1"
