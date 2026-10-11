@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import time
+from time import time_ns
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -37,6 +38,7 @@ from sae_pipeline.sae.checkpoint import (
     resolve_checkpoint,
     restore_random_state,
     save_checkpoint_pair,
+    prune_checkpoints,
     write_raw_export,
 )
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
@@ -96,6 +98,7 @@ class StreamingSite:
     # Validation FVU/objective of the warm start, per language: reported next
     # to (never instead of) every evaluation's absolute numbers.
     baseline: dict[str, dict[str, float]] | None = None
+    resume_weights_name: str | None = None
 
     @property
     def log_path(self) -> Path:
@@ -221,6 +224,21 @@ def init_streaming_site(
 
     if sae_cfg.input_normalization == "whole_vector":
         write_normalization(normalization_path(out_dir), statistic)
+    if resume_checkpoint is not None:
+        for filename in ("train_log.jsonl", "validation_log.jsonl"):
+            path = out_dir / filename
+            if path.exists():
+                rows = []
+                for line in path.read_text().splitlines():
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        break  # discard an interrupted last write
+                    if int(row["step"]) <= step:
+                        rows.append(line)
+                temporary = path.with_suffix(".tmp")
+                temporary.write_text("".join(line + "\n" for line in rows))
+                os.replace(temporary, path)
     mode = "a" if resume_checkpoint is not None else "w"
     return StreamingSite(
         slug=slug,
@@ -245,6 +263,7 @@ def init_streaming_site(
         next_milestone_index=next_milestone_index,
         feature_resets=feature_resets,
         last_reset_step=last_reset_step,
+        resume_weights_name=None if resume_checkpoint is None else resume_checkpoint.weights_path.name,
     )
 
 
@@ -382,7 +401,7 @@ def write_export(site: StreamingSite, path: Path) -> Path | None:
     return write_raw_export(site.sae, path, input_scale=site.normalization_scale)
 
 
-def write_checkpoint(site: StreamingSite, step: int) -> Path:
+def write_checkpoint(site: StreamingSite, step: int, *, snapshot_id: str | None = None) -> Path:
     saved = save_checkpoint_pair(
         out_dir=site.out_dir,
         step=step,
@@ -404,6 +423,8 @@ def write_checkpoint(site: StreamingSite, step: int) -> Path:
             "normalization_scale": site.normalization_scale,
         },
         keep_last=site.cfg.keep_last_checkpoints,
+        prune=snapshot_id is None,
+        snapshot_id=snapshot_id,
     )
     site.log_f.flush()
     refresh_plot(
@@ -526,10 +547,11 @@ class TokenStream(Protocol):
     def load_state_dict(self, state: dict[str, object]) -> None: ...
 
 
-def _save_stream_state(path: Path, token_stream: TokenStream, tokens_processed: int) -> None:
+def _save_stream_state(path: Path, token_stream: TokenStream, tokens_processed: int, checkpoints: dict[str, str]) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     torch.save(
         {
+            "checkpoints": checkpoints,
             "token_stream": token_stream.state_dict(),
             "tokens_processed": tokens_processed,
             "random_state": capture_random_state(),
@@ -543,7 +565,6 @@ def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = Tru
     log.info("Stopping %d site(s): %s", len(sites), reason)
     for site in sites:
         site.stopped = True
-        write_checkpoint(site, site.step)
         if final_export:
             write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
         else:
@@ -554,6 +575,22 @@ def state_paths(out_root: Path, name: str | None) -> tuple[Path, Path]:
     """The stream state and ``DONE`` marker of a run, or of its trainer ``name``."""
     suffix = "" if name is None else f"_{name}"
     return out_root / f"stream_state{suffix}.pt", out_root / f"DONE{suffix}"
+
+
+def committed_stream_checkpoints(out_root: Path, site_dirs: dict[str, Path], name: str | None = None):
+    """Select exactly the checkpoint pairs published with the token cursor.
+
+    Orphan pairs from an interrupted transaction are deliberately ignored.
+    """
+    path = state_paths(out_root, name)[0]
+    if not path.exists():
+        return {slug: None for slug in site_dirs}
+    state = load_trainer_state(path)
+    checkpoints = state.get("checkpoints", {})
+    if set(checkpoints) != set(site_dirs):
+        raise ValueError("Streaming resume requires the same sites and a committed snapshot; legacy states cannot resume exactly")
+    return {slug: resolve_checkpoint(directory, filename=checkpoints[slug], require_trainer_state=True)
+            for slug, directory in site_dirs.items()}
 
 
 def run_streaming_training(
@@ -587,6 +624,10 @@ def run_streaming_training(
     if len(batch_sizes) != 1:
         raise ValueError(f"All streamed sites must share one batch_size; got {batch_sizes}")
     batch_size = batch_sizes.pop()
+    if stream_cfg.token_cap is not None and stream_cfg.token_cap % batch_size:
+        raise ValueError("stream.token_cap must be a multiple of sae.batch_size")
+    if tokens_per_fwd <= 0 or seq_len <= 0:
+        raise ValueError("tokens_per_fwd and seq_len must be positive")
     if tokens_per_fwd % batch_size or tokens_per_fwd % seq_len:
         raise ValueError("tokens_per_fwd must be a multiple of both sae.batch_size and seq_len")
 
@@ -595,10 +636,27 @@ def run_streaming_training(
     tokens_processed = 0
     if stream_state_path.exists():
         saved = load_trainer_state(stream_state_path)
+        if set(saved.get("checkpoints", {})) != set(sites):
+            raise ValueError("Streaming resume requires the same sites and a committed snapshot; legacy states cannot resume exactly")
+        for slug, site in sites.items():
+            committed = resolve_checkpoint(site.out_dir, filename=saved["checkpoints"][slug], require_trainer_state=True)
+            if committed.step != site.step or committed.weights_path.name != site.resume_weights_name:
+                raise ValueError(f"{slug}: loaded step does not match the committed stream snapshot")
         token_stream.load_state_dict(saved["token_stream"])
         tokens_processed = int(saved["tokens_processed"])
         restore_random_state(saved["random_state"])
         log.info("Resumed the token stream after %d model tokens", tokens_processed)
+
+    def commit_snapshot():
+        # Unique names keep the previous transaction immutable until the cursor
+        # and every site's pair have been atomically published together.
+        snapshot_id = str(time_ns())
+        checkpoints = {slug: write_checkpoint(site, site.step, snapshot_id=snapshot_id).name
+                       for slug, site in sites.items()}
+        _save_stream_state(stream_state_path, token_stream, tokens_processed, checkpoints)
+        for slug, site in sites.items():
+            prune_checkpoints(site.out_dir, keep_last=site.cfg.keep_last_checkpoints,
+                              protected_weights=checkpoints[slug])
 
     for site in sites.values():
         if not early_stopping.enabled:
@@ -618,8 +676,6 @@ def run_streaming_training(
             break
         if stream_cfg.stop_after_seconds is not None and time.monotonic() - started >= stream_cfg.stop_after_seconds:
             log.info("Pausing at the %.0fs time limit", stream_cfg.stop_after_seconds)
-            for site in active:
-                write_checkpoint(site, site.step)
             done = False
             break
         try:
@@ -630,8 +686,6 @@ def run_streaming_training(
             break
         except TimeoutError as error:
             log.info("Pausing: %s", error)
-            for site in active:
-                write_checkpoint(site, site.step)
             done = False
             break
 
@@ -646,6 +700,10 @@ def run_streaming_training(
             # locally so no SAE batch is a contiguous run of positions.
             x_all = x_all[torch.randperm(x_all.shape[0], device=x_all.device)]
             for x in x_all.split(batch_size):
+                if stream_cfg.token_cap is not None and site.tokens_seen() >= stream_cfg.token_cap:
+                    _finish([site], f"reached the {stream_cfg.token_cap}-token cap")
+                    checkpointed = True
+                    break
                 site.step += 1
                 step = site.step
                 entry = streaming_step(site, x, step)
@@ -657,10 +715,8 @@ def run_streaming_training(
                 if site.validation_readers and step % eval_interval == 0:
                     stop = evaluate_and_update(site, step, device, early_stopping)
                     checkpointed = True
-                    write_checkpoint(site, step)
                 elif step % site.cfg.ckpt_every == 0:
                     checkpointed = True
-                    write_checkpoint(site, step)
 
                 milestones = stream_cfg.milestone_tokens
                 while site.next_milestone_index < len(milestones) and (
@@ -669,14 +725,16 @@ def run_streaming_training(
                     milestone = milestones[site.next_milestone_index]
                     write_export(site, site.out_dir / f"sae_export_step_{step:07d}_milestone_{milestone}.safetensors")
                     site.next_milestone_index += 1
+                if stop is None and stream_cfg.token_cap is not None and site.tokens_seen() >= stream_cfg.token_cap:
+                    stop = Stop(f"reached the {stream_cfg.token_cap}-token cap")
                 if stop is not None:
                     _finish([site], f"{site.slug} {stop.reason} at step {step}", final_export=not stop.diverged)
                     checkpointed = True
                     break
         if checkpointed:
-            _save_stream_state(stream_state_path, token_stream, tokens_processed)
+            commit_snapshot()
 
-    _save_stream_state(stream_state_path, token_stream, tokens_processed)
+    commit_snapshot()
     for site in sites.values():
         site.log_f.flush()
         site.validation_f.flush()

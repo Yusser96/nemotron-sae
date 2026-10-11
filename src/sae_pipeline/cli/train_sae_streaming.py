@@ -45,7 +45,7 @@ from sae_pipeline.hooks.components import select_sites, site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import dump_topology, enumerate_hooks
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
-from sae_pipeline.sae.train_streaming import TokenStream, init_streaming_site, run_streaming_training, state_paths
+from sae_pipeline.sae.train_streaming import committed_stream_checkpoints, TokenStream, init_streaming_site, run_streaming_training, state_paths
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +129,9 @@ def main() -> None:
     d_sae = cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0]
     l0_target = cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0]
 
+    resume_checkpoints = committed_stream_checkpoints(
+        out_root, {target.slug: out_root / target.slug for target in targets}, args.consumer
+    )
     requests = site_requests(targets)
     # Check every validation cache before spending minutes loading the model.
     validation = {target.slug: _validation_cache_dirs(cfg, target, languages) for target in targets}
@@ -188,17 +191,7 @@ def main() -> None:
         for target in targets:
             validation_dirs, d_in = validation[target.slug]
             site_dir = out_root / target.slug
-            resume_checkpoint = None
-            if site_dir.exists():
-                try:
-                    resume_checkpoint = resolve_checkpoint(site_dir, require_trainer_state=True)
-                except FileNotFoundError:
-                    log.warning(
-                        "%s: no complete checkpoint pair in %s; starting from the warm start "
-                        "(its logs are overwritten)",
-                        target.slug,
-                        site_dir,
-                    )
+            resume_checkpoint = resume_checkpoints[target.slug]
             checkpoint_filename = cfg.sae.checkpoint_filename
             if cfg.sae.checkpoint_filename_template is not None:
                 checkpoint_filename = cfg.sae.checkpoint_filename_template.format(slug=target.slug)

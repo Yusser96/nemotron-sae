@@ -586,3 +586,81 @@ def test_normalized_streaming_checkpoints_and_best_carry_metadata(tmp_path):
         _site(tmp_path, cfg, validation, normalization_dir=metadata,
               resume_checkpoint=resolve_checkpoint(site.out_dir, require_trainer_state=True))
     assert json.loads((site.out_dir / "normalization.json").read_text()) == expected
+
+
+def test_token_cap_stops_inside_forward_and_requires_batch_alignment(tmp_path, monkeypatch):
+    monkeypatch.setattr("sae_pipeline.sae.train_streaming.refresh_plot", lambda *a, **kw: None)
+    warm = _warm_start(tmp_path / "warm.safetensors")
+    site = _site(tmp_path, _sae_cfg(warm, ckpt_every=3))
+    with pytest.raises(ValueError, match="multiple"):
+        _run(tmp_path, site, _CountingStream(), stream_cfg=StreamCfg(token_cap=BATCH + 1))
+    assert site.step == 0
+    assert _run(tmp_path, site, _CountingStream(), stream_cfg=StreamCfg(token_cap=3 * BATCH))
+    site.close()
+    assert site.step == 3 and site.tokens_seen() == 3 * BATCH
+
+
+def test_periodic_snapshot_is_taken_after_all_batches_in_forward(tmp_path, monkeypatch):
+    from sae_pipeline.sae.checkpoint import load_trainer_state
+    from sae_pipeline.sae.train_streaming import committed_stream_checkpoints
+    monkeypatch.setattr("sae_pipeline.sae.train_streaming.refresh_plot", lambda *a, **kw: None)
+    site = _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), ckpt_every=3))
+    # The periodic save is triggered at step 3 inside forward 2, but must contain step 4.
+    assert not _run(tmp_path, site, _StallingStream(2), stream_cfg=StreamCfg())
+    site.close()
+    committed = committed_stream_checkpoints(tmp_path, {"site": site.out_dir})["site"]
+    state = load_trainer_state(tmp_path / "stream_state.pt")
+    assert committed.step == 4
+    assert state["tokens_processed"] == 4 * BATCH
+
+
+@pytest.mark.parametrize("failure_point", ["second_site", "cursor"])
+def test_interrupted_multi_site_snapshot_keeps_previous_pairs_and_resumes_exactly(tmp_path, monkeypatch, failure_point):
+    import sae_pipeline.sae.train_streaming as module
+    monkeypatch.setattr(module, "refresh_plot", lambda *a, **kw: None)
+    warm = _warm_start(tmp_path / "warm.safetensors")
+    cfg = _sae_cfg(warm, ckpt_every=3, keep_last_checkpoints=1)
+    class MultiExtractor:
+        def extract(self, tokens):
+            batch = _SeededExtractor().extract(tokens)
+            return ActivationBatch(tokens, {slug: batch.activations["site"] for slug in ("a", "b")})
+    def make_sites(root, resume=False):
+        selected = module.committed_stream_checkpoints(root, {s: root / s for s in ("a", "b")}) if resume else {}
+        return {s: init_streaming_site(slug=s, sae_cfg=cfg, d_in=D_IN, arch="jumprelu", d_sae=D_SAE,
+                    l0_target=L0_TARGET, out_dir=root / s, device="cpu", validation_cache_dirs={},
+                    probe_tokens=BATCH, resume_checkpoint=selected.get(s)) for s in ("a", "b")}
+    def run(root, sites, stream, cap=None):
+        return run_streaming_training(sites=sites, token_stream=stream, extractor=MultiExtractor(),
+                stream_cfg=StreamCfg(token_cap=cap), early_stopping=EarlyStoppingCfg(),
+                tokens_per_fwd=TOKENS_PER_FWD, seq_len=SEQ_LEN, device="cpu", out_root=root)
+    root = tmp_path / "interrupted"
+    sites = make_sites(root)
+    assert not run(root, sites, _StallingStream(2))
+    for site in sites.values(): site.close()
+    old = module.committed_stream_checkpoints(root, {s: root / s for s in sites})
+    sites = make_sites(root, resume=True)
+    with monkeypatch.context() as fault:
+        if failure_point == "second_site":
+            actual = module.write_checkpoint
+            def failing(site, step, **kwargs):
+                if site.slug == "b": raise RuntimeError("interrupted transaction")
+                return actual(site, step, **kwargs)
+            fault.setattr(module, "write_checkpoint", failing)
+        else:
+            fault.setattr(module, "_save_stream_state", lambda *a: (_ for _ in ()).throw(RuntimeError("interrupted transaction")))
+        with pytest.raises(RuntimeError, match="interrupted transaction"):
+            run(root, sites, _CountingStream(), 8 * BATCH)
+    for site in sites.values(): site.close()
+    for checkpoint in old.values():
+        assert checkpoint.weights_path.exists() and checkpoint.trainer_state_path.exists()
+    assert module.committed_stream_checkpoints(root, {s: root / s for s in sites}) == old
+    resumed = make_sites(root, resume=True)
+    assert run(root, resumed, _CountingStream(), 8 * BATCH)
+    reference_root = tmp_path / "reference"
+    reference = make_sites(reference_root)
+    assert run(reference_root, reference, _CountingStream(), 8 * BATCH)
+    for slug in resumed:
+        resumed[slug].close(); reference[slug].close()
+        for key, weights in reference[slug].sae.state_dict().items():
+            torch.testing.assert_close(resumed[slug].sae.state_dict()[key], weights, rtol=0, atol=0)
+        assert _logged_steps(resumed[slug]) == list(range(1, 9))

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_WEIGHTS_RE = re.compile(r"^sae_step_(\d+)\.safetensors$")
+_WEIGHTS_RE = re.compile(r"^sae_step_(\d+)(?:_snapshot_(\d+))?\.safetensors$")
 _HF_HOSTS = {"huggingface.co", "www.huggingface.co", "hf.co", "www.hf.co"}
 
 
@@ -98,8 +98,7 @@ def companion_state_name(path_or_name: str | Path) -> str:
         raise ValueError(
             f"Expected a checkpoint named sae_step_<step>.safetensors, got {name!r}"
         )
-    digits = match.group(1)
-    return f"trainer_state_step_{digits}.pt"
+    return name.replace("sae_step_", "trainer_state_step_", 1).removesuffix(".safetensors") + ".pt"
 
 
 def companion_state_path(weights_path: str | Path) -> Path:
@@ -120,7 +119,7 @@ def _local_source(source: str | Path) -> Path | None:
 def _sorted_weight_names(names: list[str]) -> list[str]:
     return sorted(
         (name for name in names if _WEIGHTS_RE.match(PurePosixPath(name).name)),
-        key=lambda name: checkpoint_step(PurePosixPath(name).name),
+        key=lambda name: (checkpoint_step(PurePosixPath(name).name), _WEIGHTS_RE.match(PurePosixPath(name).name).group(2) or ""),
     )
 
 
@@ -370,8 +369,10 @@ def load_trainer_state(path: str | Path) -> dict[str, Any]:
     return state
 
 
-def _atomic_checkpoint_paths(out_dir: Path, step: int) -> tuple[Path, Path]:
-    digits = f"{step:07d}"
+def _atomic_checkpoint_paths(out_dir: Path, step: int, snapshot_id: str | None = None) -> tuple[Path, Path]:
+    if snapshot_id is not None and not snapshot_id.isdecimal():
+        raise ValueError("snapshot_id must contain decimal digits")
+    digits = f"{step:07d}" + (f"_snapshot_{snapshot_id}" if snapshot_id is not None else "")
     return (
         out_dir / f"sae_step_{digits}.safetensors",
         out_dir / f"trainer_state_step_{digits}.pt",
@@ -385,6 +386,8 @@ def save_checkpoint_pair(
     trainer_state: Mapping[str, Any],
     *,
     keep_last: int = 2,
+    prune: bool = True,
+    snapshot_id: str | None = None,
 ) -> ResolvedCheckpoint:
     """Atomically commit a weights/state pair, then prune older complete pairs."""
 
@@ -392,7 +395,7 @@ def save_checkpoint_pair(
         raise ValueError("keep_last must be positive")
     directory = Path(out_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    weights_path, state_path = _atomic_checkpoint_paths(directory, step)
+    weights_path, state_path = _atomic_checkpoint_paths(directory, step, snapshot_id)
     nonce = uuid.uuid4().hex
     temp_weights = directory / f".{weights_path.name}.{nonce}.tmp"
     temp_state = directory / f".{state_path.name}.{nonce}.tmp"
@@ -434,7 +437,8 @@ def save_checkpoint_pair(
         backup_weights.unlink(missing_ok=True)
         backup_state.unlink(missing_ok=True)
 
-    prune_checkpoints(directory, keep_last=keep_last)
+    if prune:
+        prune_checkpoints(directory, keep_last=keep_last)
     return ResolvedCheckpoint(
         weights_path=weights_path,
         trainer_state_path=state_path,
@@ -466,7 +470,7 @@ def write_raw_export(
     return path
 
 
-def prune_checkpoints(out_dir: str | Path, *, keep_last: int) -> None:
+def prune_checkpoints(out_dir: str | Path, *, keep_last: int, protected_weights: str | None = None) -> None:
     """Retain the newest N complete pairs; never remove unpaired weight files."""
 
     if keep_last <= 0:
@@ -481,8 +485,12 @@ def prune_checkpoints(out_dir: str | Path, *, keep_last: int) -> None:
         state_path = companion_state_path(weights_path)
         if state_path.exists():
             complete.append((step, weights_path, state_path))
-    complete.sort(key=lambda pair: pair[0])
-    for _, weights_path, state_path in complete[:-keep_last]:
+    complete.sort(key=lambda pair: (pair[0], _WEIGHTS_RE.match(pair[1].name).group(2) or ""))
+    protected = [pair for pair in complete if pair[1].name == protected_weights]
+    others = [pair for pair in complete if pair[1].name != protected_weights]
+    remaining_slots = max(0, keep_last - len(protected))
+    remove = others[:-remaining_slots] if remaining_slots else others
+    for _, weights_path, state_path in remove:
         weights_path.unlink()
         state_path.unlink()
         log.info("Removed old checkpoint pair %s and %s", weights_path, state_path)
