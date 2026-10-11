@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch.nn as nn
+from sae_pipeline.hooks.attention import output_projection, head_count
 
 log = logging.getLogger(__name__)
 
@@ -30,20 +31,29 @@ class HookSite:
 
 # Compiled patterns for classifying module names. The model is a custom Nemotron arch,
 # so we cast a wide net and keep only what looks load-bearing.
-_LAYER_RE = re.compile(r"\.layers?\.(\d+)\b")
+_LAYER_RE = re.compile(r"(?:^|\.)layers?\.(\d+)\b")
 _EXPERT_RE = re.compile(r"\.(?:experts?|moe_experts?)\.(\d+)\b")
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("expert", re.compile(r"\.(?:experts?|moe_experts?)\.\d+$")),
     ("shared_expert", re.compile(r"\.(?:shared_experts?|shared_mlp)(\.\d+)?$")),
     ("moe_out", re.compile(r"\.(?:block_sparse_moe|moe|mlp_moe|sparse_moe)$")),
-    ("mamba_out", re.compile(r"\.(?:mamba|mamba2|mixer|ssm)$")),
-    ("attn_out_prelinear", re.compile(
+    ("mamba_out", re.compile(r"\.(?:mamba|mamba2|ssm)$")),
+    ("attn_out", re.compile(
         r"\.(?:self_attn|attention|attn)$"
     )),
 ]
 
 
-def _classify(name: str) -> str | None:
+def _classify(name: str, module: nn.Module | None = None) -> str | None:
+    if name.endswith(".mixer"):
+        typename = type(module).__name__.lower()
+        if "mamba" in typename or "ssm" in typename:
+            return "mamba_out"
+        if "attention" in typename or "attn" in typename:
+            return "attn_out"
+        if "moe" in typename or hasattr(module, "experts"):
+            return "moe_out"
+        return None
     for kind, rx in _PATTERNS:
         if rx.search(name):
             return kind
@@ -64,12 +74,12 @@ def enumerate_hooks(model: nn.Module) -> list[HookSite]:
     """Walk every named submodule and return a list of HookSite entries."""
     sites: list[HookSite] = []
     n_layers = 0
-    for name, _ in model.named_modules():
+    for name, module in model.named_modules():
         layer = _layer_of(name)
         if layer is None:
             continue
         n_layers = max(n_layers, layer + 1)
-        kind = _classify(name)
+        kind = _classify(name, module)
         if kind is None:
             continue
         extra: dict[str, int | str] | None = None
@@ -78,7 +88,21 @@ def enumerate_hooks(model: nn.Module) -> list[HookSite]:
             if ei is None:
                 continue
             extra = {"expert_idx": ei}
+        if kind == "shared_expert":
+            match = re.search(r"\.(\d+)$", name)
+            extra = {"shared_expert_idx": int(match[1]) if match else 0}
         sites.append(HookSite(component_kind=kind, layer=layer, module_path=name, extra=extra))
+        if kind == "attn_out":
+            try:
+                output_projection(module)
+            except ValueError:
+                continue
+            sites.append(HookSite("attn_out_prelinear", layer, name))
+            heads = head_count(module)
+            if heads is not None:
+                for head in range(heads):
+                    sites.append(HookSite("attn_head", layer, name,
+                                          {"head_idx": head, "num_heads": heads}))
 
     # Residual stream sites are *block I/O*, not modules; we synthesize one per layer.
     for L in range(n_layers):

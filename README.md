@@ -306,3 +306,17 @@ data-induced bug surfaces in dev too.
 │   └── cli/                # cache_activations, train_sae, evaluate, launch
 └── tests/                  # 15 unit tests; full synthetic end-to-end pipeline
 ```
+
+### Attention hook semantics and compatibility
+
+`attn_out` captures the attention module output after its output projection.
+`attn_out_prelinear` captures the projection input; HF `attn_head.<h>` selects
+one verified head from that input. vLLM prelinear extraction currently requires
+`tensor_parallel_size: 1`, and indexed expert/head hooks are rejected by vLLM.
+The fine-tuning and benchmark examples retain their published site slugs but use
+`component: attn_out` for their existing projected-output SAE checkpoints. Old
+prelinear-labelled caches must not be reused for the corrected prelinear hook.
+
+Preprocessing metadata now records cache identity and scale. Legacy metadata
+without this provenance must be regenerated in a fresh metadata directory before
+use with cached training; existing model weights remain usable for fine-tuning.

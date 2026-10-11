@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from sae_pipeline.hooks.components import ComponentSpec
+from sae_pipeline.hooks.attention import output_projection, head_count
 from sae_pipeline.model.topology import HookSite
 
 
@@ -82,8 +83,10 @@ def _capture_handle(
         if spec.kind == "resid_pre":
             def pre_hook(_mod, args, _kwargs, buffer=buffer):
                 # First positional arg is hidden_states for most HF blocks.
-                if args:
-                    buffer.add(args[0])
+                hidden = args[0] if args else _kwargs.get("hidden_states")
+                if hidden is None:
+                    raise ValueError("resid_pre requires hidden_states as a positional or keyword argument")
+                buffer.add(hidden)
                 return None
             return block.register_forward_pre_hook(pre_hook, with_kwargs=True)
         else:
@@ -94,6 +97,22 @@ def _capture_handle(
             return block.register_forward_hook(post_hook)
     else:
         mod = _resolve_module(model, site.module_path)
+        if spec.kind in {"attn_out_prelinear", "attn_head"}:
+            projection = output_projection(mod)
+            heads = (site.extra or {}).get("num_heads") or head_count(mod)
+            if spec.kind == "attn_head" and (not heads or spec.head_idx is None or spec.head_idx >= int(heads)):
+                raise ValueError(f"Cannot resolve attention head {spec.head_idx}; supply verified num_heads metadata")
+            def projection_input(_mod, args, kwargs, buffer=buffer):
+                hidden = args[0] if args else kwargs.get("hidden_states", kwargs.get("input"))
+                if hidden is None:
+                    raise ValueError("Attention output projection received no input tensor")
+                if spec.kind == "attn_head":
+                    if hidden.shape[-1] % int(heads):
+                        raise ValueError("Attention projection width is not divisible by num_heads")
+                    width = hidden.shape[-1] // int(heads)
+                    hidden = hidden[..., spec.head_idx * width : (spec.head_idx + 1) * width]
+                buffer.add(hidden)
+            return projection.register_forward_pre_hook(projection_input, with_kwargs=True)
         def fwd_hook(_mod, _args, output, buffer=buffer):
             t = output[0] if isinstance(output, tuple) else output
             buffer.add(t)
@@ -134,9 +153,9 @@ def capture_many(
     """
     buffers = {slug: _BufferList(device=device) for slug in requests}
     handles: list[torch.utils.hooks.RemovableHandle] = []
-    for slug, (spec, site) in requests.items():
-        handles.append(_capture_handle(model, spec, site, buffers[slug]))
     try:
+        for slug, (spec, site) in requests.items():
+            handles.append(_capture_handle(model, spec, site, buffers[slug]))
         yield buffers
     finally:
         for handle in handles:

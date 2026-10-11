@@ -25,15 +25,16 @@ from torch import nn
 
 from sae_pipeline.extraction.remote import PRODUCER_RANK, SITES_KEY, TRAINER_RANK, open_store, peer_group
 from sae_pipeline.hooks.components import ComponentSpec
+from sae_pipeline.hooks.attention import output_projection
 
 # Component kind -> substring of the mixer class name it must be hooked on.
-MIXER_KINDS = {"mamba_out": "Mamba", "attn_out_prelinear": "Attention", "moe_out": "MoE"}
+MIXER_KINDS = {"mamba_out": "Mamba", "attn_out": "Attention", "attn_out_prelinear": "Attention", "moe_out": "MoE"}
 RESIDUAL_KINDS = ("resid_pre", "resid_post")
 
 
 def hookable(spec: ComponentSpec) -> bool:
     """Whether a site has a module boundary to hook in vLLM's NemotronH."""
-    return spec.expert_idx is None and spec.head_idx is None and (spec.kind in RESIDUAL_KINDS or spec.kind in MIXER_KINDS)
+    return spec.expert_idx is None and spec.head_idx is None and spec.shared_expert_idx is None and (spec.kind in RESIDUAL_KINDS or spec.kind in MIXER_KINDS)
 
 
 def match_rows(
@@ -120,7 +121,11 @@ class ActivationHookExtension:
                 mixer = layers[layer].mixer
                 if MIXER_KINDS[kind] not in type(mixer).__name__:
                     raise ValueError(f"{slug}: layer {layer} has a {type(mixer).__name__}, not a {MIXER_KINDS[kind]} block")
-                handle = mixer.register_forward_hook(partial(self._sae_capture_output, slug))
+                if kind == "attn_out_prelinear":
+                    handle = output_projection(mixer).register_forward_pre_hook(
+                        partial(self._sae_capture_input, slug), with_kwargs=True)
+                else:
+                    handle = mixer.register_forward_hook(partial(self._sae_capture_output, slug))
             else:
                 raise ValueError(f"{slug}: component {kind!r} has no hook point in vLLM")
             self.sae_handles.append(handle)
@@ -281,6 +286,9 @@ class ActivationHookExtension:
     def _sae_capture_output(self, slug, _module, _args, output) -> None:
         # Copy now: the next layer's fused add-RMSNorm overwrites this tensor in place.
         self.sae_captured[slug] = output.clone()
+
+    def _sae_capture_input(self, slug, _module, args, kwargs) -> None:
+        self.sae_captured[slug] = _arg(args, kwargs, 0, "hidden_states").clone()
 
     def _sae_end_step(self, _module, _args, _output) -> None:
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():

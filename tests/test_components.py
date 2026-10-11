@@ -28,6 +28,12 @@ def test_site_requests_of_no_sites_is_empty():
     assert site_requests([]) == {}
 
 
+def test_shared_expert_index_round_trips():
+    spec = ComponentSpec.parse(2, "shared_expert.1")
+    assert spec.component == "shared_expert.1"
+    assert spec.slug == "L2_shared_expert_1"
+
+
 def test_select_sites_keeps_config_order_and_rejects_unknown_slugs():
     sites = [SimpleNamespace(slug=slug) for slug in ("a", "b", "c")]
 

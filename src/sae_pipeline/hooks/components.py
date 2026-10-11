@@ -19,6 +19,8 @@ class ComponentSpec:
     kind: str            # resid_pre|resid_post|mamba_out|attn_out_prelinear|moe_out|expert|shared_expert|attn_head
     expert_idx: int | None = None
     head_idx: int | None = None
+    shared_expert_idx: int | None = None
+    site_slug: str | None = None
 
     @classmethod
     def parse(cls, layer: int, component: str) -> "ComponentSpec":
@@ -26,16 +28,29 @@ class ComponentSpec:
         if "." in component:
             kind, idx_s = component.split(".", 1)
             idx = int(idx_s)
+            if idx < 0:
+                raise ValueError("Component indices must be non-negative")
             if kind == "expert":
                 return cls(layer=layer, kind="expert", expert_idx=idx)
             if kind == "attn_head":
                 return cls(layer=layer, kind="attn_head", head_idx=idx)
+            if kind == "shared_expert":
+                return cls(layer=layer, kind="shared_expert", shared_expert_idx=idx)
             raise ValueError(f"Unknown indexed component {component!r}")
         return cls(layer=layer, kind=component)
 
     @property
+    def component(self) -> str:
+        index = self.expert_idx if self.kind == "expert" else self.head_idx if self.kind == "attn_head" else self.shared_expert_idx
+        return self.kind if index is None else f"{self.kind}.{index}"
+
+    @property
     def slug(self) -> str:
         """Filesystem-safe identifier (no zero-padding so it matches `L${LAYER}` shell vars)."""
+        if self.site_slug is not None:
+            return self.site_slug
+        if self.shared_expert_idx is not None:
+            return f"L{self.layer}_shared_expert_{self.shared_expert_idx}"
         if self.expert_idx is not None:
             return f"L{self.layer}_expert_{self.expert_idx}"
         if self.head_idx is not None:
@@ -88,6 +103,12 @@ def resolve(spec: ComponentSpec, sites: list[HookSite]) -> HookSite:
             continue
         if spec.expert_idx is not None:
             if not s.extra or s.extra.get("expert_idx") != spec.expert_idx:
+                continue
+        if spec.shared_expert_idx is not None:
+            if not s.extra or s.extra.get("shared_expert_idx") != spec.shared_expert_idx:
+                continue
+        if spec.head_idx is not None:
+            if not s.extra or s.extra.get("head_idx") != spec.head_idx:
                 continue
         matches.append(s)
 

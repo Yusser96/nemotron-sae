@@ -68,6 +68,8 @@ def _start_engine(
 ) -> Any:
     """Start vLLM for ``cfg.model`` with ``sites`` hooked (see ``sae_install_hooks``)."""
     vllm_cfg, seq_len = cfg.extraction.vllm, cfg.data.seq_len
+    if vllm_cfg.tensor_parallel_size != 1 and any(kind == "attn_out_prelinear" for _, kind, _ in sites):
+        raise ValueError("attn_out_prelinear requires tensor_parallel_size=1; projection inputs are sharded across ranks")
     llm = engine_factory(
         model=normalize_hf_source(cfg.model.name),
         dtype=cfg.model.dtype,
