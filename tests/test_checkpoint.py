@@ -179,6 +179,42 @@ def test_local_directory_scan_is_not_recursive(tmp_path: Path):
     assert resolve_checkpoint(tmp_path).weights_path == top
 
 
+@pytest.mark.parametrize("filename", ["sae_weights.safetensors", "L2_resid_post/sae_weights.safetensors"])
+def test_local_directory_explicit_raw_export_is_usable_for_finetuning(tmp_path, filename):
+    weights = tmp_path / filename
+    weights.parent.mkdir(parents=True, exist_ok=True)
+    _write_weights(weights)
+
+    resolved = resolve_checkpoint(tmp_path, filename=filename)
+    assert resolved.weights_path == weights
+    assert resolved.step == -1
+    assert resolved.trainer_state_path is None
+    load_sae_weights(build_sae("jumprelu", d_in=3, d_sae=5), resolved.weights_path)
+    with pytest.raises(ValueError, match="Resume requires"):
+        resolve_checkpoint(tmp_path, filename=filename, require_trainer_state=True)
+
+
+def test_local_directory_explicit_nested_checkpoint_requires_its_companion(tmp_path):
+    filename = "L2_resid_post/sae_step_0000012.safetensors"
+    weights = tmp_path / filename
+    weights.parent.mkdir()
+    _write_weights(weights)
+    with pytest.raises(FileNotFoundError, match="Resume requires companion state"):
+        resolve_checkpoint(tmp_path, filename=filename, require_trainer_state=True)
+
+    torch.save({"global_step": 12}, companion_state_path(weights))
+    resolved = resolve_checkpoint(tmp_path, filename=filename, require_trainer_state=True)
+    assert resolved.weights_path == weights
+    assert resolved.step == 12
+    assert resolved.trainer_state_path == companion_state_path(weights)
+
+
+@pytest.mark.parametrize("filename", ["../outside.safetensors", "/outside.safetensors"])
+def test_local_directory_explicit_filename_must_stay_relative(tmp_path, filename):
+    with pytest.raises(ValueError, match="relative to the source directory"):
+        resolve_checkpoint(tmp_path, filename=filename)
+
+
 def test_hf_explicit_filename_resume_requires_companion_state(monkeypatch, tmp_path: Path):
     def fake_list_repo_files(*, repo_id, revision):
         return ["sae_step_0000012.safetensors"]

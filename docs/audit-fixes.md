@@ -56,3 +56,18 @@ requests explicitly rather than producing misleading results.
 - All 54 source Python modules parsed successfully.
 - Git whitespace checks passed.
 - The user's pre-existing `.gitignore` edit was left unstaged and unchanged.
+
+## Follow-up: explicit local warm-start paths (12 October 2026)
+
+The final all-site job compared and revalidated its existing baselines but
+failed before training because the local directory resolver could not find
+an explicit nested raw export such as `L2_resid_post/sae_weights.safetensors`.
+Directory resolution also parsed arbitrary export names as numbered steps.
+Explicit relative filenames now use the direct-file resolver, which supports
+raw exports and applies the existing companion-state requirements for resume.
+Automatic latest-checkpoint discovery remains limited to the source directory.
+
+Checkpoint, streaming CLI and streaming trainer regressions: **54 passed**,
+including nested warm starts, arbitrary raw-export names, resume companions
+and explicit relative-path validation. The failed job and its 14 preserved
+baseline exports remain unchanged. GPU execution of this follow-up is pending.

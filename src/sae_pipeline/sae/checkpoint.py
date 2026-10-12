@@ -214,8 +214,24 @@ def resolve_checkpoint(
                 source=str(local),
             )
 
-        # Top-level only, matching prune_checkpoints(); a checkpoint directory
-        # is never expected to contain nested subdirectories of checkpoints.
+        if filename is not None:
+            relative = PurePosixPath(filename)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("checkpoint_filename must be relative to the source directory")
+            # Explicit site templates may name nested raw exports. Reuse the
+            # direct-file rules, including arbitrary names and resume guards.
+            resolved = resolve_checkpoint(
+                local / relative, require_trainer_state=require_trainer_state
+            )
+            return ResolvedCheckpoint(
+                weights_path=resolved.weights_path,
+                trainer_state_path=resolved.trainer_state_path,
+                step=resolved.step,
+                source=str(local),
+            )
+
+        # Automatic latest-checkpoint discovery remains top-level only,
+        # matching prune_checkpoints() and avoiding unrelated nested runs.
         relative_names = [path.name for path in local.iterdir() if path.is_file()]
         selected, state_name = _select_name(
             relative_names, filename, require_trainer_state
