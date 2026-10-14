@@ -114,6 +114,80 @@ def test_training_loss_skips_inverse_simpson_without_a_floor():
     assert terms.d_is == terms.u_is == 0.0
 
 
+def test_auxk_trains_the_dead_latents_on_the_main_residual():
+    torch.manual_seed(0)
+    sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+    x = torch.randn(32, 6)
+    cfg = SAECfg(auxk_scale=0.5, auxk_k=2, auxk_dead_tokens=100)
+    coefficients = LossCoefficients(lr=1.0, lambda_l0=0.5, lambda_is=0.0)
+    tokens_since_fired = torch.zeros(12, dtype=torch.int64)
+    tokens_since_fired[8:] = 100
+
+    terms = training_loss(sae, x, cfg, coefficients, target_l0=4.0, tokens_since_fired=tokens_since_fired)
+    terms.auxk_penalty.backward()
+
+    assert float(terms.auxk_penalty.detach()) > 0.0
+    torch.testing.assert_close(terms.total, terms.reconstruction + 0.5 * terms.l0_penalty + terms.auxk_penalty)
+    assert sae.W_enc.grad[:, 8:].abs().sum() > 0
+    assert sae.W_enc.grad[:, :8].abs().sum() == 0
+    assert sae.log_theta.grad is None
+
+
+@pytest.mark.parametrize("input_scale", [1.0, 30.0])
+def test_auxk_is_the_same_fraction_of_the_reconstruction_loss_under_either_reduction(input_scale):
+    ratios = []
+    for reconstruction_loss in ("vector_sum", "coordinate_mean"):
+        torch.manual_seed(0)
+        sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+        x = torch.randn(32, 6) * input_scale
+        cfg = SAECfg(reconstruction_loss=reconstruction_loss, auxk_scale=1 / 32, auxk_k=2, auxk_dead_tokens=100)
+        dead_counts = torch.zeros(12, dtype=torch.int64)
+        dead_counts[8:] = 100
+
+        terms = training_loss(
+            sae, x, cfg, LossCoefficients(lr=1.0, lambda_l0=0.0, lambda_is=0.0), target_l0=4.0,
+            tokens_since_fired=dead_counts,
+        )
+        ratios.append(float(terms.auxk_penalty.detach() / terms.reconstruction.detach()))
+
+    assert ratios[0] == pytest.approx(ratios[1])
+    assert ratios[0] > 0.0
+
+
+def test_auxk_counts_tokens_since_each_latent_fired():
+    torch.manual_seed(0)
+    sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+    x = torch.randn(32, 6)
+    cfg = SAECfg(auxk_scale=0.5, auxk_dead_tokens=100)
+    tokens_since_fired = torch.full((12,), 10, dtype=torch.int64)
+    sae.log_theta.data[8:] = 10.0
+
+    terms = training_loss(
+        sae, x, cfg, LossCoefficients(lr=1.0, lambda_l0=0.0, lambda_is=0.0), target_l0=4.0,
+        tokens_since_fired=tokens_since_fired,
+    )
+
+    fired = (terms.f > 0).any(dim=0)
+    assert fired.any() and not fired.all()
+    assert (tokens_since_fired[fired] == 0).all()
+    assert (tokens_since_fired[~fired] == 42).all()
+
+
+def test_auxk_is_zero_while_no_latent_is_dead_or_without_a_counter():
+    torch.manual_seed(0)
+    sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+    x = torch.randn(32, 6)
+    cfg = SAECfg(auxk_scale=0.5, auxk_dead_tokens=100)
+    coefficients = LossCoefficients(lr=1.0, lambda_l0=0.0, lambda_is=0.0)
+
+    alive = training_loss(
+        sae, x, cfg, coefficients, target_l0=4.0, tokens_since_fired=torch.zeros(12, dtype=torch.int64)
+    )
+    without_counter = training_loss(sae, x, cfg, coefficients, target_l0=4.0)
+
+    assert float(alive.auxk_penalty.detach()) == float(without_counter.auxk_penalty.detach()) == 0.0
+
+
 def test_cosine_decay_needs_a_run_length():
     cfg = SAECfg(lr=1.0, warmup_steps=0, lr_schedule="cosine_decay")
 
