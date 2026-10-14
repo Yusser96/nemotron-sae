@@ -87,6 +87,8 @@ class StreamingSite:
     feature_frequency: torch.Tensor
     # Firing rates over the Inverse-Simpson window (see objective.training_loss).
     inverse_simpson_usage: torch.Tensor
+    # Tokens since each latent last fired, which defines AuxK's dead latents.
+    tokens_since_fired: torch.Tensor
     log_f: IO[str]
     validation_f: IO[str]
     early_stop: ObjectiveEarlyStop = field(default_factory=ObjectiveEarlyStop)
@@ -173,6 +175,7 @@ def init_streaming_site(
     ever_fired = torch.zeros(d_sae, dtype=torch.bool, device=device)
     feature_frequency = torch.zeros(d_sae, dtype=torch.float32, device=device)
     inverse_simpson_usage = torch.zeros(d_sae, dtype=torch.float32, device=device)
+    tokens_since_fired = torch.zeros(d_sae, dtype=torch.int64, device=device)
     early_stop = ObjectiveEarlyStop()
     step, stopped, next_milestone_index = 0, False, 0
     feature_resets, last_reset_step = 0, None
@@ -194,6 +197,9 @@ def init_streaming_site(
         # Checkpoints from before the window existed: it refills over its length.
         if "inverse_simpson_usage" in state:
             inverse_simpson_usage.copy_(state["inverse_simpson_usage"].to(device=device, dtype=torch.float32))
+        # Checkpoints from before AuxK: every latent counts as just fired.
+        if "tokens_since_fired" in state:
+            tokens_since_fired.copy_(state["tokens_since_fired"].to(device=device, dtype=torch.int64))
         early_stop.load_state_dict(state["early_stop"])
         if validation_changed:
             early_stop.best, early_stop.checks_since_improve = None, 0
@@ -255,6 +261,7 @@ def init_streaming_site(
         ever_fired=ever_fired,
         feature_frequency=feature_frequency,
         inverse_simpson_usage=inverse_simpson_usage,
+        tokens_since_fired=tokens_since_fired,
         log_f=open(out_dir / "train_log.jsonl", mode),
         validation_f=open(out_dir / "validation_log.jsonl", mode),
         early_stop=early_stop,
@@ -278,7 +285,15 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
         x = x * site.normalization_scale
 
     target_l0 = _scheduled_l0_target(step, site.l0_target, cfg) + reset_l0_allowance(cfg, step, site.last_reset_step)
-    terms = training_loss(site.sae, x, cfg, coefficients, target_l0=target_l0, usage=site.inverse_simpson_usage)
+    terms = training_loss(
+        site.sae,
+        x,
+        cfg,
+        coefficients,
+        target_l0=target_l0,
+        usage=site.inverse_simpson_usage,
+        tokens_since_fired=site.tokens_since_fired,
+    )
     if not torch.isfinite(terms.total):
         raise FloatingPointError(f"{site.slug}: non-finite training loss at step {step}")
     record_firing(
@@ -414,6 +429,7 @@ def write_checkpoint(site: StreamingSite, step: int, *, snapshot_id: str | None 
             "ever_fired": site.ever_fired.detach().cpu(),
             "feature_frequency": site.feature_frequency.detach().cpu(),
             "inverse_simpson_usage": site.inverse_simpson_usage.detach().cpu(),
+            "tokens_since_fired": site.tokens_since_fired.detach().cpu(),
             "early_stop": site.early_stop.state_dict(),
             "stopped": site.stopped,
             "next_milestone_index": site.next_milestone_index,

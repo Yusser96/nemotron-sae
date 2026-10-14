@@ -402,6 +402,23 @@ def test_a_resumed_site_continues_the_inverse_simpson_window(tmp_path):
     torch.testing.assert_close(resumed.inverse_simpson_usage, site.inverse_simpson_usage)
 
 
+def test_a_resumed_site_continues_the_auxk_dead_counter(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), auxk_scale=1 / 32, auxk_k=2, auxk_dead_tokens=BATCH)
+    site = _site(tmp_path, cfg)
+    with torch.no_grad():
+        site.sae.log_theta[:4] = 10.0  # four features that never fire
+    for step in (1, 2):
+        streaming_step(site, torch.randn(BATCH, D_IN, generator=torch.Generator().manual_seed(step)), step)
+    write_checkpoint(site, 2)
+    site.close()
+
+    resumed = _site(tmp_path, cfg, resume_checkpoint=resolve_checkpoint(site.out_dir, require_trainer_state=True))
+    resumed.close()
+
+    assert bool((site.tokens_since_fired[:4] == 2 * BATCH).all())
+    torch.testing.assert_close(resumed.tokens_since_fired, site.tokens_since_fired)
+
+
 def test_streaming_resets_resample_unused_features_and_survive_a_resume(tmp_path):
     cfg = _sae_cfg(
         _warm_start(tmp_path / "warm.safetensors"),
