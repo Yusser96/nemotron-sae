@@ -148,6 +148,14 @@ class SAECfg(BaseModel):
     # Batches the firing rates behind the floor are averaged over (an EMA);
     # 1: each batch on its own. Longer windows apply to streaming training.
     inverse_simpson_window_steps: int = 1
+    # AuxK (Gao et al. 2024, §2.4): dead latents reconstruct the main residual.
+    # auxk_scale is α, applied to the variance-normalised auxiliary error times
+    # the current reconstruction loss, so it is the same fraction of that loss
+    # under either reconstruction_loss; 0 disables it. Streaming training only.
+    auxk_scale: float = 0.0
+    auxk_k: int = 512
+    # Tokens without a main-path firing before a latent counts as dead.
+    auxk_dead_tokens: int = 10_000_000
     n_batches_in_buffer: int = 8
     ckpt_every: int = 5_000
     # Fixed-probe diagnostics cadence. Validation-based stopping has its own
@@ -198,7 +206,7 @@ class SAECfg(BaseModel):
             raise ValueError("scale values must be positive")
         return v
 
-    @field_validator("feature_frequency_penalty_multiplier", "inverse_simpson_max_scale")
+    @field_validator("feature_frequency_penalty_multiplier", "inverse_simpson_max_scale", "auxk_scale")
     @classmethod
     def _frequency_multiplier_nonnegative(cls, v: float) -> float:
         if v < 0:
@@ -242,6 +250,8 @@ class SAECfg(BaseModel):
         "residual_reset_max_features",
         "residual_reset_pool_size",
         "inverse_simpson_window_steps",
+        "auxk_k",
+        "auxk_dead_tokens",
     )
     @classmethod
     def _intervention_counts_positive(cls, v: int) -> int:
