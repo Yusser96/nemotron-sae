@@ -592,13 +592,15 @@ def resample_underused_features(
     active_subspace: torch.Tensor | None = None,
     calibration_x: torch.Tensor | None = None,
     calibration_residuals: torch.Tensor | None = None,
+    tokens_since_fired: torch.Tensor | None = None,
 ) -> int:
     """Replace low-frequency features with high-error residual directions.
 
     This is intentionally a bounded intervention: it touches only a fixed
     number of columns and resets the matching Adam moments.  The starting SAE
     is a dictionary initialisation, so preserving the identities of replaced
-    latents is not a requirement.
+    latents is not a requirement; their firing history, including
+    ``tokens_since_fired`` when AuxK tracks it, starts over.
     """
 
     candidates = torch.nonzero(
@@ -674,6 +676,8 @@ def resample_underused_features(
     _zero_optimizer_slices(optim, sae.log_theta, candidates, column_parameter=False)
     ever_fired[candidates] = False
     feature_frequency[candidates] = 0
+    if tokens_since_fired is not None:
+        tokens_since_fired[candidates] = 0
     return n_reset
 
 

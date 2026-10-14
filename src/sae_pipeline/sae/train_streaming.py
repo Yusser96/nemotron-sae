@@ -308,7 +308,14 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
         # train_sae): new directions and thresholds come from this batch.
         assert isinstance(site.sae, JumpReLUSAE)
         site.feature_resets += resample_underused_features(
-            site.sae, site.optim, x, terms.x_hat.detach(), site.feature_frequency, site.ever_fired, cfg
+            site.sae,
+            site.optim,
+            x,
+            terms.x_hat.detach(),
+            site.feature_frequency,
+            site.ever_fired,
+            cfg,
+            tokens_since_fired=site.tokens_since_fired,
         )
         site.last_reset_step = step
     if step % cfg.log_every:

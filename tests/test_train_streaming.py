@@ -427,6 +427,7 @@ def test_streaming_resets_resample_unused_features_and_survive_a_resume(tmp_path
         residual_reset_every_steps=10,
         residual_reset_max_features=4,
         residual_reset_pool_size=BATCH,
+        auxk_scale=1 / 32,
     )
     site = _site(tmp_path, cfg)
     with torch.no_grad():
@@ -441,6 +442,7 @@ def test_streaming_resets_resample_unused_features_and_survive_a_resume(tmp_path
 
     assert site.feature_resets == 4
     assert bool((site.sae.log_theta[:4] < 10.0).all())  # recalibrated to fire again
+    assert bool((site.tokens_since_fired[:4] == 0).all())  # a replaced latent starts a new history
     assert (resumed.feature_resets, resumed.last_reset_step) == (4, 2)
 
 
