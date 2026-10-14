@@ -333,6 +333,7 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
         ever_fired=site.ever_fired,
         feature_frequency=site.feature_frequency,
         feature_resets=site.feature_resets,
+        dead=site.tokens_since_fired >= cfg.auxk_dead_tokens if cfg.auxk_scale > 0 else None,
     )
 
 

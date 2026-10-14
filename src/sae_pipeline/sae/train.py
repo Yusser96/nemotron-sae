@@ -115,6 +115,13 @@ class StepLog:
     d_is: float = 0.0
     u_is: float = 0.0
     inverse_simpson_penalty: float = 0.0
+    auxk_penalty: float = 0.0
+    # The weighted AuxK term over the reconstruction loss, and why the dead
+    # latents (no main-path firing for auxk_dead_tokens) are inactive on this batch.
+    auxk_ratio: float = 0.0
+    dead_latents: int = 0
+    dead_below_threshold: int = 0
+    dead_nonpositive: int = 0
 
 
 @torch.no_grad()
@@ -147,9 +154,19 @@ def step_log(
     feature_frequency: torch.Tensor,
     feature_use_penalty: float = 0.0,
     feature_resets: int = 0,
+    dead: torch.Tensor | None = None,
 ) -> StepLog:
-    """Assemble one training-log row; costs a few device syncs, so call it sparingly."""
+    """Assemble one training-log row; costs a few device syncs, so call it sparingly.
+
+    ``dead`` marks AuxK's dead latents. Each is either positive on some token of
+    ``x`` yet under its JumpReLU threshold, or not positive on any: AuxK can only
+    help the first kind, since the ReLU leaves the second without gradient.
+    """
     concentration = firing_concentration(feature_frequency)
+    dead_latents = dead_below_threshold = 0
+    if dead is not None:
+        dead_latents = int(dead.sum())
+        dead_below_threshold = int((dead & (sae.gate_input(x) > 0).any(dim=0)).sum())  # type: ignore[attr-defined]
     return StepLog(
         step=step,
         loss=float(loss.detach()),
@@ -172,6 +189,11 @@ def step_log(
         d_is=terms.d_is,
         u_is=terms.u_is,
         inverse_simpson_penalty=float(terms.inverse_simpson_penalty.detach()),
+        auxk_penalty=float(terms.auxk_penalty.detach()),
+        auxk_ratio=float(terms.auxk_penalty.detach() / terms.reconstruction.detach()),
+        dead_latents=dead_latents,
+        dead_below_threshold=dead_below_threshold,
+        dead_nonpositive=dead_latents - dead_below_threshold,
     )
 
 

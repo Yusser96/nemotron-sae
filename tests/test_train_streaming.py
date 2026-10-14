@@ -446,6 +446,22 @@ def test_streaming_resets_resample_unused_features_and_survive_a_resume(tmp_path
     assert (resumed.feature_resets, resumed.last_reset_step) == (4, 2)
 
 
+def test_the_log_row_tells_why_auxk_dead_latents_are_inactive(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), auxk_scale=1 / 32, auxk_k=2, auxk_dead_tokens=BATCH)
+    site = _site(tmp_path, cfg)
+    with torch.no_grad():
+        site.sae.log_theta[:4] = 10.0  # four features that never fire
+    rows = [
+        streaming_step(site, torch.randn(BATCH, D_IN, generator=torch.Generator().manual_seed(step)), step)
+        for step in (1, 2)
+    ]
+    site.close()
+
+    assert rows[1].dead_latents >= 4
+    assert rows[1].dead_below_threshold + rows[1].dead_nonpositive == rows[1].dead_latents
+    assert rows[1].auxk_ratio > 0
+
+
 def test_stops_early_once_the_validation_objective_plateaus(tmp_path):
     cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), lr=0.0, eval_interval_steps=1)
     site = _site(tmp_path, cfg, _validation_dirs(tmp_path))
