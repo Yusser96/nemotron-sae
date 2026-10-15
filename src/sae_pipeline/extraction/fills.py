@@ -72,8 +72,10 @@ class FillQueue:
 
     def position(self, name: str) -> int:
         """The fill a consumer is reading; 0 before it has started."""
-        path = _consumer_path(self.root, name)
-        return int(path.read_text(encoding="utf-8")) if path.exists() else 0
+        try:
+            return int(_consumer_path(self.root, name).read_text(encoding="utf-8"))
+        except FileNotFoundError:  # not started, or being replaced by the consumer's next position
+            return 0
 
     def _active(self) -> list[str]:
         return [name for name in self.consumers if not _consumer_path(self.root, f"{name}.done").exists()]

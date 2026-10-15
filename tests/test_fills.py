@@ -34,6 +34,17 @@ def test_only_published_fills_count(tmp_path):
     assert published_fills(tmp_path / "missing") == []
 
 
+def test_a_position_file_replaced_while_it_is_read_counts_as_unstarted(tmp_path, monkeypatch):
+    mark_position(tmp_path, "a", 7)
+
+    def vanished(path, *args, **kwargs):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(Path, "read_text", vanished)
+
+    assert FillQueue(tmp_path, ["a"]).position("a") == 0
+
+
 def test_fills_go_once_every_consumer_moved_past_them_but_the_newest_stays(tmp_path):
     for index in range(4):
         _publish(tmp_path, index)
