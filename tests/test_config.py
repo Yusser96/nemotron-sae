@@ -126,6 +126,13 @@ def test_checkpoint_defaults_and_retention_validation():
         SAECfg(keep_last_checkpoints=-1)
 
 
+def test_matmul_precision_defaults_to_full_float32():
+    assert SAECfg().matmul_precision == "highest"
+    assert SAECfg(matmul_precision="high").matmul_precision == "high"
+    with pytest.raises(ValueError, match="matmul_precision"):
+        SAECfg(matmul_precision="medium")
+
+
 def test_combined_feature_use_strategy_is_valid():
     cfg = SAECfg(feature_use_strategy="frequency_residual_reset")
     assert cfg.feature_use_strategy == "frequency_residual_reset"

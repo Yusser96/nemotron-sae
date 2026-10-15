@@ -156,6 +156,9 @@ class SAECfg(BaseModel):
     auxk_k: int = 512
     # Tokens without a main-path firing before a latent counts as dead.
     auxk_dead_tokens: int = 10_000_000
+    # "high" runs float32 matmuls on TF32 tensor cores (10-bit mantissa), several
+    # times faster on Ampere and later; "highest" keeps full float32.
+    matmul_precision: Literal["highest", "high"] = "highest"
     n_batches_in_buffer: int = 8
     ckpt_every: int = 5_000
     # Fixed-probe diagnostics cadence. Validation-based stopping has its own

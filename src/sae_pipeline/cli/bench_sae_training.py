@@ -196,6 +196,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = PipelineCfg.from_yaml(args.config)
+    torch.set_float32_matmul_precision(cfg.sae.matmul_precision)
     if args.cache is None:
         reports = [
             bench_sae_training(

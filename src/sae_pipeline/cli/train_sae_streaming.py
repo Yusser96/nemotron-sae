@@ -101,6 +101,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     cfg = PipelineCfg.from_yaml(args.config)
+    torch.set_float32_matmul_precision(cfg.sae.matmul_precision)
     if not cfg.stream.enabled:
         raise SystemExit("stream.enabled must be true to use train_sae_streaming")
     if os.environ.get("TRAIN_STREAM_STOP_AFTER_SECONDS"):
