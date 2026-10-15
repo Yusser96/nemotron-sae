@@ -177,9 +177,15 @@ def test_options_that_need_a_cache_or_a_horizon_are_rejected(tmp_path, overrides
         _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), **overrides))
 
 
-def test_validation_objective_is_the_training_loss_on_held_out_batches(tmp_path):
+def test_validation_objective_is_the_reconstruction_loss_without_penalties(tmp_path):
     validation_dirs = _validation_dirs(tmp_path)
-    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), l0_warmup_steps=50)
+    cfg = _sae_cfg(
+        _warm_start(tmp_path / "warm.safetensors"),
+        l0_warmup_steps=50,
+        inverse_simpson_floor=0.5,
+        inverse_simpson_max_scale=1.0,
+        auxk_scale=1.0,
+    )
     site = _site(tmp_path, cfg, validation_dirs, probe_tokens=2 * BATCH)
 
     evaluation = evaluate_site(site, "cpu")
@@ -189,7 +195,7 @@ def test_validation_objective_is_the_training_loss_on_held_out_batches(tmp_path)
     for language, path in validation_dirs.items():
         rows = torch.cat(list(ShardReader(path).iter_shards())).to(torch.float32)
         expected = sum(
-            float(training_loss(site.sae, batch, cfg, full_strength, target_l0=L0_TARGET).total.detach())
+            float(training_loss(site.sae, batch, cfg, full_strength, target_l0=L0_TARGET).reconstruction.detach())
             for batch in rows.split(BATCH)
         ) / 2
         assert evaluation.objective[language] == pytest.approx(expected, rel=1e-5)

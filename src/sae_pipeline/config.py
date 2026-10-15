@@ -351,7 +351,8 @@ class EarlyStoppingCfg(BaseModel):
 
     ``mode="stability"`` stops once validation FVU/L0 stop moving between
     consecutive evaluations. ``mode="objective"`` is for long open-ended runs:
-    it tracks the training loss evaluated on held-out data, reduces the
+    it tracks the reconstruction loss on held-out data (without the L0,
+    Inverse-Simpson or AuxK penalties), reduces the
     learning rate when that plateaus, and stops after sustained
     non-improvement.
     """

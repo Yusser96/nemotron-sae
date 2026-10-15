@@ -46,7 +46,6 @@ from sae_pipeline.sae.normalization import load_whole_vector_normalization, norm
 from sae_pipeline.sae.objective import (
     LossCoefficients,
     coefficients_at,
-    inverse_simpson_warmup_steps,
     optimizer_step,
     training_loss,
 )
@@ -337,9 +336,9 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     )
 
 
-def _post_warmup_coefficients(cfg: SAECfg) -> LossCoefficients:
-    """Full-strength penalty weights, so held-out objectives compare across warmup."""
-    return coefficients_at(cfg, max(cfg.warmup_steps, cfg.l0_warmup_steps, inverse_simpson_warmup_steps(cfg)))
+# Held-out scoring uses the reconstruction term alone, so it compares across
+# penalty warmup and across runs that weight the penalties differently.
+_NO_PENALTIES = LossCoefficients(lr=0.0, lambda_l0=0.0, lambda_is=0.0)
 
 
 @dataclass
@@ -353,13 +352,14 @@ class SiteEvaluation:
 
 
 def evaluate_site(site: StreamingSite, device: str) -> SiteEvaluation:
-    """Reconstruction metrics and the held-out training objective, per language.
+    """Reconstruction metrics and the held-out reconstruction loss, per language.
 
     One pass over each validation set: every batch is scored with the
-    training loss (at post-warmup coefficients) on its way to the metrics.
+    training loss's reconstruction term on its way to the metrics. The L0,
+    Inverse-Simpson and AuxK penalties steer training but do not decide when
+    it stops.
     """
 
-    coefficients = _post_warmup_coefficients(site.cfg)
     metrics: dict[str, ReconMetrics] = {}
     objective: dict[str, float] = {}
     for language, reader in site.validation_readers.items():
@@ -369,8 +369,8 @@ def evaluate_site(site: StreamingSite, device: str) -> SiteEvaluation:
             nonlocal weighted_total, n_rows
             for x in batches:
                 with torch.no_grad():
-                    terms = training_loss(site.sae, x, site.cfg, coefficients, target_l0=float(site.l0_target))
-                weighted_total += float(terms.total) * x.shape[0]
+                    terms = training_loss(site.sae, x, site.cfg, _NO_PENALTIES, target_l0=float(site.l0_target))
+                weighted_total += float(terms.reconstruction) * x.shape[0]
                 n_rows += x.shape[0]
                 yield x
 
