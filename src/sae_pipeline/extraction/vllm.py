@@ -29,7 +29,8 @@ from sae_pipeline.extraction.remote import CALL_SIZE_KEY, open_store, take_token
 from sae_pipeline.extraction.sink import ActivationSink
 from sae_pipeline.extraction.vllm_worker import assemble_rows, hookable
 from sae_pipeline.hooks.components import ComponentSpec
-from sae_pipeline.sae.checkpoint import load_trainer_state, normalize_hf_source
+from sae_pipeline.sae.checkpoint import (load_trainer_state)
+from sae_pipeline.sae.checkpoint_source import (normalize_hf_source)
 
 if TYPE_CHECKING:
     from sae_pipeline.sae.train_streaming import TokenStream

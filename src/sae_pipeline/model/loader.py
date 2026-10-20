@@ -15,7 +15,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 
 from sae_pipeline.config import ModelCfg
-from sae_pipeline.sae.checkpoint import normalize_hf_source
+from sae_pipeline.sae.checkpoint_source import (normalize_hf_source)
 
 log = logging.getLogger(__name__)
 

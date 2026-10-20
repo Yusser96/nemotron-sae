@@ -6,7 +6,7 @@ import math
 import os
 from dataclasses import asdict
 
-from sae_pipeline.sae.checkpoint import write_raw_export
+from sae_pipeline.sae.checkpoint import write_raw_export, write_text_atomic
 from sae_pipeline.sae.early_stopping import ObjectiveEarlyStop
 
 
@@ -50,9 +50,7 @@ def observe_selection(site, evaluation, rule):
                                'trajectory': 'fixed_lr_observation_not_adaptive_lr_replay'}
     state['latest'] = {**payload, 'virtual_lr_scale': observer.lr_scale,
                        'virtual_lr_reduced': reduced, 'virtual_stop': stopped}
-    temporary = directory / 'selection.json.tmp'
-    temporary.write_text(json.dumps(state, indent=2))
-    os.replace(temporary, directory / 'selection.json')
+    write_text_atomic(directory / 'selection.json', json.dumps(state, indent=2))
 
 
 def prune_selection(site):

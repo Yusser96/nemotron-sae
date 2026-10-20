@@ -12,7 +12,7 @@ from safetensors.torch import save_file
 from sae_pipeline.config import EarlyStoppingCfg, StreamCfg
 from sae_pipeline.extraction.base import ActivationBatch
 from sae_pipeline.extraction.fills import FillQueue, FillStream, fill_dir, write_header
-from sae_pipeline.sae.checkpoint import resolve_checkpoint
+from sae_pipeline.sae.checkpoint_source import resolve_checkpoint
 from sae_pipeline.sae.train_streaming import (
     evaluate_and_update,
     init_streaming_site,

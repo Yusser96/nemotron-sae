@@ -8,7 +8,7 @@ import torch
 
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import EarlyStoppingCfg, StreamCfg
-from sae_pipeline.sae.checkpoint import resolve_checkpoint
+from sae_pipeline.sae.checkpoint_source import resolve_checkpoint
 from sae_pipeline.sae.objective import coefficients_at, training_loss
 from sae_pipeline.sae.train_streaming import evaluate_and_update, evaluate_site, record_baseline, streaming_step, write_checkpoint
 from tests.sae.streaming_fakes import (

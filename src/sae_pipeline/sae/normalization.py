@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import hashlib
 import math
-import os
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -16,6 +14,7 @@ from safetensors import safe_open
 
 from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cache.reader import ShardReader
+from sae_pipeline.sae.checkpoint import write_text_atomic
 
 
 @dataclass(frozen=True)
@@ -55,21 +54,13 @@ def _read(path: Path) -> WholeVectorNormalization:
         return WholeVectorNormalization(**json.load(handle))
 
 
-def _write_atomic(path: Path, value: WholeVectorNormalization) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w") as handle:
-            json.dump(asdict(value), handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+def _write_json(path: Path, value: WholeVectorNormalization | ActivationCenter) -> None:
+    write_text_atomic(path, json.dumps(asdict(value), indent=2, sort_keys=True) + "\n")
 
 
 def write_normalization(path: str | Path, value: WholeVectorNormalization) -> None:
     """Persist an already verified normalisation statistic without recomputing it."""
-    _write_atomic(Path(path), value)
+    _write_json(Path(path), value)
 
 
 def _cpu_shard_squared_norm(
@@ -139,15 +130,7 @@ def resolve_activation_center(
         input_scale=input_scale,
         cache_signature=signature,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("w") as handle:
-            json.dump(asdict(result), handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    _write_json(path, result)
     return result
 
 
@@ -246,5 +229,5 @@ def resolve_whole_vector_normalization(
         d_activation=manifest.d_activation,
         cache_signature=cache_signature(manifest),
     )
-    _write_atomic(path, result)
+    _write_json(path, result)
     return result

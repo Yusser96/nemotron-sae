@@ -5,16 +5,9 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from sae_pipeline.sae import checkpoint as checkpoint_module
-from sae_pipeline.sae.checkpoint import (
-    capture_random_state,
-    companion_state_path,
-    load_sae_weights,
-    load_trainer_state,
-    normalize_hf_repo_id,
-    resolve_checkpoint,
-    save_checkpoint_pair,
-    write_raw_export,
-)
+from sae_pipeline.sae import checkpoint_source as source_module
+from sae_pipeline.sae.checkpoint import (capture_random_state, load_sae_weights, load_trainer_state, save_checkpoint_pair, write_raw_export, write_text_atomic)
+from sae_pipeline.sae.checkpoint_source import (companion_state_path, normalize_hf_repo_id, resolve_checkpoint)
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 
@@ -53,8 +46,8 @@ def test_hf_repository_url_is_normalized_and_downloaded(monkeypatch, tmp_path: P
         calls.append(("download", repo_id, filename, revision))
         return str(downloaded)
 
-    monkeypatch.setattr(checkpoint_module, "list_repo_files", fake_list_repo_files)
-    monkeypatch.setattr(checkpoint_module, "hf_hub_download", fake_download)
+    monkeypatch.setattr(source_module, "list_repo_files", fake_list_repo_files)
+    monkeypatch.setattr(source_module, "hf_hub_download", fake_download)
     resolved = resolve_checkpoint(
         "https://huggingface.co/example/sae-repo/", revision="v2"
     )
@@ -117,7 +110,7 @@ def test_hf_explicit_arbitrary_filename_is_allowed_for_finetuning(monkeypatch, t
         calls.append((repo_id, filename, revision))
         return str(downloaded)
 
-    monkeypatch.setattr(checkpoint_module, "hf_hub_download", fake_download)
+    monkeypatch.setattr(source_module, "hf_hub_download", fake_download)
     resolved = resolve_checkpoint(
         "example/sae-repo",
         filename="L2_resid_post/w16384_l0_10/sae_weights.safetensors",
@@ -222,8 +215,8 @@ def test_hf_explicit_filename_resume_requires_companion_state(monkeypatch, tmp_p
     def fake_download(*, repo_id, filename, revision):
         raise AssertionError("should not download when companion state is missing")
 
-    monkeypatch.setattr(checkpoint_module, "list_repo_files", fake_list_repo_files)
-    monkeypatch.setattr(checkpoint_module, "hf_hub_download", fake_download)
+    monkeypatch.setattr(source_module, "list_repo_files", fake_list_repo_files)
+    monkeypatch.setattr(source_module, "hf_hub_download", fake_download)
 
     with pytest.raises(FileNotFoundError, match="Resume requires companion state"):
         resolve_checkpoint(
@@ -275,6 +268,23 @@ def test_write_raw_export_is_atomic_and_matches_the_export_state(tmp_path: Path)
     assert written.keys() == expected.keys()
     for key, value in expected.items():
         torch.testing.assert_close(written[key], value)
+
+
+def test_write_text_atomic_replaces_contents_and_keeps_old_file_on_failure(monkeypatch, tmp_path: Path):
+    path = tmp_path / "metrics.json"
+    write_text_atomic(path, '{"step": 1}')
+    write_text_atomic(path, '{"step": 2}')
+    assert path.read_text(encoding="utf-8") == '{"step": 2}'
+
+    def fail_replace(src, dst):
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(checkpoint_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="interrupted"):
+        write_text_atomic(path, '{"step": 3}')
+    monkeypatch.undo()
+    assert path.read_text(encoding="utf-8") == '{"step": 2}'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json"]
 
 
 @pytest.mark.parametrize("module", [b"numpy.core.multiarray", b"numpy._core.multiarray"])

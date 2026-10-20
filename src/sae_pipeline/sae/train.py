@@ -28,15 +28,8 @@ from sae_pipeline.eval.plots import (
     plot_validation_curves,
     refresh_plot,
 )
-from sae_pipeline.sae.checkpoint import (
-    capture_random_state,
-    load_sae_weights,
-    load_trainer_state,
-    resolve_checkpoint,
-    restore_random_state,
-    save_checkpoint_pair,
-    write_raw_export,
-)
+from sae_pipeline.sae.checkpoint import (capture_random_state, load_sae_weights, load_trainer_state, restore_random_state, save_checkpoint_pair, write_raw_export)
+from sae_pipeline.sae.checkpoint_source import (resolve_checkpoint)
 from sae_pipeline.sae.early_stopping import StabilityEarlyStop
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.normalization import (

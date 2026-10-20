@@ -8,7 +8,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg
-from sae_pipeline.sae.checkpoint import resolve_checkpoint
+from sae_pipeline.sae.checkpoint_source import resolve_checkpoint
 from sae_pipeline.sae.train import train_sae
 from sae_pipeline.sae.train_streaming import streaming_step, write_checkpoint
 from tests.sae.streaming_fakes import (

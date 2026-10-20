@@ -34,16 +34,8 @@ from sae_pipeline.eval.plots import (
     refresh_plot,
 )
 from sae_pipeline.extraction.base import ActivationExtractor
-from sae_pipeline.sae.checkpoint import (
-    capture_random_state,
-    load_sae_weights,
-    load_trainer_state,
-    prune_checkpoints,
-    resolve_checkpoint,
-    restore_random_state,
-    save_checkpoint_pair,
-    write_raw_export,
-)
+from sae_pipeline.sae.checkpoint import (capture_random_state, load_sae_weights, load_trainer_state, prune_checkpoints, restore_random_state, save_checkpoint_pair, write_raw_export, write_text_atomic)
+from sae_pipeline.sae.checkpoint_source import (resolve_checkpoint)
 from sae_pipeline.sae.early_stopping import ObjectiveEarlyStop
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.normalization import (
@@ -255,9 +247,7 @@ def init_streaming_site(
                         break
                     if int(row["step"]) <= step:
                         rows.append(line)
-                temporary = path.with_suffix(".tmp")
-                temporary.write_text("".join(line + "\n" for line in rows))
-                os.replace(temporary, path)
+                write_text_atomic(path, "".join(line + "\n" for line in rows))
     mode = "a" if resume_checkpoint is not None else "w"
     return StreamingSite(
         slug=slug,
@@ -441,10 +431,7 @@ def _write_diagnostic(site: StreamingSite, evaluation: SiteEvaluation, phase: st
                     for language, metrics in evaluation.metrics.items()},
         **extra,
     }
-    path = site.out_dir / f"{phase}_metrics.json"
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(payload))
-    os.replace(temporary, path)
+    write_text_atomic(site.out_dir / f"{phase}_metrics.json", json.dumps(payload))
 
 
 def _plot_title(site: StreamingSite) -> str:

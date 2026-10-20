@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import math
 import torch
-from sae_pipeline.sae.checkpoint import load_sae_weights, resolve_checkpoint
+from sae_pipeline.sae.checkpoint import (load_sae_weights)
+from sae_pipeline.sae.checkpoint_source import (resolve_checkpoint)
 
 
 def parameter_digest(sae):

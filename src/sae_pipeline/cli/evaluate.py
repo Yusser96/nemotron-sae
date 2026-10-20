@@ -25,7 +25,8 @@ from sae_pipeline.cli._site import add_site_arguments, cli_site
 from sae_pipeline.eval.metrics import streaming_reconstruction_metrics
 from sae_pipeline.eval.output import evaluation_directory
 from sae_pipeline.eval.plots import plot_eval_summary, refresh_plot
-from sae_pipeline.sae.checkpoint import load_sae_weights, resolve_checkpoint
+from sae_pipeline.sae.checkpoint import (load_sae_weights)
+from sae_pipeline.sae.checkpoint_source import (resolve_checkpoint)
 from sae_pipeline.sae.normalization import normalization_path
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
