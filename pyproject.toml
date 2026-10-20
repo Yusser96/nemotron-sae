@@ -8,12 +8,47 @@ version = "0.1.0"
 description = "SAE / transcoder training pipeline for Nemotron 3 Nano (hybrid Mamba-2 + Attn + MoE)"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+dependencies = [
+    "torch>=2.5",
+    "transformers>=4.57.3,<5.0",
+    "huggingface-hub>=0.34.0,<1.0",
+    "safetensors>=0.4.5",
+    "accelerate>=1.0",
+    "einops>=0.8",
+    "datasets>=3.0",
+    "tokenizers>=0.20",
+    "pydantic>=2.7,<3",
+    "pyyaml>=6",
+    "tqdm>=4.66",
+    "numpy>=1.26,<3",
+    "typing_extensions>=4.10",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3",
+]
+gpu = [
+    "bitsandbytes>=0.44",
+]
+logging = [
+    "wandb>=0.18",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-xdist>=3",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "cuda: marks tests that require an NVIDIA GPU",
