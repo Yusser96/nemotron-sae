@@ -112,6 +112,7 @@ class SAECfg(BaseModel):
     initialization_mode: Literal["checkpoint", "random", "partial_reset"] = "checkpoint"
     initialization_reset_fraction: float = Field(default=0.5, gt=0.0, lt=1.0)
     initialization_reset_seed: int = 42
+    track_reconstruction_selection: bool = False
     checkpoint_format: CheckpointFormat = "native"
     lr_schedule: LRSchedule = "cosine_decay"
     gradient_clip_norm: float | None = None

@@ -101,6 +101,7 @@ class StreamingSite:
     # to (never instead of) every evaluation's absolute numbers.
     baseline: dict[str, dict[str, float]] | None = None
     resume_weights_name: str | None = None
+    selection_state: dict = field(default_factory=dict)
 
     @property
     def log_path(self) -> Path:
@@ -271,6 +272,7 @@ def init_streaming_site(
         next_milestone_index=next_milestone_index,
         feature_resets=feature_resets,
         last_reset_step=last_reset_step,
+        selection_state={} if resume_checkpoint is None else state.get("selection_state", {}),
         resume_weights_name=None if resume_checkpoint is None else resume_checkpoint.weights_path.name,
     )
 
@@ -402,6 +404,9 @@ def record_baseline(site: StreamingSite, device: str) -> None:
     path = site.out_dir / "baseline_metrics.json"
     if path.exists():
         site.baseline = json.loads(path.read_text())
+        if site.step == 0 and site.cfg.track_reconstruction_selection and not site.selection_state:
+            from sae_pipeline.sae.selection import observe_selection
+            observe_selection(site, evaluate_site(site, device), EarlyStoppingCfg(mode="objective", patience=10))
         return
     if site.step > 0:
         log.warning("%s: no baseline from the start of this run; deltas are not reported", site.slug)
@@ -413,6 +418,9 @@ def record_baseline(site: StreamingSite, device: str) -> None:
     }
     path.write_text(json.dumps(site.baseline))
     _write_diagnostic(site, evaluation, "initial")
+    if site.cfg.track_reconstruction_selection:
+        from sae_pipeline.sae.selection import observe_selection
+        observe_selection(site, evaluation, EarlyStoppingCfg(mode="objective", patience=10))
     log.info("%s: warm-start baseline %s", site.slug, site.baseline)
 
 
@@ -449,6 +457,7 @@ def write_checkpoint(site: StreamingSite, step: int, *, snapshot_id: str | None 
         model_state=site.sae.state_dict(),
         trainer_state={
             "version": 1,
+            "selection_state": site.selection_state,
             "global_step": step,
             "optimizer": site.optim.state_dict(),
             "random_state": capture_random_state(),
@@ -562,6 +571,9 @@ def evaluate_and_update(
     warnings = threshold_warnings(site, evaluation, step)
     if warnings:
         log.warning("%s finite diagnostic threshold warnings at step %d: %s", site.slug, step, ",".join(warnings))
+    if site.cfg.track_reconstruction_selection and divergence is None:
+        from sae_pipeline.sae.selection import observe_selection
+        observe_selection(site, evaluation, early_stopping)
     selection_minimum = max(
         site.cfg.warmup_steps, site.cfg.l0_warmup_steps,
         site.cfg.l0_target_warmup_steps,
@@ -616,7 +628,7 @@ def evaluate_and_update(
         title_prefix=_plot_title(site),
         description=f"{site.slug} validation plot at step {step}",
     )
-    if is_best:
+    if is_best and not site.cfg.track_reconstruction_selection:
         _write_best(site, step)
     if divergence is not None:
         return Stop(f"diverged: {divergence}", diverged=True)
@@ -659,6 +671,9 @@ def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = Tru
                 export_healthy = export_healthy and divergence is None
             _write_diagnostic(site, evaluation, "terminal", reason=reason,
                               diverged=divergence, healthy=export_healthy)
+            if site.cfg.track_reconstruction_selection and export_healthy:
+                from sae_pipeline.sae.selection import observe_selection
+                observe_selection(site, evaluation, early_stopping or EarlyStoppingCfg(mode="objective", patience=10))
         site.stopped = True
         if export_healthy:
             write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
@@ -752,6 +767,9 @@ def run_streaming_training(
         for slug, site in sites.items():
             prune_checkpoints(site.out_dir, keep_last=site.cfg.keep_last_checkpoints,
                               protected_weights=checkpoints[slug])
+            if site.cfg.track_reconstruction_selection:
+                from sae_pipeline.sae.selection import prune_selection
+                prune_selection(site)
 
     for site in sites.values():
         if not early_stopping.enabled:

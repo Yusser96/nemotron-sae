@@ -270,6 +270,26 @@ def test_resume_discards_legacy_best_without_post_warmup_provenance(tmp_path):
     resumed.close()
 
 
+def test_reconstruction_selection_exports_the_lowest_objective_instead_of_best(tmp_path, monkeypatch):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), track_reconstruction_selection=True,
+                   warmup_steps=0, l0_warmup_steps=0)
+    site = _site(tmp_path, cfg, _validation_dirs(tmp_path))
+    early_stopping = EarlyStoppingCfg(divergence_l0_factor=None, divergence_objective_factor=None)
+    for step, objective in enumerate((2.0, 1.0, 3.0)):
+        _evaluations(monkeypatch, objective=objective)
+        site.step = step
+        if step == 0:
+            record_baseline(site, "cpu")
+        else:
+            evaluate_and_update(site, step, "cpu", early_stopping)
+    site.close()
+
+    state = json.loads((site.out_dir / "selection" / "selection.json").read_text())
+    assert state["best"]["step"] == 1 and state["latest"]["step"] == 2
+    assert (site.out_dir / state["best"]["export"]).exists()
+    assert not (site.out_dir / "best").exists()
+
+
 def test_a_resumed_site_without_a_stored_baseline_reports_no_deltas(tmp_path):
     site = _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors")), _validation_dirs(tmp_path))
     site.step = 10
