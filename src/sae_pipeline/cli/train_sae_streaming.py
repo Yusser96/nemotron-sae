@@ -34,6 +34,7 @@ import torch
 
 from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for, validation_manifest_path_for
 from sae_pipeline.cli._process import run_then_hard_exit
+from sae_pipeline.cli._site import sae_variant
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
@@ -125,9 +126,7 @@ def main() -> None:
             mark_done(args.fills, args.consumer)
         return
 
-    arch = cfg.sae.arch if isinstance(cfg.sae.arch, str) else cfg.sae.arch[0]
-    d_sae = cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0]
-    l0_target = cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0]
+    arch, d_sae, l0_target = sae_variant(cfg)
 
     resume_checkpoints = committed_stream_checkpoints(
         out_root, {target.slug: out_root / target.slug for target in targets}, args.consumer

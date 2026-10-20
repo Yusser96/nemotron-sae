@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 
 from sae_pipeline.config import PipelineCfg
-from sae_pipeline.cli._site import add_site_arguments, cli_site
+from sae_pipeline.cli._site import add_site_arguments, cli_site, sae_variant, variant_stem
 from sae_pipeline.eval.output import evaluation_directory
 from sae_pipeline.eval.plots import plot_eval_summary, plot_training_curves
 
@@ -50,11 +50,9 @@ def main() -> None:
 
     cfg = PipelineCfg.from_yaml(args.config)
     spec, _site = cli_site(cfg, args, p)
-    arch = args.arch or (cfg.sae.arch if isinstance(cfg.sae.arch, str) else cfg.sae.arch[0])
-    width = args.width or (cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0])
-    l0_target = args.l0 or (cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0])
+    arch, width, l0_target = sae_variant(cfg, args)
 
-    stem = f"{arch}_w{width}_l0_{l0_target}"
+    stem = variant_stem(arch, width, l0_target)
     ckpt_dir = Path(cfg.sae.ckpt_dir) / cfg.run_id / spec.slug / stem
     log_dir = evaluation_directory(cfg.log.log_dir, args.output_id or cfg.run_id,
                                    spec.slug, args.partition, args.language, args.output_tag)
