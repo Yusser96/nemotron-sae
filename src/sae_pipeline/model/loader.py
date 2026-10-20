@@ -8,6 +8,7 @@ ourselves; pip install supplies them at the system level.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import torch
@@ -84,11 +85,20 @@ def _resolve_quantization_kwargs(cfg: ModelCfg) -> dict[str, Any]:
     return {"torch_dtype": _DTYPE_MAP[cfg.dtype]}
 
 
+def _model_auth_kwargs(cfg: ModelCfg) -> dict[str, str]:
+    if cfg.token_env_var is None:
+        return {}
+    value = os.environ.get(cfg.token_env_var)
+    if not value:
+        raise ValueError(f'Model credential environment variable is missing: {cfg.token_env_var}')
+    return {'token': value}
+
+
 def load_tokenizer(cfg: ModelCfg):
     model_source = normalize_hf_source(cfg.name)
     log.info("Loading tokenizer for %s", model_source)
     tokenizer = AutoTokenizer.from_pretrained(
-        model_source, trust_remote_code=cfg.trust_remote_code
+        model_source, trust_remote_code=cfg.trust_remote_code, **_model_auth_kwargs(cfg)
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -108,6 +118,7 @@ def load_model_and_tokenizer(cfg: ModelCfg):
         device_map=cfg.device_map,
         trust_remote_code=cfg.trust_remote_code,
         **quant_kwargs,
+        **_model_auth_kwargs(cfg),
     )
     _normalise_model_runtime_config(model)
     model.eval()

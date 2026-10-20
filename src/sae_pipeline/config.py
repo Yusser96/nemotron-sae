@@ -34,6 +34,8 @@ SinkLifecycle = Literal["consume", "cache"]
 
 
 class ModelCfg(BaseModel):
+    # Name only: credentials are resolved at runtime and never serialized.
+    token_env_var: str | None = None
     name: str = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
     load_quant: Quant = "auto"
