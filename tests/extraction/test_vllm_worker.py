@@ -1,74 +1,13 @@
 """ActivationHookExtension on a fake model shaped like vLLM's NemotronH."""
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors.torch import load_file
-from torch import nn
 
-from sae_pipeline.extraction.vllm_worker import ActivationHookExtension, assemble_rows
-
-D = 4
-
-
-class FakeMambaMixer(nn.Linear):
-    pass
-
-
-class FakeMoE(nn.Linear):
-    pass
-
-
-class _DecoderLayer(nn.Module):
-    """vLLM-style layer: returns (mixer output, running residual).
-
-    Like vLLM's fused add-RMSNorm (here without the norm), it updates its
-    inputs in place: the residual absorbs the previous mixer output, which is
-    then overwritten.
-    """
-
-    def __init__(self, mixer: nn.Module) -> None:
-        super().__init__()
-        self.mixer = mixer
-
-    def forward(self, positions, hidden_states, residual):
-        if residual is None:
-            residual = hidden_states
-        else:
-            residual.add_(hidden_states)
-            hidden_states.copy_(residual)
-        return self.mixer(residual), residual
-
-
-class _Backbone(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.embed = nn.Embedding(50, D)
-        self.layers = nn.ModuleList([_DecoderLayer(FakeMambaMixer(D, D)), _DecoderLayer(FakeMoE(D, D))])
-
-    def forward(self, input_ids, positions):
-        hidden, residual = self.embed(input_ids), None
-        for layer in self.layers:
-            hidden, residual = layer(positions, hidden, residual)
-        return hidden + residual
-
-
-class _CausalLM(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = _Backbone()
-
-    def forward(self, input_ids, positions, intermediate_tensors=None):
-        return self.model(input_ids, positions)
-
-
-class _Worker(ActivationHookExtension):
-    def __init__(self) -> None:
-        torch.manual_seed(0)
-        self.model_runner = SimpleNamespace(model=_CausalLM())
-
+from sae_pipeline.extraction.vllm_worker import assemble_rows
+from tests.extraction.fakes import D, Worker
 
 SITES = [
     ("L0_resid_pre", "resid_pre", 0),
@@ -80,7 +19,7 @@ SITES = [
 
 
 def test_one_file_per_forward_with_inputs_and_every_site(tmp_path):
-    worker = _Worker()
+    worker = Worker()
     worker.sae_install_hooks(SITES, str(tmp_path))
     model = worker.model_runner.model
     input_ids = torch.tensor([3, 4, 5, 6, 7, 8])
@@ -109,7 +48,7 @@ def test_one_file_per_forward_with_inputs_and_every_site(tmp_path):
 
 
 def test_flush_returns_only_new_files_and_removed_hooks_stop_capturing(tmp_path):
-    worker = _Worker()
+    worker = Worker()
     worker.sae_install_hooks(SITES[:1], str(tmp_path))
     model = worker.model_runner.model
     with torch.no_grad():
@@ -145,16 +84,16 @@ def test_assemble_rows_reports_prompts_that_were_never_captured():
 
 def test_a_site_on_the_wrong_kind_of_block_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="FakeMambaMixer, not a MoE block"):
-        _Worker().sae_install_hooks([("L0_moe_out", "moe_out", 0)], str(tmp_path))
+        Worker().sae_install_hooks([("L0_moe_out", "moe_out", 0)], str(tmp_path))
     with pytest.raises(ValueError, match="no hook point"):
-        _Worker().sae_install_hooks([("L0_expert", "expert", 0)], str(tmp_path))
+        Worker().sae_install_hooks([("L0_expert", "expert", 0)], str(tmp_path))
 
 
 def test_a_probe_reports_the_kept_bytes_per_row_and_the_peak_above_them(monkeypatch):
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 100)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (5000, 9000))
-    worker = _Worker()
+    worker = Worker()
     worker.sae_install_hooks([("L0_resid_post", "resid_post", 0), ("L1_moe_out", "moe_out", 1)], None)
     worker.sae_start_probe()
     with torch.no_grad():
@@ -170,7 +109,7 @@ def test_a_probe_reports_the_kept_bytes_per_row_and_the_peak_above_them(monkeypa
 
 
 def test_a_saved_fill_holds_each_sites_rows_in_submission_order(tmp_path):
-    worker = _Worker()
+    worker = Worker()
     sites = [("L0_resid_post", "resid_post", 0), ("L0_mamba_out", "mamba_out", 0), ("L1_moe_out", "moe_out", 1)]
     worker.sae_install_hooks(sites, None)
     with torch.no_grad():
@@ -193,7 +132,7 @@ def test_a_saved_fill_holds_each_sites_rows_in_submission_order(tmp_path):
 
 
 def test_a_fill_is_published_when_the_next_one_is_saved(tmp_path):
-    worker = _Worker()
+    worker = Worker()
     worker.sae_install_hooks([("L0_resid_post", "resid_post", 0)], None)
     saved, expected = [], []
     for index, prompt in enumerate([[1, 2], [4, 5]]):

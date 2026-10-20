@@ -5,7 +5,7 @@ from torch import nn
 from sae_pipeline.hooks.components import ComponentSpec, resolve
 from sae_pipeline.hooks.extractor import capture, capture_many
 from sae_pipeline.model.topology import HookSite, enumerate_hooks
-from tests.extraction.test_vllm_worker import _Worker
+from tests.extraction.fakes import Worker
 
 
 class FakeAttention(nn.Module):
@@ -21,7 +21,7 @@ class FakeAttention(nn.Module):
 
 @pytest.mark.parametrize("length", [8, 128, 2048])
 def test_hf_and_worker_capture_the_same_bf16_projection_input(length):
-    worker = _Worker()
+    worker = Worker()
     model = worker.model_runner.model.to(torch.bfloat16)
     model.model.layers[0].mixer = FakeAttention().to(torch.bfloat16)
     path = "model.layers.0.mixer"

@@ -18,8 +18,7 @@ from sae_pipeline.extraction.remote import (
     take_tokens,
 )
 from sae_pipeline.extraction.vllm import serve_activations
-from tests.extraction.test_vllm import SPECS, _cfg, _FakeEngine, _reference
-from tests.extraction.test_vllm_worker import D, _Worker
+from tests.extraction.fakes import D, SPECS, FakeEngine, Worker, reference, vllm_cfg
 
 
 def _free_port() -> int:
@@ -62,17 +61,17 @@ def test_token_batches_go_out_and_each_calls_rows_come_back_in_site_order():
 
 def test_the_trainer_receives_every_sites_rows_from_the_producer(tmp_path):
     port = _free_port()
-    engines: list[_FakeEngine] = []
+    engines: list[FakeEngine] = []
     served: list[int] = []
 
     def engine(**kwargs):
-        engines.append(_FakeEngine(**kwargs))
+        engines.append(FakeEngine(**kwargs))
         return engines[-1]
 
     producer = threading.Thread(
         target=lambda: served.append(
             serve_activations(
-                _cfg(tmp_path),
+                vllm_cfg(tmp_path),
                 SPECS,
                 host="127.0.0.1",
                 port=port,
@@ -95,7 +94,7 @@ def test_the_trainer_receives_every_sites_rows_from_the_producer(tmp_path):
     assert engines[0].kwargs["max_num_batched_tokens"] == 2 * 4
     assert engines[0].calls == [2, 1, 2]
     for token_ids, batch in zip(batches, received):
-        expected = _reference(engines[0].model_runner.model, token_ids)
+        expected = reference(engines[0].model_runner.model, token_ids)
         for slug in SPECS:
             torch.testing.assert_close(batch.activations[slug], expected[slug])
 
@@ -108,7 +107,7 @@ def test_an_auto_sized_producer_probes_one_step_then_answers_in_calls_that_fit(t
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 0)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 0)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (2 * per_sequence + 1, 10**9))
-    cfg = _cfg(tmp_path).with_overrides(
+    cfg = vllm_cfg(tmp_path).with_overrides(
         **{
             "extraction.vllm.sequences_per_call": "auto",
             "extraction.vllm.max_sequences_per_step": 4,
@@ -116,10 +115,10 @@ def test_an_auto_sized_producer_probes_one_step_then_answers_in_calls_that_fit(t
         }
     )
     port = _free_port()
-    engines: list[_FakeEngine] = []
+    engines: list[FakeEngine] = []
 
     def engine(**kwargs):
-        engines.append(_FakeEngine(**kwargs))
+        engines.append(FakeEngine(**kwargs))
         return engines[-1]
 
     producer = threading.Thread(
@@ -139,7 +138,7 @@ def test_an_auto_sized_producer_probes_one_step_then_answers_in_calls_that_fit(t
 
     assert engines[0].kwargs["max_num_batched_tokens"] == 4 * 4
     assert engines[0].calls == [4, 2, 1]
-    expected = _reference(engines[0].model_runner.model, token_ids)
+    expected = reference(engines[0].model_runner.model, token_ids)
     for slug in SPECS:
         torch.testing.assert_close(batch.activations[slug], expected[slug])
 
@@ -153,7 +152,7 @@ def _trainer_store(port: int, slugs: list[str], widths: list[int]):
 def test_a_producer_hooking_other_sites_refuses_to_join():
     port = _free_port()
     _store = _trainer_store(port, ["L0_resid_post"], [D])
-    worker = _Worker()
+    worker = Worker()
     worker.sae_install_hooks([("L0_mamba_out", "mamba_out", 0)], None)
 
     with pytest.raises(ValueError, match="expects sites"):
@@ -165,7 +164,7 @@ def test_rows_of_another_width_are_not_sent():
     store = _trainer_store(port, ["L0_resid_post"], [D + 1])
     trainer_side = threading.Thread(target=lambda: peer_group(store, TRAINER_RANK, torch.device("cpu")))
     trainer_side.start()
-    worker = _Worker()
+    worker = Worker()
     worker.sae_install_hooks([("L0_resid_post", "resid_post", 0)], None)
     worker.sae_join("127.0.0.1", port)
     trainer_side.join(timeout=60)
