@@ -274,6 +274,11 @@ def streaming_reconstruction_metrics(
     # sums over the same token set, so n_total cancels -- do not renormalise
     # the numerator and denominator by different divisors here).
     fvu = err_sum / max(float(variance_sum.item()), 1.0e-12)
+    l0_all = torch.cat(l0_parts)
+    l0_p10, l0_p50, l0_p90, l0_p99 = [
+        float(v.item())
+        for v in torch.quantile(l0_all.float(), torch.tensor([0.10, 0.50, 0.90, 0.99]))
+    ]
     metrics = ReconMetrics(
         l0=l0_sum / n_float,
         fvu=fvu,
@@ -299,10 +304,10 @@ def streaming_reconstruction_metrics(
         q99=q99,
         support_n_tokens=support_seen,
         explained_variance=1.0 - max(0.0, err_sum - float(residual_sum.square().sum()) / n_float) / max(float(variance_sum), 1e-12),
-        l0_p10=float(torch.quantile(torch.cat(l0_parts).float(), 0.10)),
-        l0_p50=float(torch.quantile(torch.cat(l0_parts).float(), 0.50)),
-        l0_p90=float(torch.quantile(torch.cat(l0_parts).float(), 0.90)),
-        l0_p99=float(torch.quantile(torch.cat(l0_parts).float(), 0.99)),
+        l0_p10=l0_p10,
+        l0_p50=l0_p50,
+        l0_p90=l0_p90,
+        l0_p99=l0_p99,
         rare_nonzero_lt_1e5=int(((firing_frequency > 0) & (firing_frequency < 1e-5)).sum()),
         rare_nonzero_lt_1e4=int(((firing_frequency > 0) & (firing_frequency < 1e-4)).sum()),
     )
@@ -310,11 +315,11 @@ def streaming_reconstruction_metrics(
         return metrics
     try:
         arr_firing = firing_frequency.detach().cpu().float().numpy()
-        arr_l0 = torch.cat(l0_parts).numpy() if l0_parts else np.zeros((0,), dtype=np.int32)
+        arr_l0 = l0_all.numpy()
         arr_err = torch.cat(err_parts).numpy() if err_parts else np.zeros((0,), dtype=np.float32)
     except RuntimeError:
         arr_firing = np.array(firing_frequency.detach().cpu().float().tolist(), dtype=np.float32)
-        arr_l0 = np.array(torch.cat(l0_parts).tolist(), dtype=np.int32) if l0_parts else np.zeros((0,), dtype=np.int32)
+        arr_l0 = np.array(l0_all.tolist(), dtype=np.int32)
         arr_err = np.array(torch.cat(err_parts).tolist(), dtype=np.float32) if err_parts else np.zeros((0,), dtype=np.float32)
     arrays = ReconArrays(
         firing_frequency=arr_firing,
