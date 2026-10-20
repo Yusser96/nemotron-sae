@@ -12,7 +12,7 @@ import os
 from typing import Any
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerFast
 
 from sae_pipeline.config import ModelCfg
 from sae_pipeline.sae.checkpoint import normalize_hf_source
@@ -97,9 +97,16 @@ def _model_auth_kwargs(cfg: ModelCfg) -> dict[str, str]:
 def load_tokenizer(cfg: ModelCfg):
     model_source = normalize_hf_source(cfg.name)
     log.info("Loading tokenizer for %s", model_source)
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_source, trust_remote_code=cfg.trust_remote_code, **_model_auth_kwargs(cfg)
-    )
+    kwargs = dict(trust_remote_code=cfg.trust_remote_code, **_model_auth_kwargs(cfg))
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_source, **kwargs)
+    except ValueError as exc:
+        # Transformers 5 renamed the generic Rust tokenizer backend. A complete
+        # tokenizer.json remains loadable by the corresponding v4 base class.
+        if str(exc) != "Tokenizer class TokenizersBackend does not exist or is not currently imported.":
+            raise
+        log.warning("Loading Transformers 5 TokenizersBackend with the compatible fast tokenizer")
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(model_source, **kwargs)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     return tokenizer
