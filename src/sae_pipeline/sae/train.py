@@ -9,9 +9,8 @@ import random
 import shutil
 import time
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable
 
 import numpy as np
 import torch
@@ -20,11 +19,13 @@ from sae_pipeline.cache.reader import ActivationBuffer, ShardReader
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg
 from sae_pipeline.eval.metrics import (
     ReconMetrics,
-    dead_pct_from_fired,
-    firing_concentration,
     streaming_reconstruction_metrics,
 )
-from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves, refresh_plot
+from sae_pipeline.eval.plots import (
+    plot_training_curves,
+    plot_validation_curves,
+    refresh_plot,
+)
 from sae_pipeline.sae.checkpoint import (
     capture_random_state,
     load_sae_weights,
@@ -34,6 +35,7 @@ from sae_pipeline.sae.checkpoint import (
     save_checkpoint_pair,
     write_raw_export,
 )
+from sae_pipeline.sae.early_stopping import StabilityEarlyStop
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.normalization import (
     centering_path,
@@ -43,13 +45,21 @@ from sae_pipeline.sae.normalization import (
     write_normalization,
 )
 from sae_pipeline.sae.objective import (
-    GradientStats,
-    LossTerms,
     coefficients_at,
     inverse_simpson_warmup_steps,
     optimizer_step,
+    scheduled_l0_target,
     training_loss,
 )
+from sae_pipeline.sae.resets import (
+    active_subspace,
+    load_reset_calibration,
+    resample_underused_features,
+    reset_l0_allowance,
+    residual_reset_due,
+)
+from sae_pipeline.sae.step_log import record_firing, step_log
+from sae_pipeline.sae.validation import prepare_validation_probes, validation_batches
 
 log = logging.getLogger(__name__)
 
@@ -73,615 +83,15 @@ def build_sae_and_optimizer(
     return sae, optim
 
 
-@dataclass
-class StepLog:
-    step: int
-    loss: float
-    mse: float
-    l0_penalty: float
-    hard_l0: float
-    lr: float
-    lambda_l0: float
-    dead_pct: float
-    ste_window_pct: float
-    theta_grad_norm: float
-    encoder_grad_norm: float
-    reconstruction_loss: float
-    feature_use_penalty: float
-    active_features: int
-    top1_activation_mass_pct: float
-    max_firing_frequency: float
-    feature_resets: int
-    target_l0: float
-    d_is: float = 0.0
-    u_is: float = 0.0
-    inverse_simpson_penalty: float = 0.0
-    auxk_penalty: float = 0.0
-    # The weighted AuxK term over the reconstruction loss, and why the dead
-    # latents (no main-path firing for auxk_dead_tokens) are inactive on this batch.
-    auxk_ratio: float = 0.0
-    dead_latents: int = 0
-    dead_below_threshold: int = 0
-    dead_nonpositive: int = 0
 
 
-@torch.no_grad()
-def record_firing(
-    f: torch.Tensor,
-    *,
-    feature_frequency: torch.Tensor,
-    ever_fired: torch.Tensor,
-    ema_decay: float,
-) -> None:
-    """Fold one batch of latent activations into the firing statistics."""
-    fired = f.detach() > 0
-    feature_frequency.mul_(ema_decay).add_(fired.float().mean(dim=0), alpha=1.0 - ema_decay)
-    ever_fired |= fired.any(dim=0)
-
-
-@torch.no_grad()
-def step_log(
-    sae: JumpReLUSAE,
-    x: torch.Tensor,
-    *,
-    step: int,
-    loss: torch.Tensor,
-    terms: LossTerms,
-    gradient_stats: GradientStats,
-    lr: float,
-    lambda_l0: float,
-    target_l0: float,
-    ever_fired: torch.Tensor,
-    feature_frequency: torch.Tensor,
-    feature_use_penalty: float = 0.0,
-    feature_resets: int = 0,
-    dead: torch.Tensor | None = None,
-) -> StepLog:
-    """Assemble one training-log row; costs a few device syncs, so call it sparingly.
-
-    ``dead`` marks AuxK's dead latents. Each is either positive on some token of
-    ``x`` yet under its JumpReLU threshold, or not positive on any: AuxK can only
-    help the first kind, since the ReLU leaves the second without gradient.
-    """
-    concentration = firing_concentration(feature_frequency)
-    dead_latents = dead_below_threshold = 0
-    if dead is not None:
-        dead_latents = int(dead.sum())
-        dead_below_threshold = int((dead & (sae.gate_input(x) > 0).any(dim=0)).sum())
-    return StepLog(
-        step=step,
-        loss=float(loss.detach()),
-        mse=float(terms.mse.detach()),
-        l0_penalty=float(terms.l0_penalty.detach()),
-        hard_l0=sae.hard_l0(x).item(),
-        lr=lr,
-        lambda_l0=lambda_l0,
-        dead_pct=dead_pct_from_fired(ever_fired),
-        ste_window_pct=gradient_stats.ste_window_pct,
-        theta_grad_norm=gradient_stats.theta_grad_norm,
-        encoder_grad_norm=gradient_stats.encoder_grad_norm,
-        reconstruction_loss=float(terms.reconstruction.detach()),
-        feature_use_penalty=feature_use_penalty,
-        active_features=concentration.active_features,
-        top1_activation_mass_pct=concentration.top1_activation_mass_pct,
-        max_firing_frequency=concentration.max_firing_frequency,
-        feature_resets=feature_resets,
-        target_l0=target_l0,
-        d_is=terms.d_is,
-        u_is=terms.u_is,
-        inverse_simpson_penalty=float(terms.inverse_simpson_penalty.detach()),
-        auxk_penalty=float(terms.auxk_penalty.detach()),
-        auxk_ratio=float(terms.auxk_penalty.detach() / terms.reconstruction.detach()),
-        dead_latents=dead_latents,
-        dead_below_threshold=dead_below_threshold,
-        dead_nonpositive=dead_latents - dead_below_threshold,
-    )
-
-
-@dataclass
-class _ValidationEarlyStop:
-    previous: dict[str, ReconMetrics] | None = None
-    stable_intervals: int = 0
-
-    def state_dict(self) -> dict[str, object]:
-        return {
-            "previous": (
-                None
-                if self.previous is None
-                else {language: asdict(metrics) for language, metrics in self.previous.items()}
-            ),
-            "stable_intervals": self.stable_intervals,
-        }
-
-    def load_state_dict(self, state: dict[str, object]) -> None:
-        previous = state.get("previous")
-        self.previous = (
-            None
-            if previous is None
-            else {
-                str(language): ReconMetrics(**metrics)
-                for language, metrics in dict(previous).items()
-            }
-        )
-        self.stable_intervals = int(state.get("stable_intervals", 0))
-        if self.stable_intervals < 0:
-            raise ValueError("Validation early-stopping state has a negative interval count")
-
-    def update(
-        self,
-        current: dict[str, ReconMetrics],
-        *,
-        target_l0: float,
-        cfg: EarlyStoppingCfg,
-        eligible: bool = True,
-    ) -> tuple[bool, bool]:
-        """Return (metrics_stable, target_l0_reached) for this evaluation."""
-        l0_ok = all(
-            abs(metrics.l0 - target_l0)
-            <= cfg.l0_relative_tolerance * max(abs(target_l0), 1.0)
-            for metrics in current.values()
-        )
-        if not eligible:
-            self.previous = current
-            self.stable_intervals = 0
-            return False, l0_ok
-        if self.previous is None or set(self.previous) != set(current):
-            stable = False
-        else:
-            previous_l0_ok = all(
-                abs(metrics.l0 - target_l0)
-                <= cfg.l0_relative_tolerance * max(abs(target_l0), 1.0)
-                for metrics in self.previous.values()
-            )
-            stable = l0_ok and previous_l0_ok and all(
-                abs(current[language].fvu - self.previous[language].fvu)
-                <= min(
-                    cfg.ev_absolute_tolerance,
-                    cfg.fvu_relative_tolerance
-                    * max(abs(self.previous[language].fvu), 1.0e-12),
-                )
-                for language in current
-            )
-        self.stable_intervals = self.stable_intervals + 1 if stable else 0
-        self.previous = current
-        return stable, l0_ok
-
-
-@dataclass
-class ObjectiveEarlyStop:
-    """Plateau-driven LR reduction and stopping on a held-out objective.
-
-    The objective (lower is better) is the training loss evaluated on
-    validation data. An evaluation is a new best when it is lower than the
-    best so far by more than ``improvement_rel_tol``. Once ``eligible`` (e.g.
-    after warmup), every non-improving evaluation counts towards a plateau:
-    every ``lr_plateau_patience`` of them scale the learning rate by
-    ``lr_reduce_factor`` (floored at ``min_lr_scale``), and ``patience`` of
-    them stop the run.
-    """
-
-    best: float | None = None
-    checks_since_improve: int = 0
-    lr_scale: float = 1.0
-
-    def state_dict(self) -> dict[str, object]:
-        return {
-            "best": self.best,
-            "checks_since_improve": self.checks_since_improve,
-            "lr_scale": self.lr_scale,
-        }
-
-    def load_state_dict(self, state: dict[str, object]) -> None:
-        self.best = None if state.get("best") is None else float(state["best"])  # type: ignore[arg-type]
-        self.checks_since_improve = int(state.get("checks_since_improve", 0))  # type: ignore[arg-type]
-        self.lr_scale = float(state.get("lr_scale", 1.0))  # type: ignore[arg-type]
-        if self.checks_since_improve < 0:
-            raise ValueError("Objective early-stopping state has a negative check count")
-        if not 0.0 < self.lr_scale <= 1.0:
-            raise ValueError("Objective early-stopping lr_scale must be in (0, 1]")
-
-    def update(
-        self, objective: float, cfg: EarlyStoppingCfg, *, eligible: bool = True
-    ) -> tuple[bool, bool, bool]:
-        """Return ``(is_best, lr_reduced, should_stop)`` for this evaluation."""
-        if not math.isfinite(objective):
-            raise FloatingPointError(f"Non-finite validation objective: {objective}")
-        if self.best is None or objective < self.best * (1.0 - cfg.improvement_rel_tol):
-            self.best = objective
-            self.checks_since_improve = 0
-            return True, False, False
-        if not eligible:
-            return False, False, False
-        self.checks_since_improve += 1
-        lr_reduced = False
-        if (
-            self.checks_since_improve < cfg.patience
-            and self.checks_since_improve % cfg.lr_plateau_patience == 0
-            and self.lr_scale > cfg.min_lr_scale
-        ):
-            self.lr_scale = max(cfg.min_lr_scale, self.lr_scale * cfg.lr_reduce_factor)
-            lr_reduced = True
-        return False, lr_reduced, self.checks_since_improve >= cfg.patience
-
-
-def _validation_batches(
-    reader: ShardReader,
-    *,
-    n_tokens: int,
-    batch_size: int,
-    input_scale: float,
-    input_center: torch.Tensor | None,
-    device: str,
-) -> Iterable[torch.Tensor]:
-    """Yield the same bounded validation prefix deterministically each time."""
-    if n_tokens <= 0 or n_tokens > reader.manifest.total_tokens:
-        raise ValueError(
-            f"Requested {n_tokens} validation vectors from a cache containing "
-            f"{reader.manifest.total_tokens}"
-        )
-    seen = 0
-    for shard in reader.iter_shards():
-        for start in range(0, shard.shape[0], batch_size):
-            if seen >= n_tokens:
-                return
-            take = min(batch_size, n_tokens - seen)
-            # CPU float32 caches may alias the mapped shard after .to().
-            batch = shard[start : start + take].to(device, dtype=torch.float32, copy=True)
-            if input_scale != 1.0:
-                batch.mul_(input_scale)
-            if input_center is not None:
-                batch.sub_(input_center)
-            seen += batch.shape[0]
-            yield batch
-    if seen != n_tokens:
-        raise ValueError(
-            f"Validation cache yielded {seen} vectors, expected {n_tokens}"
-        )
-
-
-def _probe_cache_signature(readers: dict[str, ShardReader]) -> dict[str, dict[str, object]]:
-    """Identify the ordered probe datasets used by validation trajectories."""
-    return {
-        language: {
-            "run_id": reader.manifest.run_id,
-            "model": reader.manifest.model,
-            "layer": reader.manifest.layer,
-            "component": reader.manifest.component,
-            "partition": reader.manifest.partition,
-            "language": reader.manifest.language,
-            "d_activation": reader.manifest.d_activation,
-            "total_tokens": reader.manifest.total_tokens,
-            "shard_paths": list(reader.manifest.shard_paths),
-            "dataset_fingerprint": reader.manifest.dataset_fingerprint,
-            "extraction_fingerprint": reader.manifest.extraction_fingerprint,
-        }
-        for language, reader in sorted(readers.items())
-    }
-
-
-def _seed_training(seed: int) -> None:
+def seed_training(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
-def _scheduled_l0_target(step: int, base_target: int, cfg: SAECfg) -> float:
-    if cfg.l0_target_start is None or cfg.l0_target_warmup_steps <= 0:
-        return float(base_target)
-    alpha = min(1.0, step / cfg.l0_target_warmup_steps)
-    return float(cfg.l0_target_start + alpha * (base_target - cfg.l0_target_start))
-
-
-def _prepare_validation_probes(
-    cache_dir: str | Path,
-    d_in: int,
-    *,
-    validation_cache_dirs: dict[str, str | Path],
-    validation_tokens: int | None,
-    validation_dead_tokens: int,
-    early_stopping: EarlyStoppingCfg,
-) -> tuple[dict[str, ShardReader], dict[str, dict[str, object]], ShardReader | None, int]:
-    """Validate config and open the validation + fixed train-probe readers.
-
-    Returns (validation_readers, validation_cache_signature, train_probe_reader,
-    probe_tokens).
-    """
-    if early_stopping.enabled:
-        if not validation_cache_dirs:
-            raise ValueError("Validation-based early stopping requires validation caches")
-        if validation_tokens is None or validation_tokens <= 0:
-            raise ValueError("Validation-based early stopping requires a positive token count")
-        if len(validation_cache_dirs) < 2:
-            raise ValueError("Bilingual early stopping requires two language validation caches")
-    validation_readers = {
-        language: ShardReader(path)
-        for language, path in sorted(validation_cache_dirs.items())
-    }
-    validation_cache_signature = _probe_cache_signature(validation_readers)
-    train_probe_reader: ShardReader | None = None
-    probe_tokens = validation_tokens if validation_tokens is not None else validation_dead_tokens
-    if validation_readers:
-        if probe_tokens <= 0:
-            raise ValueError("Validation trajectories require a positive fixed-probe token count")
-        undersized = {
-            language: reader.manifest.total_tokens
-            for language, reader in validation_readers.items()
-            if reader.manifest.total_tokens < probe_tokens
-        }
-        if undersized:
-            raise ValueError(
-                f"Validation caches are smaller than the {probe_tokens}-token probe: {undersized}"
-            )
-        train_probe_reader = ShardReader(cache_dir)
-        train_manifest = train_probe_reader.manifest
-        if not train_manifest.complete or train_manifest.partition != "train":
-            raise ValueError("Training probe must come from a complete training cache")
-        if train_manifest.d_activation != d_in:
-            raise ValueError("Training probe activation dimension differs from the SAE")
-        if train_probe_reader.manifest.total_tokens < probe_tokens:
-            raise ValueError(
-                f"Training cache has {train_probe_reader.manifest.total_tokens} tokens; "
-                f"the fixed probe requires {probe_tokens}"
-            )
-        for language, reader in validation_readers.items():
-            manifest = reader.manifest
-            if not manifest.complete or manifest.partition != "validation":
-                raise ValueError(f"{language} probe must come from a complete validation cache")
-            if manifest.language != language:
-                raise ValueError(
-                    f"Validation cache keyed as {language!r} declares language "
-                    f"{manifest.language!r}"
-                )
-            if (manifest.model, manifest.layer, manifest.component) != (
-                train_manifest.model,
-                train_manifest.layer,
-                train_manifest.component,
-            ):
-                raise ValueError(f"{language} validation cache belongs to a different site/model")
-            if manifest.d_activation != d_in:
-                raise ValueError(f"{language} validation activation dimension differs from the SAE")
-        log.info(
-            "Initialized fixed %d-token train probe from %s",
-            probe_tokens,
-            cache_dir,
-        )
-    return validation_readers, validation_cache_signature, train_probe_reader, probe_tokens
-
-
-def _active_subspace(
-    cache_dir: str | Path,
-    *,
-    sample_tokens: int,
-    rank: int,
-    input_scale: float,
-    centre: torch.Tensor,
-    device: str,
-    metadata_dir: Path,
-) -> torch.Tensor:
-    """Compute and cache leading centred activation directions."""
-    from safetensors import safe_open
-
-    path = metadata_dir / f"active_subspace_r{rank}.pt"
-    if path.exists():
-        basis = torch.load(path, map_location=device, weights_only=True)
-        if tuple(basis.shape) == (centre.numel(), rank):
-            return basis.to(device=device, dtype=torch.float32)
-
-    manifest = ActivationBuffer(cache_dir, batch_size=1, n_batches_in_buffer=1)._reader.manifest
-    chunks: list[torch.Tensor] = []
-    seen = 0
-    for name in manifest.shard_paths:
-        if seen >= sample_tokens:
-            break
-        with safe_open(str(Path(cache_dir) / name), framework="pt", device="cpu") as handle:
-            part = handle.get_tensor("x")[: sample_tokens - seen]
-        chunks.append(part.to(device=device, dtype=torch.float32) * input_scale - centre)
-        seen += part.shape[0]
-    if not chunks:
-        raise ValueError(f"Cannot compute an active subspace from {cache_dir}")
-    sample = torch.cat(chunks, dim=0)
-    _, _, basis = torch.pca_lowrank(sample, q=rank, center=False)
-    basis = basis[:, :rank].contiguous()
-    metadata_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(basis.detach().cpu(), path)
-    return basis
-
-
-@torch.no_grad()
-def _load_reset_calibration(
-    sae: JumpReLUSAE,
-    cache_dir: str | Path,
-    *,
-    sample_tokens: int,
-    pool_size: int,
-    normalization_scale: float,
-    activation_center: torch.Tensor | None,
-    batch_size: int,
-    device: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Load a bounded calibration sample and measure exact reset statistics.
-
-    The returned tensors are the normalised calibration activations, a pool of
-    highest-error residuals, and per-latent firing frequencies.  Resetting from
-    one optimisation batch was too noisy for L26; this pass makes threshold
-    calibration depend on the requested support window instead.
-    """
-    reader = ShardReader(cache_dir)
-    chunks: list[torch.Tensor] = []
-    seen = 0
-    for shard in reader.iter_shards():
-        if seen >= sample_tokens:
-            break
-        take = min(shard.shape[0], sample_tokens - seen)
-        chunks.append(shard[:take].contiguous())
-        seen += take
-    if seen == 0:
-        raise ValueError(f"Cannot calibrate a reset from empty cache {cache_dir}")
-    calibration_x = torch.cat(chunks, dim=0).to(device=device, dtype=torch.float32)
-    if normalization_scale != 1.0:
-        calibration_x.mul_(normalization_scale)
-    if activation_center is not None:
-        calibration_x.sub_(activation_center)
-
-    frequencies = torch.zeros(sae.d_sae, dtype=torch.float64, device=device)
-    best_errors = torch.empty(0, dtype=torch.float32, device=device)
-    best_residuals = torch.empty((0, sae.d_in), dtype=torch.float32, device=device)
-    for start in range(0, calibration_x.shape[0], batch_size):
-        x = calibration_x[start : start + batch_size]
-        x_hat, f = sae(x)
-        frequencies.add_((f > 0).sum(dim=0, dtype=torch.float64))
-        errors = (x - x_hat).square().sum(dim=-1)
-        k = min(pool_size, errors.numel())
-        values, indices = torch.topk(errors, k=k, largest=True, sorted=False)
-        residuals = (x - x_hat)[indices].detach()
-        if best_errors.numel():
-            values = torch.cat([best_errors, values])
-            residuals = torch.cat([best_residuals, residuals])
-        keep = min(pool_size, values.numel())
-        keep_values, keep_indices = torch.topk(values, k=keep, largest=True, sorted=False)
-        best_errors = keep_values
-        best_residuals = residuals[keep_indices]
-    return calibration_x, best_residuals, frequencies / calibration_x.shape[0]
-
-
-@torch.no_grad()
-def _zero_optimizer_slices(
-    optim: torch.optim.Optimizer,
-    parameter: torch.Tensor,
-    indices: torch.Tensor,
-    *,
-    column_parameter: bool,
-) -> None:
-    """Reset Adam moments for selected SAE columns after feature replacement."""
-
-    state = optim.state.get(parameter)
-    if not state:
-        return
-    for value in state.values():
-        if not isinstance(value, torch.Tensor) or value.shape != parameter.shape:
-            continue
-        if column_parameter:
-            value[:, indices] = 0
-        else:
-            value[indices] = 0
-
-
-def residual_reset_due(cfg: SAECfg, step: int) -> bool:
-    """Whether a ``residual_reset`` strategy resamples features after ``step``."""
-    return (
-        cfg.feature_use_strategy in {"residual_reset", "frequency_residual_reset"}
-        and step >= cfg.residual_reset_start_step
-        and (step - cfg.residual_reset_start_step) % cfg.residual_reset_every_steps == 0
-    )
-
-
-def reset_l0_allowance(cfg: SAECfg, step: int, reset_step: int | None) -> float:
-    """Extra target L0 for the features revived at ``reset_step``, annealed to zero."""
-    if reset_step is None or step - reset_step >= cfg.residual_reset_anneal_steps:
-        return 0.0
-    return cfg.residual_reset_delta_l0 * (1.0 - (step - reset_step) / max(1, cfg.residual_reset_anneal_steps))
-
-
-@torch.no_grad()
-def resample_underused_features(
-    sae: JumpReLUSAE,
-    optim: torch.optim.Optimizer,
-    x: torch.Tensor,
-    x_hat: torch.Tensor,
-    feature_frequency: torch.Tensor,
-    ever_fired: torch.Tensor,
-    cfg: SAECfg,
-    active_subspace: torch.Tensor | None = None,
-    calibration_x: torch.Tensor | None = None,
-    calibration_residuals: torch.Tensor | None = None,
-    tokens_since_fired: torch.Tensor | None = None,
-) -> int:
-    """Replace low-frequency features with high-error residual directions.
-
-    This is intentionally a bounded intervention: it touches only a fixed
-    number of columns and resets the matching Adam moments.  The starting SAE
-    is a dictionary initialisation, so preserving the identities of replaced
-    latents is not a requirement; their firing history, including
-    ``tokens_since_fired`` when AuxK tracks it, starts over.
-    """
-
-    candidates = torch.nonzero(
-        feature_frequency < cfg.residual_reset_frequency_threshold,
-        as_tuple=False,
-    ).flatten()
-    if candidates.numel() == 0:
-        return 0
-    available = (calibration_residuals.shape[0]
-                 if calibration_x is not None and calibration_residuals is not None
-                 else min(cfg.residual_reset_pool_size, x.shape[0]))
-    n_reset = min(cfg.residual_reset_max_features, int(candidates.numel()), available)
-    if n_reset == 0:
-        return 0
-    candidates = candidates[torch.randperm(candidates.numel(), device=x.device)[:n_reset]]
-
-    residual = x - x_hat
-    if calibration_x is not None and calibration_residuals is not None:
-        if calibration_residuals.shape[0] < n_reset:
-            raise ValueError("Reset residual pool is smaller than the requested reset")
-        directions = calibration_residuals[
-            torch.randperm(calibration_residuals.shape[0], device=x.device)[:n_reset]
-        ]
-    else:
-        errors = residual.square().sum(dim=-1)
-        pool_size = min(cfg.residual_reset_pool_size, x.shape[0])
-        probabilities = errors.clamp_min(torch.finfo(errors.dtype).eps)
-        probabilities = probabilities / probabilities.sum()
-        sample_indices = torch.multinomial(probabilities, pool_size, replacement=False)
-        directions = residual[sample_indices[:n_reset]]
-    norms = directions.norm(dim=-1, keepdim=True)
-    invalid = norms.squeeze(-1) <= 1.0e-8
-    if invalid.any():
-        directions[invalid] = torch.randn_like(directions[invalid])
-        norms = directions.norm(dim=-1, keepdim=True)
-    directions = directions / norms.clamp_min(1.0e-8)
-    if active_subspace is not None:
-        directions = directions @ active_subspace @ active_subspace.T
-        norms = directions.norm(dim=-1, keepdim=True)
-        invalid = norms.squeeze(-1) <= 1.0e-8
-        if invalid.any():
-            replacement = torch.randn(
-                int(invalid.sum().item()), active_subspace.shape[1], device=x.device
-            ) @ active_subspace.T
-            directions[invalid] = replacement
-            norms = directions.norm(dim=-1, keepdim=True)
-        directions = directions / norms.clamp_min(1.0e-8)
-
-    live = feature_frequency > 0
-    live_norms = sae.W_enc[:, live].norm(dim=0)
-    encoder_scale = (
-        0.2 * live_norms.median().item() if live_norms.numel() else 0.2
-    )
-    encoder_scale = max(encoder_scale, 1.0e-3)
-
-    sae.W_dec[:, candidates] = directions.T
-    sae.W_enc[:, candidates] = directions.T * encoder_scale
-    sae.b_enc[candidates] = 0
-
-    calibration = x if calibration_x is None else calibration_x
-    centred = calibration - sae.b_dec if sae.pre_encoder_bias else calibration
-    projection = torch.relu(centred @ sae.W_enc[:, candidates] + sae.b_enc[candidates])
-    target_frequency = (cfg.residual_reset_target_frequency
-                        if cfg.residual_reset_target_frequency is not None
-                        else min(1.0, cfg.residual_reset_delta_l0 / n_reset))
-    quantile = torch.quantile(projection, 1.0 - target_frequency, dim=0)
-    threshold = quantile.clamp_min(max(cfg.bandwidth, 1.0e-6))
-    sae.log_theta[candidates] = threshold.log()
-
-    _zero_optimizer_slices(optim, sae.W_dec, candidates, column_parameter=True)
-    _zero_optimizer_slices(optim, sae.W_enc, candidates, column_parameter=True)
-    _zero_optimizer_slices(optim, sae.b_enc, candidates, column_parameter=False)
-    _zero_optimizer_slices(optim, sae.log_theta, candidates, column_parameter=False)
-    ever_fired[candidates] = False
-    feature_frequency[candidates] = 0
-    if tokens_since_fired is not None:
-        tokens_since_fired[candidates] = 0
-    return n_reset
 
 
 def _restore_resume_state(
@@ -690,7 +100,7 @@ def _restore_resume_state(
     optim: torch.optim.Optimizer,
     ever_fired: torch.Tensor,
     feature_frequency: torch.Tensor,
-    early_stop_monitor: "_ValidationEarlyStop",
+    early_stop_monitor: "StabilityEarlyStop",
     buffer: ActivationBuffer,
     validation_readers: dict[str, ShardReader],
     validation_cache_signature: dict[str, dict[str, object]],
@@ -790,14 +200,14 @@ def train_sae(
 ) -> Path:
     if early_stopping is not None and early_stopping.enabled and early_stopping.mode != "stability":
         raise ValueError("Cached training supports early_stopping.mode='stability'; use streaming training for objective mode")
-    _seed_training(cfg.seed)
+    seed_training(cfg.seed)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     early_stopping = early_stopping or EarlyStoppingCfg()
     validation_cache_dirs = validation_cache_dirs or {}
     validation_readers, validation_cache_signature, train_probe_reader, probe_tokens = (
-        _prepare_validation_probes(
+        prepare_validation_probes(
             cache_dir,
             d_in,
             validation_cache_dirs=validation_cache_dirs,
@@ -806,7 +216,7 @@ def train_sae(
             early_stopping=early_stopping,
         )
     )
-    early_stop_monitor = _ValidationEarlyStop()
+    early_stop_monitor = StabilityEarlyStop()
     validation_log_path = out_dir / "validation_log.jsonl"
     eval_interval = cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
     log.info(
@@ -924,11 +334,11 @@ def train_sae(
         if centering_path(out_dir) != centering_path(centre_metadata_dir):
             shutil.copyfile(centering_path(centre_metadata_dir), centering_path(out_dir))
 
-    active_subspace = None
+    subspace = None
     if cfg.active_subspace_rank is not None:
         if cfg.active_subspace_rank > d_in:
             raise ValueError("active_subspace_rank cannot exceed activation dimension")
-        active_subspace = _active_subspace(
+        subspace = active_subspace(
             cache_dir,
             sample_tokens=cfg.active_subspace_sample_tokens,
             rank=cfg.active_subspace_rank,
@@ -1005,7 +415,7 @@ def train_sae(
             lr = coefficients.lr
             lam = coefficients.lambda_l0
 
-            target_l0 = _scheduled_l0_target(step, l0_target, cfg) + reset_l0_allowance(cfg, step, reset_target_step)
+            target_l0 = scheduled_l0_target(step, l0_target, cfg) + reset_l0_allowance(cfg, step, reset_target_step)
             terms = training_loss(sae, x, cfg, coefficients, target_l0=target_l0)
             x_hat, f = terms.x_hat, terms.f
 
@@ -1051,7 +461,7 @@ def train_sae(
                 calibration_x = None
                 calibration_residuals = None
                 if cfg.residual_reset_calibration_tokens > 0:
-                    calibration_x, calibration_residuals, calibrated_frequency = _load_reset_calibration(
+                    calibration_x, calibration_residuals, calibrated_frequency = load_reset_calibration(
                         sae,
                         cache_dir,
                         sample_tokens=cfg.residual_reset_calibration_tokens,
@@ -1070,7 +480,7 @@ def train_sae(
                     feature_frequency,
                     ever_fired,
                     cfg,
-                    active_subspace,
+                    subspace,
                     calibration_x,
                     calibration_residuals,
                 )
@@ -1122,7 +532,7 @@ def train_sae(
                 for split_name, reader in probe_readers.items():
                     metrics, arrays = streaming_reconstruction_metrics(
                         sae,
-                        _validation_batches(
+                        validation_batches(
                             reader,
                             n_tokens=probe_tokens,
                             batch_size=cfg.batch_size,
@@ -1242,3 +652,4 @@ def train_sae(
         )
         log.info("Wrote raw-activation SAE export %s", export_path)
     return final_checkpoint
+

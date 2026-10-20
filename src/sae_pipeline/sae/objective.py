@@ -264,3 +264,10 @@ def optimizer_step(
         theta_grad_norm=theta_grad_norm,
         encoder_grad_norm=encoder_grad_norm,
     )
+
+
+def scheduled_l0_target(step: int, base_target: int, cfg: SAECfg) -> float:
+    if cfg.l0_target_start is None or cfg.l0_target_warmup_steps <= 0:
+        return float(base_target)
+    alpha = min(1.0, step / cfg.l0_target_warmup_steps)
+    return float(cfg.l0_target_start + alpha * (base_target - cfg.l0_target_start))

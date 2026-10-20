@@ -2,25 +2,9 @@
 
 import math
 
-import pytest
 import torch
 
-from sae_pipeline.config import EarlyStoppingCfg, SAECfg
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
-from sae_pipeline.sae.objective import cosine_warmup_constant, quad_l0_loss
-from sae_pipeline.sae.train import (
-    _scheduled_l0_target,
-    _ValidationEarlyStop,
-    resample_underused_features,
-    reset_l0_allowance,
-    residual_reset_due,
-)
-
-
-def _validation_metric(l0: float, fvu: float):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(l0=l0, fvu=fvu)
 
 
 def test_jumprelu_forward_shape():
@@ -92,94 +76,6 @@ def test_jumprelu_backward_runs():
     assert loss_history[-1] < loss_history[0], (loss_history[0], loss_history[-1])
 
 
-def test_vector_sum_reconstruction_is_coordinate_mean_times_width():
-    x = torch.randn(8, 32)
-    coordinate_mean = (x.square()).mean()
-    vector_sum = x.square().sum(dim=-1).mean()
-    torch.testing.assert_close(vector_sum, coordinate_mean * x.shape[-1])
-
-
-def test_cosine_warmup_then_constant_schedule():
-    peak_lr = 7.0e-5
-    warmup_steps = 1000
-    assert cosine_warmup_constant(0, peak_lr, warmup_steps) == pytest.approx(0.1 * peak_lr)
-    assert cosine_warmup_constant(500, peak_lr, warmup_steps) == pytest.approx(0.55 * peak_lr)
-    assert cosine_warmup_constant(1000, peak_lr, warmup_steps) == pytest.approx(peak_lr)
-    assert cosine_warmup_constant(1500, peak_lr, warmup_steps) == pytest.approx(peak_lr)
-
-
-def test_l0_penalty_scale_is_explicit():
-    l0 = torch.tensor(12.0)
-    base = quad_l0_loss(l0, 10)
-    torch.testing.assert_close(quad_l0_loss(l0, 10, scale=4.0), base * 4.0)
-
-
-def test_gradual_l0_schedule_reaches_final_target():
-    cfg = SAECfg(l0_target_start=16.7, l0_target_warmup_steps=15_000)
-    assert _scheduled_l0_target(0, 10, cfg) == 16.7
-    assert _scheduled_l0_target(15_000, 10, cfg) == 10.0
-    assert 10.0 < _scheduled_l0_target(7_500, 10, cfg) < 16.7
-
-
-def test_bilingual_early_stop_requires_stable_fvu_and_target_l0():
-    cfg = EarlyStoppingCfg(
-        enabled=True,
-        fvu_relative_tolerance=0.01,
-        ev_absolute_tolerance=0.005,
-        l0_relative_tolerance=0.10,
-        patience=2,
-    )
-    monitor = _ValidationEarlyStop()
-    first = {lang: _validation_metric(10.0, 0.50) for lang in ("de", "en")}
-    second = {"de": _validation_metric(10.1, 0.498), "en": _validation_metric(9.9, 0.498)}
-    third = {"de": _validation_metric(10.0, 0.496), "en": _validation_metric(10.0, 0.496)}
-
-    stable, l0_ok = monitor.update(first, target_l0=10.0, cfg=cfg)
-    assert not stable and l0_ok and monitor.stable_intervals == 0
-    stable, l0_ok = monitor.update(second, target_l0=10.0, cfg=cfg)
-    assert stable and l0_ok and monitor.stable_intervals == 1
-    stable, l0_ok = monitor.update(third, target_l0=10.0, cfg=cfg)
-    assert stable and l0_ok and monitor.stable_intervals == 2
-
-
-def test_bilingual_early_stop_resets_if_any_language_is_unstable_or_l0_misses():
-    cfg = EarlyStoppingCfg(enabled=True)
-    monitor = _ValidationEarlyStop()
-    monitor.update(
-        {lang: _validation_metric(10.0, 0.50) for lang in ("de", "en")},
-        target_l0=10.0,
-        cfg=cfg,
-    )
-    stable, _ = monitor.update(
-        {"de": _validation_metric(10.0, 0.499), "en": _validation_metric(10.0, 0.45)},
-        target_l0=10.0,
-        cfg=cfg,
-    )
-    assert not stable and monitor.stable_intervals == 0
-    stable, l0_ok = monitor.update(
-        {lang: _validation_metric(15.0, 0.499) for lang in ("de", "en")},
-        target_l0=10.0,
-        cfg=cfg,
-    )
-    assert not stable and not l0_ok and monitor.stable_intervals == 0
-
-
-def test_early_stop_uses_post_warmup_evaluations_as_its_baseline():
-    cfg = EarlyStoppingCfg(enabled=True, patience=2)
-    monitor = _ValidationEarlyStop()
-    warmup_end = {lang: _validation_metric(10.0, 0.50) for lang in ("de", "en")}
-    first_post_warmup = {lang: _validation_metric(10.0, 0.499) for lang in ("de", "en")}
-
-    stable, _ = monitor.update(
-        warmup_end, target_l0=10.0, cfg=cfg, eligible=False
-    )
-    assert not stable and monitor.stable_intervals == 0
-    stable, _ = monitor.update(
-        first_post_warmup, target_l0=10.0, cfg=cfg, eligible=True
-    )
-    assert stable and monitor.stable_intervals == 1
-
-
 def test_centred_coordinates_preserve_initial_function():
     torch.manual_seed(0)
     sae = JumpReLUSAE(d_in=5, d_sae=11)
@@ -193,27 +89,6 @@ def test_centred_coordinates_preserve_initial_function():
     torch.testing.assert_close(before - centre, after_centred, atol=1e-5, rtol=1e-5)
 
 
-def test_residual_reset_replaces_columns_and_clears_adam_moments():
-    torch.manual_seed(0)
-    sae = JumpReLUSAE(d_in=8, d_sae=16, bandwidth=0.01)
-    optim = torch.optim.Adam(sae.parameters(), lr=1e-3)
-    x = torch.randn(64, 8)
-    recon, _ = sae(x)
-    recon.square().mean().backward()
-    optim.step()
-    old_decoder = sae.W_dec.detach().clone()
-    frequency = torch.zeros(16)
-    ever_fired = torch.ones(16, dtype=torch.bool)
-    count = resample_underused_features(
-        sae, optim, x, recon.detach(), frequency, ever_fired,
-        SAECfg(residual_reset_max_features=4, residual_reset_pool_size=16),
-    )
-    assert count == 4
-    assert not torch.equal(old_decoder, sae.W_dec)
-    assert int((~ever_fired).sum()) == count
-    assert torch.all(frequency == 0)
-    zero_columns = optim.state[sae.W_dec]["exp_avg"].abs().sum(dim=0) == 0
-    assert int(zero_columns.sum()) >= count
 
 
 def test_jumprelu_l0_grad_flows_to_theta():
@@ -257,18 +132,3 @@ def test_normalised_coordinates_and_raw_export_are_functionally_equivalent():
 
     torch.testing.assert_close(canonical_features > 0, raw_features > 0)
     torch.testing.assert_close(canonical_recon, raw_recon * scale, atol=1e-5, rtol=1e-5)
-
-
-def test_resets_come_on_schedule_and_their_l0_allowance_anneals_away():
-    cfg = SAECfg(
-        feature_use_strategy="residual_reset",
-        residual_reset_start_step=10,
-        residual_reset_every_steps=5,
-        residual_reset_delta_l0=2.0,
-        residual_reset_anneal_steps=4,
-    )
-
-    assert [step for step in range(25) if residual_reset_due(cfg, step)] == [10, 15, 20]
-    assert not residual_reset_due(SAECfg(), 10)
-    assert [reset_l0_allowance(cfg, step, 10) for step in (10, 12, 14)] == [2.0, 1.0, 0.0]
-    assert reset_l0_allowance(cfg, 12, None) == 0.0

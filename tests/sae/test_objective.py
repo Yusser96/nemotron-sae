@@ -6,8 +6,10 @@ from sae_pipeline.sae.jumprelu import JumpReLUSAE, inverse_simpson_from_mass
 from sae_pipeline.sae.objective import (
     LossCoefficients,
     coefficients_at,
+    cosine_warmup_constant,
     optimizer_step,
     quad_l0_loss,
+    scheduled_l0_target,
     training_loss,
 )
 
@@ -233,3 +235,32 @@ def test_optimizer_step_freezes_the_decoder_during_the_freeze_window():
     sae, before, _ = _one_update(SAECfg(decoder_unit_norm=False, decoder_freeze_steps=5), step=5)
 
     torch.testing.assert_close(sae.W_dec.detach(), before)
+
+
+def test_vector_sum_reconstruction_is_coordinate_mean_times_width():
+    x = torch.randn(8, 32)
+    coordinate_mean = (x.square()).mean()
+    vector_sum = x.square().sum(dim=-1).mean()
+    torch.testing.assert_close(vector_sum, coordinate_mean * x.shape[-1])
+
+
+def test_cosine_warmup_then_constant_schedule():
+    peak_lr = 7.0e-5
+    warmup_steps = 1000
+    assert cosine_warmup_constant(0, peak_lr, warmup_steps) == pytest.approx(0.1 * peak_lr)
+    assert cosine_warmup_constant(500, peak_lr, warmup_steps) == pytest.approx(0.55 * peak_lr)
+    assert cosine_warmup_constant(1000, peak_lr, warmup_steps) == pytest.approx(peak_lr)
+    assert cosine_warmup_constant(1500, peak_lr, warmup_steps) == pytest.approx(peak_lr)
+
+
+def test_l0_penalty_scale_is_explicit():
+    l0 = torch.tensor(12.0)
+    base = quad_l0_loss(l0, 10)
+    torch.testing.assert_close(quad_l0_loss(l0, 10, scale=4.0), base * 4.0)
+
+
+def test_gradual_l0_schedule_reaches_final_target():
+    cfg = SAECfg(l0_target_start=16.7, l0_target_warmup_steps=15_000)
+    assert scheduled_l0_target(0, 10, cfg) == 16.7
+    assert scheduled_l0_target(15_000, 10, cfg) == 10.0
+    assert 10.0 < scheduled_l0_target(7_500, 10, cfg) < 16.7

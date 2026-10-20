@@ -1,11 +1,13 @@
 """Reconstruction selection and a non-controlling historical stopping observer."""
 from __future__ import annotations
+
 import json
-import os
 import math
+import os
 from dataclasses import asdict
-from sae_pipeline.sae.train import ObjectiveEarlyStop
+
 from sae_pipeline.sae.checkpoint import write_raw_export
+from sae_pipeline.sae.early_stopping import ObjectiveEarlyStop
 
 
 def observe_selection(site, evaluation, rule):

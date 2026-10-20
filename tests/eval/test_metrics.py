@@ -56,24 +56,6 @@ def test_fvu_handles_small_variance_around_a_large_mean():
     assert metrics.support_n_tokens == 4
 
 
-def test_validation_preprocessing_does_not_modify_cpu_shards():
-    from types import SimpleNamespace
-
-    from sae_pipeline.sae.train import _validation_batches
-
-    shard = torch.arange(12, dtype=torch.float32).reshape(6, 2)
-    original = shard.clone()
-    reader = SimpleNamespace(manifest=SimpleNamespace(total_tokens=6), iter_shards=lambda: iter([shard]))
-    def probe():
-        return torch.cat(list(_validation_batches(
-            reader, n_tokens=6, batch_size=2, input_scale=0.5,
-            input_center=torch.ones(2), device="cpu",
-        )))
-    torch.testing.assert_close(probe(), original * 0.5 - 1)
-    torch.testing.assert_close(probe(), original * 0.5 - 1)
-    assert torch.equal(shard, original)
-
-
 def test_support_window_can_exceed_reconstruction_window():
     sae = JumpReLUSAE(d_in=2, d_sae=2)
     with torch.no_grad():

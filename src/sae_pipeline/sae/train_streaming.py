@@ -16,10 +16,10 @@ import logging
 import math
 import os
 import time
-from time import time_ns
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from time import time_ns
 from typing import IO, Protocol
 
 import torch
@@ -28,41 +28,45 @@ from safetensors.torch import save_file
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg, StreamCfg
 from sae_pipeline.eval.metrics import ReconMetrics, streaming_reconstruction_metrics
-from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves, refresh_plot
+from sae_pipeline.eval.plots import (
+    plot_training_curves,
+    plot_validation_curves,
+    refresh_plot,
+)
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.sae.checkpoint import (
     capture_random_state,
     load_sae_weights,
     load_trainer_state,
+    prune_checkpoints,
     resolve_checkpoint,
     restore_random_state,
     save_checkpoint_pair,
-    prune_checkpoints,
     write_raw_export,
 )
+from sae_pipeline.sae.early_stopping import ObjectiveEarlyStop
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
-from sae_pipeline.sae.normalization import load_whole_vector_normalization, normalization_path, write_normalization
+from sae_pipeline.sae.normalization import (
+    load_whole_vector_normalization,
+    normalization_path,
+    write_normalization,
+)
 from sae_pipeline.sae.objective import (
     LossCoefficients,
     coefficients_at,
     inverse_simpson_warmup_steps,
     optimizer_step,
+    scheduled_l0_target,
     training_loss,
 )
-from sae_pipeline.sae.train import (
-    ObjectiveEarlyStop,
-    StepLog,
-    _probe_cache_signature,
-    _seed_training,
-    _scheduled_l0_target,
-    _validation_batches,
-    build_sae_and_optimizer,
-    record_firing,
+from sae_pipeline.sae.resets import (
     resample_underused_features,
     reset_l0_allowance,
     residual_reset_due,
-    step_log,
 )
+from sae_pipeline.sae.step_log import StepLog, record_firing, step_log
+from sae_pipeline.sae.train import build_sae_and_optimizer, seed_training
+from sae_pipeline.sae.validation import probe_cache_signature, validation_batches
 
 log = logging.getLogger(__name__)
 
@@ -168,10 +172,10 @@ def init_streaming_site(
         if not math.isfinite(normalization_scale) or normalization_scale <= 0:
             raise ValueError(f"{slug}: normalization scale must be finite and positive")
 
-    _seed_training(sae_cfg.seed)
+    seed_training(sae_cfg.seed)
     sae, optim = build_sae_and_optimizer(sae_cfg, d_in=d_in, d_sae=d_sae, device=device)
     validation_readers = {lang: ShardReader(path) for lang, path in sorted(validation_cache_dirs.items())}
-    validation_cache_signature = _probe_cache_signature(validation_readers)
+    validation_cache_signature = probe_cache_signature(validation_readers)
     ever_fired = torch.zeros(d_sae, dtype=torch.bool, device=device)
     feature_frequency = torch.zeros(d_sae, dtype=torch.float32, device=device)
     inverse_simpson_usage = torch.zeros(d_sae, dtype=torch.float32, device=device)
@@ -286,7 +290,7 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     if site.normalization_scale != 1.0:
         x = x * site.normalization_scale
 
-    target_l0 = _scheduled_l0_target(step, site.l0_target, cfg) + reset_l0_allowance(cfg, step, site.last_reset_step)
+    target_l0 = scheduled_l0_target(step, site.l0_target, cfg) + reset_l0_allowance(cfg, step, site.last_reset_step)
     terms = training_loss(
         site.sae,
         x,
@@ -376,7 +380,7 @@ def evaluate_site(site: StreamingSite, device: str) -> SiteEvaluation:
                 n_rows += x.shape[0]
                 yield x
 
-        batches = _validation_batches(
+        batches = validation_batches(
             reader,
             n_tokens=site.probe_tokens,
             batch_size=site.cfg.batch_size,
