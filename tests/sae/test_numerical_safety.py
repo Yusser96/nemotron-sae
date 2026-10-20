@@ -7,7 +7,11 @@ import torch
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.objective import optimizer_step
-from sae_pipeline.sae.train_streaming import _divergence, finite_evaluation_error, threshold_warnings
+from sae_pipeline.sae.train_streaming import (
+    _divergence,
+    finite_evaluation_error,
+    threshold_warnings,
+)
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])

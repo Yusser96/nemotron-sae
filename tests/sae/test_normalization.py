@@ -10,9 +10,9 @@ from sae_pipeline.sae.normalization import (
     _cpu_shard_squared_norm,
     load_whole_vector_normalization,
     normalization_path,
+    resolve_activation_center,
     resolve_whole_vector_normalization,
     write_normalization,
-    resolve_activation_center,
 )
 
 

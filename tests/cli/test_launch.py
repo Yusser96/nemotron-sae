@@ -4,8 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sae_pipeline.cli.launch import run_local
-from sae_pipeline.cli.launch import materialize_jobs
+from sae_pipeline.cli.launch import materialize_jobs, run_local
 from sae_pipeline.config import PipelineCfg
 
 

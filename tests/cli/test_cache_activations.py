@@ -4,8 +4,8 @@ import sys
 from pathlib import Path
 
 import torch
-from torch import nn
 from safetensors.torch import save_file
+from torch import nn
 
 from sae_pipeline.cache.manifest import CacheManifest
 from sae_pipeline.cli import cache_activations
@@ -74,8 +74,8 @@ target:
 
 
 def test_vllm_backend_caches_without_loading_the_hf_model(tmp_path, monkeypatch):
-    from sae_pipeline.extraction.base import ActivationBatch
     from sae_pipeline.extraction import vllm
+    from sae_pipeline.extraction.base import ActivationBatch
 
     class _FakeExtractor:
         closed = False
@@ -169,12 +169,14 @@ def test_interrupted_multi_site_cache_is_repaired_to_common_prefix(tmp_path: Pat
 
 def test_cache_recipe_and_storage_dtype_are_validated(tmp_path):
     import argparse
+
     import pytest
+    from safetensors.torch import load_file
+
+    from sae_pipeline.cache.writer import ShardWriter
     from sae_pipeline.config import PipelineCfg
     from sae_pipeline.hooks.components import ComponentSpec
     from sae_pipeline.model.topology import HookSite
-    from sae_pipeline.cache.writer import ShardWriter
-    from safetensors.torch import load_file
 
     cfg = PipelineCfg(run_id="identity", data={"total_tokens": 4}, target={"layer": 0, "component": "resid_post"}).with_overrides(**{
         "cache.cache_dir": str(tmp_path), "model.dtype": "float16"

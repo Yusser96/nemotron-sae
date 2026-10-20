@@ -1,9 +1,10 @@
-import torch
 import pytest
+import torch
 from safetensors.torch import save_file
+
 from sae_pipeline.config import SAECfg
-from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.initialization import initialize_sae, parameter_digest
+from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 
 def fresh():

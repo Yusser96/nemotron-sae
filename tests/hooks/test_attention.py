@@ -66,8 +66,8 @@ def test_keyword_residual_input_is_captured():
 
 
 def test_shared_expert_container_does_not_shadow_indexed_children():
-    from sae_pipeline.model.topology import enumerate_hooks
     from sae_pipeline.hooks.components import ComponentSpec, resolve
+    from sae_pipeline.model.topology import enumerate_hooks
     model = nn.Module()
     model.layers = nn.ModuleList([nn.Module()])
     model.layers[0].shared_experts = nn.ModuleList([nn.Linear(4, 4), nn.Linear(4, 4)])

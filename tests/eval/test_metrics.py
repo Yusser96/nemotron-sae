@@ -3,7 +3,10 @@
 import numpy as np
 import torch
 
-from sae_pipeline.eval.metrics import reconstruction_metrics, streaming_reconstruction_metrics
+from sae_pipeline.eval.metrics import (
+    reconstruction_metrics,
+    streaming_reconstruction_metrics,
+)
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 
@@ -73,6 +76,7 @@ def test_fvu_handles_small_variance_around_a_large_mean():
 
 def test_validation_preprocessing_does_not_modify_cpu_shards():
     from types import SimpleNamespace
+
     from sae_pipeline.sae.train import _validation_batches
 
     shard = torch.arange(12, dtype=torch.float32).reshape(6, 2)

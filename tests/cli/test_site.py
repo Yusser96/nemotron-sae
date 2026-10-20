@@ -1,7 +1,6 @@
 import argparse
 from types import SimpleNamespace
 
-
 from sae_pipeline.cli._site import cli_site
 from sae_pipeline.cli.train_sae import _validation_manifest_site_mismatch
 from sae_pipeline.config import PipelineCfg

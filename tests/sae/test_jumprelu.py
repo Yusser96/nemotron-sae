@@ -5,13 +5,13 @@ import math
 import pytest
 import torch
 
-from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg
+from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.objective import cosine_warmup_constant, quad_l0_loss
 from sae_pipeline.sae.train import (
+    _scheduled_l0_target,
     _ValidationEarlyStop,
     resample_underused_features,
-    _scheduled_l0_target,
     reset_l0_allowance,
     residual_reset_due,
 )
@@ -33,7 +33,7 @@ def test_jumprelu_forward_shape():
 
 
 def test_reconstruction_and_gate_have_distinct_log_threshold_gradients():
-    from sae_pipeline.sae.jumprelu import _JumpReLU, _JumpReLUGate, _L0
+    from sae_pipeline.sae.jumprelu import _L0, _JumpReLU, _JumpReLUGate
 
     # Independent analytical expectations from the JumpReLU jump magnitude
     # and the log-threshold chain rule; finite differences cannot test an STE.
