@@ -285,8 +285,10 @@ def test_trainer_states_written_under_either_numpy_major_version_load(tmp_path: 
     state = {"random_state": capture_random_state()}
     torch.save(state, path, _use_new_zipfile_serialization=False)
     data = path.read_bytes()
-    assert b"numpy._core.multiarray\n_reconstruct" in data
-    path.write_bytes(data.replace(b"numpy._core.multiarray\n_reconstruct", module + b"\n_reconstruct"))
+    constructors = [b"numpy._core.multiarray\n_reconstruct", b"numpy.core.multiarray\n_reconstruct"]
+    original = next((name for name in constructors if name in data), None)
+    assert original is not None
+    path.write_bytes(data.replace(original, module + b"\n_reconstruct"))
 
     loaded = load_trainer_state(path)
 
