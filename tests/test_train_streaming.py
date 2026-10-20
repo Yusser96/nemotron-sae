@@ -203,7 +203,7 @@ def test_validation_objective_is_the_reconstruction_loss_without_penalties(tmp_p
 
 
 def test_evaluation_logs_absolute_and_baseline_relative_metrics_and_saves_best(tmp_path):
-    site = _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors")), _validation_dirs(tmp_path))
+    site = _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), warmup_steps=0, l0_warmup_steps=0), _validation_dirs(tmp_path))
     record_baseline(site, "cpu")
     streaming_step(site, torch.randn(BATCH, D_IN), step=1)
     site.step = 1
@@ -224,6 +224,50 @@ def test_evaluation_logs_absolute_and_baseline_relative_metrics_and_saves_best(t
         )
     assert (site.out_dir / "baseline_metrics.json").is_file()
     assert json.loads((site.out_dir / "best" / "step.json").read_text()) == {"step": 1, "tokens": BATCH}
+
+
+@pytest.mark.parametrize("overrides,minimum,enabled", [
+    ({"warmup_steps": 3}, 3, False),
+    ({"l0_warmup_steps": 5}, 5, False),
+    ({"inverse_simpson_warmup_steps": 7}, 7, False),
+    ({"l0_target_warmup_steps": 9}, 9, False),
+    ({}, 11, True),
+])
+def test_best_selection_waits_for_all_warmups_and_starts_a_fresh_baseline(tmp_path, monkeypatch, overrides, minimum, enabled):
+    site = _site(tmp_path, _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), **overrides), _validation_dirs(tmp_path))
+    cfg = EarlyStoppingCfg(enabled=enabled, minimum_steps=minimum if enabled else 0,
+                           divergence_l0_factor=None, divergence_objective_factor=None)
+    _evaluations(monkeypatch, objective=1.0)
+    assert evaluate_and_update(site, minimum-1, "cpu", cfg) is None
+    assert site.early_stop.best is None
+    assert site.early_stop.checks_since_improve == 0
+    assert not (site.out_dir / "best").exists()
+    _evaluations(monkeypatch, objective=2.0)
+    site.step = minimum
+    assert evaluate_and_update(site, minimum, "cpu", cfg) is None
+    assert site.early_stop.best == 2.0
+    assert json.loads((site.out_dir / "best/step.json").read_text())["step"] == minimum
+    site.close()
+    rows = [json.loads(s) for s in site.validation_log_path.read_text().splitlines()]
+    assert rows[0]["selection_eligible"] is False
+    assert rows[-1]["selection_eligible"] is True
+
+
+def test_resume_discards_legacy_best_without_post_warmup_provenance(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"))
+    site = _site(tmp_path, cfg)
+    site.early_stop.best, site.early_stop.checks_since_improve = 0.001, 5
+    write_checkpoint(site, 3)
+    site.close()
+    checkpoint = resolve_checkpoint(site.out_dir, require_trainer_state=True)
+    state = torch.load(checkpoint.trainer_state_path, weights_only=False)
+    del state["best_selection_policy"]
+    torch.save(state, checkpoint.trainer_state_path)
+    resumed = _site(tmp_path, cfg, resume_checkpoint=checkpoint)
+    assert resumed.step == 3
+    assert resumed.early_stop.best is None
+    assert resumed.early_stop.checks_since_improve == 0
+    resumed.close()
 
 
 def test_a_resumed_site_without_a_stored_baseline_reports_no_deltas(tmp_path):
@@ -505,7 +549,7 @@ def test_the_log_row_tells_why_auxk_dead_latents_are_inactive(tmp_path):
 
 
 def test_stops_early_once_the_validation_objective_plateaus(tmp_path):
-    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), lr=0.0, eval_interval_steps=1)
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), lr=0.0, eval_interval_steps=1, warmup_steps=0, l0_warmup_steps=0)
     site = _site(tmp_path, cfg, _validation_dirs(tmp_path))
     early_stopping = EarlyStoppingCfg(
         enabled=True, mode="objective", minimum_steps=0, patience=2, lr_plateau_patience=1
@@ -649,8 +693,9 @@ def test_normalized_streaming_checkpoints_and_best_carry_metadata(tmp_path):
     cfg = _sae_cfg(warm, input_normalization="whole_vector")
     validation = _validation_dirs(tmp_path)
     site = _site(tmp_path, cfg, validation, normalization_dir=metadata)
-    evaluate_and_update(site, 0, "cpu", EarlyStoppingCfg(divergence_l0_factor=None))
-    write_checkpoint(site, 0)
+    site.step = 50000
+    evaluate_and_update(site, 50000, "cpu", EarlyStoppingCfg(divergence_l0_factor=None))
+    write_checkpoint(site, 50000)
     site.close()
     expected = json.loads((metadata / "normalization.json").read_text())
     assert json.loads((site.out_dir / "normalization.json").read_text()) == expected

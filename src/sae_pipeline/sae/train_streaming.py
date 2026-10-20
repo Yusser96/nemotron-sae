@@ -46,6 +46,7 @@ from sae_pipeline.sae.normalization import load_whole_vector_normalization, norm
 from sae_pipeline.sae.objective import (
     LossCoefficients,
     coefficients_at,
+    inverse_simpson_warmup_steps,
     optimizer_step,
     training_loss,
 )
@@ -200,6 +201,9 @@ def init_streaming_site(
         if "tokens_since_fired" in state:
             tokens_since_fired.copy_(state["tokens_since_fired"].to(device=device, dtype=torch.int64))
         early_stop.load_state_dict(state["early_stop"])
+        if state.get("best_selection_policy") != "reconstruction_v1":
+            early_stop.best, early_stop.checks_since_improve = None, 0
+            log.warning("%s: best was not scored on reconstruction alone; reset best/plateau baseline", slug)
         if validation_changed:
             early_stop.best, early_stop.checks_since_improve = None, 0
             baseline = out_dir / "baseline_metrics.json"
@@ -453,6 +457,7 @@ def write_checkpoint(site: StreamingSite, step: int, *, snapshot_id: str | None 
             "inverse_simpson_usage": site.inverse_simpson_usage.detach().cpu(),
             "tokens_since_fired": site.tokens_since_fired.detach().cpu(),
             "early_stop": site.early_stop.state_dict(),
+            "best_selection_policy": "reconstruction_v1",
             "stopped": site.stopped,
             "next_milestone_index": site.next_milestone_index,
             "feature_resets": site.feature_resets,
@@ -557,7 +562,15 @@ def evaluate_and_update(
     warnings = threshold_warnings(site, evaluation, step)
     if warnings:
         log.warning("%s finite diagnostic threshold warnings at step %d: %s", site.slug, step, ",".join(warnings))
-    if divergence is None:
+    selection_minimum = max(
+        site.cfg.warmup_steps, site.cfg.l0_warmup_steps,
+        site.cfg.l0_target_warmup_steps,
+        inverse_simpson_warmup_steps(site.cfg)
+        if site.cfg.inverse_simpson_floor > 0 and site.cfg.inverse_simpson_max_scale > 0 else 0,
+        early_stopping.minimum_steps if early_stopping.enabled else 0,
+    )
+    selection_eligible = step >= selection_minimum
+    if divergence is None and selection_eligible:
         is_best, lr_reduced, should_stop = site.early_stop.update(
             objective, early_stopping, eligible=early_stopping.enabled and step >= early_stopping.minimum_steps
         )
@@ -572,6 +585,8 @@ def evaluate_and_update(
             "validation_objective": evaluation.objective[language],
             "validation_objective_mixed": objective,
             "is_best": is_best,
+            "selection_eligible": selection_eligible,
+            "selection_minimum_steps": selection_minimum,
             "lr_reduced": lr_reduced,
             "lr_scale": site.early_stop.lr_scale,
             "checks_since_improve": site.early_stop.checks_since_improve,
