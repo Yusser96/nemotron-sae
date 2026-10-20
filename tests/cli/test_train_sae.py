@@ -16,3 +16,9 @@ def test_validation_manifest_site_mismatch_is_reported():
     spec = ComponentSpec.parse(12, "attn_out_prelinear")
 
     assert _validation_manifest_site_mismatch(manifest, spec) == "site=(12,resid_post)"
+
+
+def test_indexed_validation_site_keeps_index():
+    spec = ComponentSpec.parse(3, "expert.2")
+    assert _validation_manifest_site_mismatch(SimpleNamespace(layer=3, component="expert.2"), spec) is None
+    assert _validation_manifest_site_mismatch(SimpleNamespace(layer=3, component="expert.1"), spec)
