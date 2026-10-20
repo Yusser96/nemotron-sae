@@ -10,6 +10,12 @@ a **prod** preset (full sweep), and uses a sharded on-disk activation cache so
 a single 30 B-model forward pass can feed an unbounded number of SAE training
 runs without reloading the LM.
 
+This repository owns SAE training and evaluation of feature utilisation,
+reconstruction fidelity and behavioural fidelity. Reusable activation-extraction
+strategies belong to `nemotron-extraction`. Downstream autointerpretation,
+multilingual feature exploration and the Web UI belong to a downstream
+interpretation repository, which consumes the trained and evaluated SAEs.
+
 ## What it implements
 
 - **JumpReLU SAE**: a quadratic target-`L0` penalty, positive
