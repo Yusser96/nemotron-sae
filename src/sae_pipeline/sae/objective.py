@@ -238,15 +238,19 @@ def optimizer_step(
         group["lr"] = lr
     optim.zero_grad(set_to_none=True)
     loss.backward()
-    with torch.no_grad():
-        z = sae.gate_input(x)  # type: ignore[attr-defined]
-        ste_window_pct = 100.0 * (
-            (z - sae.theta).abs() < (cfg.bandwidth / 2.0)  # type: ignore[attr-defined]
-        ).float().mean().item()
-        theta_grad = getattr(sae, "log_theta").grad
-        encoder_grad = getattr(sae, "W_enc").grad
-        theta_grad_norm = 0.0 if theta_grad is None else theta_grad.norm().item()
-        encoder_grad_norm = 0.0 if encoder_grad is None else encoder_grad.norm().item()
+    ste_window_pct = theta_grad_norm = encoder_grad_norm = 0.0
+    # These values are consumed only by periodic StepLog rows. Avoid an extra
+    # encoder GEMM and three host synchronizations on every unlogged update.
+    if step % cfg.log_every == 0:
+        with torch.no_grad():
+            z = sae.gate_input(x)  # type: ignore[attr-defined]
+            ste_window_pct = 100.0 * (
+                (z - sae.theta).abs() < (cfg.bandwidth / 2.0)  # type: ignore[attr-defined]
+            ).float().mean().item()
+            theta_grad = getattr(sae, "log_theta").grad
+            encoder_grad = getattr(sae, "W_enc").grad
+            theta_grad_norm = 0.0 if theta_grad is None else theta_grad.norm().item()
+            encoder_grad_norm = 0.0 if encoder_grad is None else encoder_grad.norm().item()
     if cfg.gradient_clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(sae.parameters(), cfg.gradient_clip_norm)
     if step <= cfg.decoder_freeze_steps:
