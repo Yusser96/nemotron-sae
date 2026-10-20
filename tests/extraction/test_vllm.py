@@ -1,12 +1,14 @@
 """VLLMExtractor end to end against a fake engine running the real worker extension."""
 
+from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
+from sae_pipeline.config import ActivationSinkCfg
 from sae_pipeline.extraction.fills import FillQueue, mark_done, published_fills
-from sae_pipeline.extraction.vllm import VLLMExtractor, fit_sequences, produce_fills
+from sae_pipeline.extraction.vllm import VLLMExtractor, _ActivationSink, fit_sequences, produce_fills
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import load_trainer_state
 from tests.extraction.fakes import SPECS, FakeEngine, reference, vllm_cfg
@@ -185,3 +187,44 @@ def test_a_producer_waits_for_its_consumers_and_stops_when_they_are_done(tmp_pat
     assert [report["fill"] for report in reports] == [0, 1]
     assert all("write_gb_per_s" in report for report in reports)
     assert published_fills(tmp_path / "fills") == [0, 1]
+
+
+def _sink(tmp_path: Path, lifecycle: str = "consume") -> _ActivationSink:
+    sink = _ActivationSink(ActivationSinkCfg(path=str(tmp_path / "sink"), lifecycle=lifecycle))
+    sink.prepare()
+    return sink
+
+
+def _step(path: Path, **tensors) -> str:
+    save_file(tensors, str(path))
+    return str(path)
+
+
+def test_sink_read_loads_steps_in_order_and_consumes_them(tmp_path):
+    sink = _sink(tmp_path)
+    first = _step(sink.path / "step_1.safetensors", a=torch.ones(2))
+    second = _step(sink.path / "step_0.safetensors", a=torch.zeros(3))
+
+    steps = sink.read([first, second])
+
+    assert [step["a"].numel() for step in steps] == [2, 3]
+    assert list(sink.path.iterdir()) == []
+
+
+def test_sink_read_keeps_files_under_the_cache_lifecycle(tmp_path):
+    sink = _sink(tmp_path, lifecycle="cache")
+    step = _step(sink.path / "step_0.safetensors", a=torch.zeros(2, 2))
+
+    sink.read([step])
+    sink.cleanup()
+
+    assert Path(step).exists()
+
+
+def test_sink_cleanup_removes_leftovers_of_a_consuming_run(tmp_path):
+    sink = _sink(tmp_path)
+    _step(sink.path / "step_0.safetensors", a=torch.zeros(1, 2))
+
+    sink.cleanup()
+
+    assert not sink.path.exists()
