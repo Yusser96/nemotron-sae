@@ -1,7 +1,4 @@
-.venv/
 __pycache__/
-*.pyc
-*.pyo
 *.egg-info/
 build/
 dist/
@@ -9,57 +6,50 @@ dist/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+.venv*
+.uv-cache/
+uv.lock
 
+# Run outputs and weights.
 outputs/
 wandb/
 *.safetensors
 *.pt
 *.pth
 *.ckpt
-
-# Generated reports, results, and local experiment runs.
 /data/
 reports/
 results/
 experiments/
-**/reports/
-**/results/
-**/experiments/
 
+# Credentials and agent state.
 env.sh
 .env
 .claude/
-.agents
-.codex
-.uv-cache
-.venv*
+.agents/
+.codex/
 
-# Local/private experiment configurations.
+# Private configurations, launchers, tests and records.
 configs/finetuning.yml
+configs/finetuning_*.yml
+configs/finetuning_*.yaml
 configs/*.local.yml
 configs/*.local.yaml
 configs/private/
 configs/soofi_*.yml
 configs/soofi_*.yaml
-
-# Local per-experiment configuration overrides stay untracked.
-configs/finetuning_*.yml
-configs/finetuning_*.yaml
-
-# Project-specific experiment scripts, launchers and internal notes stay local.
 scripts/*soofi*.py
 scripts/*soofi*.sh
 scripts/_bilingual_eval.py
 scripts/select_l26_program.py
+/scripts/soofi_studies/
 slurm/soofi_*.sbatch
 slurm/soofi_*.sh
 tests/*soofi*.py
 tests/test_select_l26_program.py
-internal_docs/
-sae_pipeline.tar.gz
-
-# Private SAE study staging and operator entrypoints.
-/temp/
-/scripts/soofi_studies/
 /tests/test_sae_study_recovery.py
 /tests/test_sae_validation_report.py
+/tests/test_final_sae_selection.py
+internal_docs/
+/temp/
+sae_pipeline.tar.gz
