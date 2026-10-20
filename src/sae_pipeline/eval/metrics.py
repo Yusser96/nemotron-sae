@@ -116,27 +116,6 @@ def firing_concentration(frequency: torch.Tensor) -> FiringConcentration:
     )
 
 
-@torch.no_grad()
-def reconstruction_metrics(
-    sae: JumpReLUSAE,
-    activations: torch.Tensor,
-    dead_threshold_tokens: int = 50_000,
-    return_arrays: bool = False,
-) -> ReconMetrics | tuple[ReconMetrics, ReconArrays]:
-    """Compute L0, FVU, and dead-% on a tensor of activations (n_tokens, d_in).
-
-    With `return_arrays=True`, additionally return per-latent firing frequency,
-    per-token L0, and per-token reconstruction error — all consumed by the
-    plotting module to draw histograms.
-    """
-    return streaming_reconstruction_metrics(
-        sae,
-        (activations,),
-        dead_threshold_tokens=dead_threshold_tokens,
-        return_arrays=return_arrays,
-    )
-
-
 def _gini(values: torch.Tensor) -> float:
     values = values.detach().to(torch.float64).flatten().clamp_min(0)
     if values.numel() == 0 or float(values.sum()) <= 0:
@@ -313,14 +292,9 @@ def streaming_reconstruction_metrics(
     )
     if not return_arrays:
         return metrics
-    try:
-        arr_firing = firing_frequency.detach().cpu().float().numpy()
-        arr_l0 = l0_all.numpy()
-        arr_err = torch.cat(err_parts).numpy() if err_parts else np.zeros((0,), dtype=np.float32)
-    except RuntimeError:
-        arr_firing = np.array(firing_frequency.detach().cpu().float().tolist(), dtype=np.float32)
-        arr_l0 = np.array(l0_all.tolist(), dtype=np.int32)
-        arr_err = np.array(torch.cat(err_parts).tolist(), dtype=np.float32) if err_parts else np.zeros((0,), dtype=np.float32)
+    arr_firing = firing_frequency.detach().cpu().float().numpy()
+    arr_l0 = l0_all.numpy()
+    arr_err = torch.cat(err_parts).numpy() if err_parts else np.zeros((0,), dtype=np.float32)
     arrays = ReconArrays(
         firing_frequency=arr_firing,
         l0_per_token=arr_l0,

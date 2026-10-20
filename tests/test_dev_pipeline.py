@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from sae_pipeline.config import SAECfg
-from sae_pipeline.eval.metrics import reconstruction_metrics
+from sae_pipeline.eval.metrics import streaming_reconstruction_metrics
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.train import train_sae
 from tests.synthetic import write_cache
@@ -68,6 +68,6 @@ def test_synthetic_pipeline(tmp_path: Path):
     from safetensors.torch import load_file
     sae = JumpReLUSAE(d_in=d, d_sae=128)
     sae.load_state_dict(load_file(str(ckpts[-1])))
-    metrics = reconstruction_metrics(sae, x, dead_threshold_tokens=2048)
+    metrics = streaming_reconstruction_metrics(sae, (x,), dead_threshold_tokens=2048)
     assert metrics.fvu < 1.0
     assert metrics.l0 > 0
