@@ -2,8 +2,6 @@
 
 Writes a fake activation cache, runs a tiny SAE training, then evaluates. Validates
 that writer → reader → SAE → eval chain works end-to-end on this machine.
-The full real-model run (cache_activations CLI loading the 30B Nemotron) is a separate
-test that requires a CUDA host; that one is gated behind `-m cuda`.
 """
 
 import json
@@ -12,11 +10,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from sae_pipeline.cache.manifest import CacheManifest
-from sae_pipeline.cache.writer import ShardWriter
 from sae_pipeline.config import SAECfg
 from sae_pipeline.eval.metrics import reconstruction_metrics
 from sae_pipeline.sae.train import build_sae, train_sae
+from tests.synthetic import write_cache
 
 
 @pytest.mark.slow
@@ -30,17 +27,7 @@ def test_synthetic_pipeline(tmp_path: Path):
     z = z * (z.abs() > 0.5)
     x = z @ base.T
 
-    cache_dir = tmp_path / "cache"
-    manifest = CacheManifest(
-        run_id="t", model="synthetic", dtype="float32",
-        layer=0, component="resid_post", d_activation=d,
-    )
-    with ShardWriter(
-        out_dir=cache_dir, d_activation=d,
-        shard_size_bytes=128 * 1024, dtype=torch.float32,
-        manifest=manifest,
-    ) as w:
-        w.add(x)
+    cache_dir = write_cache(tmp_path / "cache", x, run_id="t", shard_size_bytes=128 * 1024)
 
     sae_cfg = SAECfg(
         arch="jumprelu",

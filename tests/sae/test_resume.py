@@ -1,35 +1,17 @@
 from pathlib import Path
 
-import torch
 import pytest
+import torch
 from safetensors.torch import load_file, save_file
 
-from sae_pipeline.cache.manifest import CacheManifest
-from sae_pipeline.cache.writer import ShardWriter
 from sae_pipeline.config import SAECfg
 from sae_pipeline.sae.train import build_sae, train_sae
+from tests.synthetic import write_cache
 
 
 def _make_cache(path: Path) -> None:
-    generator = torch.Generator().manual_seed(123)
-    activations = torch.randn(53, 4, generator=generator)
-    manifest = CacheManifest(
-        run_id="resume",
-        model="synthetic",
-        dtype="float32",
-        layer=0,
-        component="resid_post",
-        d_activation=4,
-    )
-    with ShardWriter(
-        out_dir=path,
-        d_activation=4,
-        shard_size_bytes=80,
-        dtype=torch.float32,
-        shuffle_seed=3,
-        manifest=manifest,
-    ) as writer:
-        writer.add(activations)
+    activations = torch.randn(53, 4, generator=torch.Generator().manual_seed(123))
+    write_cache(path, activations, run_id="resume", shard_size_bytes=80, shuffle_seed=3)
 
 
 @pytest.mark.parametrize("centering", ["none", "mean"])

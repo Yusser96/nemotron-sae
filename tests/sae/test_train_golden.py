@@ -14,10 +14,9 @@ import pytest
 import torch
 from safetensors.torch import load_file
 
-from sae_pipeline.cache.manifest import CacheManifest
-from sae_pipeline.cache.writer import ShardWriter
 from sae_pipeline.config import SAECfg
 from sae_pipeline.sae.train import train_sae
+from tests.synthetic import write_cache
 
 D_IN, D_SAE, L0_TARGET = 8, 32, 4
 LOGGED = (
@@ -61,23 +60,8 @@ GOLDEN_PATH = Path(__file__).parent / "golden" / "train_sae.json"
 
 
 def _write_cache(path: Path) -> None:
-    generator = torch.Generator().manual_seed(0)
-    x = torch.randn(256, D_IN, generator=generator) * 3.0
-    manifest = CacheManifest(
-        run_id="golden",
-        model="synthetic",
-        dtype="float32",
-        layer=0,
-        component="resid_post",
-        d_activation=D_IN,
-        partition="train",
-    )
-    with ShardWriter(
-        out_dir=path, d_activation=D_IN, shard_size_bytes=2048, dtype=torch.float32, manifest=manifest
-    ) as writer:
-        writer.add(x)
-    writer.manifest.complete = True
-    writer.manifest.write(path / "manifest.json")
+    x = torch.randn(256, D_IN, generator=torch.Generator().manual_seed(0)) * 3.0
+    write_cache(path, x, run_id="golden", shard_size_bytes=2048)
 
 
 def run_recipe(name: str, tmp_path: Path) -> dict[str, object]:

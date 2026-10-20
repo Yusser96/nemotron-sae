@@ -1,39 +1,14 @@
 """End-to-end checks for bilingual validation-based early stopping."""
 
 import json
-from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
 
-from sae_pipeline.cache.manifest import CacheManifest
-from sae_pipeline.cache.writer import ShardWriter
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.train import train_sae
-
-
-def _write_cache(path: Path, *, run_id: str, language: str | None, x: torch.Tensor) -> None:
-    manifest = CacheManifest(
-        run_id=run_id,
-        model="synthetic",
-        dtype="float32",
-        layer=0,
-        component="resid_post",
-        d_activation=x.shape[1],
-        partition="validation" if language else "train",
-        language=language,
-    )
-    with ShardWriter(
-        out_dir=path,
-        d_activation=x.shape[1],
-        shard_size_bytes=256,
-        dtype=torch.float32,
-        manifest=manifest,
-    ) as writer:
-        writer.add(x)
-    writer.manifest.complete = True
-    writer.manifest.write(path / "manifest.json")
+from tests.synthetic import write_cache
 
 
 def test_train_stops_only_after_two_stable_post_warmup_bilingual_evals(tmp_path):
@@ -41,17 +16,12 @@ def test_train_stops_only_after_two_stable_post_warmup_bilingual_evals(tmp_path)
     d_in, d_sae = 4, 8
     x = torch.randn(64, d_in)
     train_cache = tmp_path / "train"
-    _write_cache(train_cache, run_id="train", language=None, x=x)
+    write_cache(train_cache, x, run_id="train", shard_size_bytes=256)
 
     validation_dirs = {}
     for language in ("de", "en"):
         validation_dirs[language] = tmp_path / "validation" / language
-        _write_cache(
-            validation_dirs[language],
-            run_id="validation",
-            language=language,
-            x=x[:16],
-        )
+        write_cache(validation_dirs[language], x[:16], language=language, run_id="validation", shard_size_bytes=256)
 
     initial = JumpReLUSAE(d_in=d_in, d_sae=d_sae)
     with torch.no_grad():
