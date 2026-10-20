@@ -333,10 +333,9 @@ evaluate and plot CLIs; the sweep launcher preserves configured slugs and hook
 paths. Routed-expert cache materialization is explicitly unsupported because
 its sparse row count cannot safely use the dense cache's resume offset.
 
-### Audit fixes and migration
+### Cache and checkpoint compatibility
 
-The [audit fix ledger](docs/audit-fixes.md) maps each finding to its focused
-commit and regression coverage. Cache manifests now identify the hook path,
+Cache manifests identify the hook path,
 backend, quantization and storage dtype. Legacy manifests cannot establish that
 identity: build caches under a fresh run ID instead of relabelling old shards.
 
