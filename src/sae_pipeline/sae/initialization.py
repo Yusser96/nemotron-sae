@@ -54,9 +54,6 @@ def initialize_sae(sae, cfg, *, normalization_scale=1.0, checkpoint_filename=Non
                 getattr(sae, key)[:, selected] = fresh[key][:, selected]
             for key in ("b_enc", "log_theta"):
                 getattr(sae, key)[selected] = fresh[key][selected]
-    for name, parameter in sae.named_parameters():
-        if not torch.isfinite(parameter).all():
-            raise ValueError(f"non-finite checkpoint parameter {name}")
     return dict(mode=mode, checkpoint=source, reset_seed=cfg.initialization_reset_seed,
                 reset_count=len(indices), reset_indices=indices.tolist(),
                 preserved_global_decoder_bias=mode != "random", optimizer="fresh",

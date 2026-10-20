@@ -59,16 +59,24 @@ from sae_pipeline.sae.objective import (
     scheduled_l0_target,
     training_loss,
 )
+from sae_pipeline.sae.initialization import initialize_sae
 from sae_pipeline.sae.resets import (
     resample_underused_features,
     reset_l0_allowance,
     residual_reset_due,
 )
+from sae_pipeline.sae.selection import observe_selection, prune_selection
 from sae_pipeline.sae.step_log import StepLog, record_firing, step_log
 from sae_pipeline.sae.train import build_sae_and_optimizer, seed_training
 from sae_pipeline.sae.validation import probe_cache_signature, validation_batches
 
 log = logging.getLogger(__name__)
+
+# Plateau rule the reconstruction-selection observer replays when early stopping does not supply one.
+_SELECTION_RULE = EarlyStoppingCfg(mode="objective", patience=10)
+# Validation L0 and objective multiples that are logged as warnings without stopping the site.
+_L0_WARNING_FACTOR = 3.0
+_OBJECTIVE_WARNING_FACTOR = 10.0
 
 
 @dataclass
@@ -220,7 +228,6 @@ def init_streaming_site(
         last_reset_step = state.get("last_reset_step")
         log.info("%s: resumed at step %d", slug, step)
     else:
-        from sae_pipeline.sae.initialization import initialize_sae
         receipt = initialize_sae(
             sae, sae_cfg, normalization_scale=normalization_scale,
             checkpoint_filename=checkpoint_filename,
@@ -244,7 +251,8 @@ def init_streaming_site(
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
-                        break  # discard an interrupted last write
+                        log.warning("%s: dropping an interrupted line and the rest of %s", slug, path)
+                        break
                     if int(row["step"]) <= step:
                         rows.append(line)
                 temporary = path.with_suffix(".tmp")
@@ -407,8 +415,7 @@ def record_baseline(site: StreamingSite, device: str) -> None:
     if path.exists():
         site.baseline = json.loads(path.read_text())
         if site.step == 0 and site.cfg.track_reconstruction_selection and not site.selection_state:
-            from sae_pipeline.sae.selection import observe_selection
-            observe_selection(site, evaluate_site(site, device), EarlyStoppingCfg(mode="objective", patience=10))
+            observe_selection(site, evaluate_site(site, device), _SELECTION_RULE)
         return
     if site.step > 0:
         log.warning("%s: no baseline from the start of this run; deltas are not reported", site.slug)
@@ -421,8 +428,7 @@ def record_baseline(site: StreamingSite, device: str) -> None:
     path.write_text(json.dumps(site.baseline))
     _write_diagnostic(site, evaluation, "initial")
     if site.cfg.track_reconstruction_selection:
-        from sae_pipeline.sae.selection import observe_selection
-        observe_selection(site, evaluation, EarlyStoppingCfg(mode="objective", patience=10))
+        observe_selection(site, evaluation, _SELECTION_RULE)
     log.info("%s: warm-start baseline %s", site.slug, site.baseline)
 
 
@@ -531,10 +537,10 @@ def threshold_warnings(site, evaluation, step):
         return ()
     warnings = []
     l0 = max(metrics.l0 for metrics in evaluation.metrics.values())
-    if step >= site.cfg.l0_warmup_steps and l0 > 3.0 * site.l0_target:
+    if step >= site.cfg.l0_warmup_steps and l0 > _L0_WARNING_FACTOR * site.l0_target:
         warnings.append('l0')
     best = site.early_stop.best
-    if best is not None and evaluation.mixed_objective > 10.0 * best:
+    if best is not None and evaluation.mixed_objective > _OBJECTIVE_WARNING_FACTOR * best:
         warnings.append('objective')
     return tuple(warnings)
 
@@ -574,7 +580,6 @@ def evaluate_and_update(
     if warnings:
         log.warning("%s finite diagnostic threshold warnings at step %d: %s", site.slug, step, ",".join(warnings))
     if site.cfg.track_reconstruction_selection and divergence is None:
-        from sae_pipeline.sae.selection import observe_selection
         observe_selection(site, evaluation, early_stopping)
     selection_minimum = max(
         site.cfg.warmup_steps, site.cfg.l0_warmup_steps,
@@ -674,8 +679,7 @@ def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = Tru
             _write_diagnostic(site, evaluation, "terminal", reason=reason,
                               diverged=divergence, healthy=export_healthy)
             if site.cfg.track_reconstruction_selection and export_healthy:
-                from sae_pipeline.sae.selection import observe_selection
-                observe_selection(site, evaluation, early_stopping or EarlyStoppingCfg(mode="objective", patience=10))
+                observe_selection(site, evaluation, early_stopping or _SELECTION_RULE)
         site.stopped = True
         if export_healthy:
             write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
@@ -770,7 +774,6 @@ def run_streaming_training(
             prune_checkpoints(site.out_dir, keep_last=site.cfg.keep_last_checkpoints,
                               protected_weights=checkpoints[slug])
             if site.cfg.track_reconstruction_selection:
-                from sae_pipeline.sae.selection import prune_selection
                 prune_selection(site)
 
     for site in sites.values():
