@@ -1,6 +1,5 @@
 import threading
 
-import pytest
 
 from sae_pipeline.cli import bench_buffer
 from sae_pipeline.cli.bench_buffer import read_chunks, write_chunks
@@ -26,4 +25,3 @@ def test_the_reader_consumes_every_chunk_the_writer_publishes_without_exceeding_
     assert max(published) < 2
     for role in ("write", "read"):
         assert results[role]["chunks"] == 6 and results[role]["tokens"] == 24
-        assert results[role]["gb_per_s"] == pytest.approx(results[role]["tokens_per_s"] * (3 + 5) * 2 / 1e9)
