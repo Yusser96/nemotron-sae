@@ -72,3 +72,30 @@ def test_a_validation_evaluation_needs_a_language(tmp_path, monkeypatch, capsys)
     with pytest.raises(SystemExit):
         evaluate.main()
     assert "--language is required" in capsys.readouterr().err
+
+
+def test_delta_ce_flag_scores_a_bounded_heldout_probe(tmp_path, monkeypatch):
+    import yaml
+    from sae_pipeline.data import streaming
+    from sae_pipeline.model import loader
+    from tests.eval.test_delta_ce import TinyLM
+
+    config = _config(tmp_path)
+    settings = yaml.safe_load(config.read_text())
+    settings["eval"].update(delta_ce_n_seqs=2, delta_ce_seq_len=3)
+    config.write_text(yaml.safe_dump(settings))
+    write_cache(tmp_path / "caches/run/L0_resid_post", torch.randn(64, 4))
+    _silent_sae_checkpoint(tmp_path, torch.zeros(4))
+    seen = []
+    def model_and_tokenizer(cfg):
+        seen.append(cfg.device_map)
+        return TinyLM(), None
+    monkeypatch.setattr(loader, "load_model_and_tokenizer", model_and_tokenizer)
+    monkeypatch.setattr(streaming, "make_token_loader", lambda *a, **kw: iter([torch.tensor([[0, 0, 0]])] * 2))
+    monkeypatch.setattr(sys, "argv", ["evaluate", "--config", str(config), *ARGS, "--device", "cpu", "--delta-ce"])
+    evaluate.main()
+    directory = evaluation_directory(tmp_path / "logs", "run", "L0_resid_post", "train", None, None)
+    summary = json.loads((directory / "jumprelu_w8_l0_2_eval.json").read_text())
+    assert seen == [{"": "cpu"}]
+    assert summary["delta_ce"] > 1
+    assert summary["delta_ce_n_seqs"] == 2 and summary["delta_ce_seq_len"] == 3

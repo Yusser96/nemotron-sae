@@ -10,6 +10,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from functools import partial
+from itertools import islice
 import json
 import logging
 from dataclasses import asdict
@@ -22,7 +24,7 @@ from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.cli._site import add_site_arguments, cli_site, sae_variant, variant_stem
-from sae_pipeline.eval.metrics import streaming_reconstruction_metrics
+from sae_pipeline.eval.metrics import delta_ce, streaming_reconstruction_metrics
 from sae_pipeline.eval.output import evaluation_directory
 from sae_pipeline.eval.plots import plot_eval_summary, refresh_plot
 from sae_pipeline.sae.checkpoint import (load_sae_weights)
@@ -54,6 +56,7 @@ def main() -> None:
                    help="Canonical checkpoints use cached normalisation; raw exports use raw activations.")
     p.add_argument("--partition", choices=["train", "validation"], default="train")
     p.add_argument("--language", help="Required with --partition validation.")
+    p.add_argument("--delta-ce", action="store_true", help="Measure held-out next-token CE with this SAE patched into the model.")
     p.add_argument("--device", default=None)
     args = p.parse_args()
     if args.partition == "validation" and not args.language:
@@ -67,7 +70,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = PipelineCfg.from_yaml(args.config)
-    spec, _site = cli_site(cfg, args, p)
+    spec, site = cli_site(cfg, args, p)
     arch, width, l0_target = sae_variant(cfg, args)
 
     if args.partition == "train":
@@ -165,6 +168,33 @@ def main() -> None:
     )
     log.info("Eval: %s", metrics)
 
+    behavioural = {}
+    if args.delta_ce:
+        from sae_pipeline.data.streaming import make_token_loader
+        from sae_pipeline.hooks.components import resolve
+        from sae_pipeline.hooks.patching import patch_sae
+        from sae_pipeline.model.loader import load_model_and_tokenizer
+        from sae_pipeline.model.topology import enumerate_hooks
+
+        model, tokenizer = load_model_and_tokenizer(cfg.model.model_copy(update={"device_map": {"": device}}))
+        site = site or resolve(spec, enumerate_hooks(model))
+        register = partial(patch_sae, spec=spec, site=site, input_scale=input_scale, input_center=input_center)
+        data_cfg = cfg.data.model_copy(update={"seq_len": cfg.eval.delta_ce_seq_len})
+        loader = make_token_loader(data_cfg, tokenizer, batch_size=1, partition="validation",
+                                   languages={args.language} if args.language else None)
+        sums = {key: 0.0 for key in ("ce_clean", "ce_patched", "delta_ce")}
+        count = 0
+        for sequences in islice(loader, cfg.eval.delta_ce_n_seqs):
+            result = delta_ce(model, sae, sequences, register)
+            for key, value in result.items():
+                sums[key] += value
+            count += 1
+        if count != cfg.eval.delta_ce_n_seqs:
+            raise RuntimeError(f"Only {count} of {cfg.eval.delta_ce_n_seqs} behavioural probe sequences are available")
+        behavioural = {key: value / count for key, value in sums.items()}
+        behavioural.update(delta_ce_n_seqs=count, delta_ce_seq_len=cfg.eval.delta_ce_seq_len)
+
+
     out_dir = evaluation_directory(cfg.log.log_dir, args.output_id or cfg.run_id,
                                    spec.slug, args.partition, args.language, args.output_tag)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -185,6 +215,7 @@ def main() -> None:
         "input_scale": input_scale,
         "input_centered": input_center is not None,
         **asdict(metrics),
+        **behavioural,
     }
     with open(summary_path, "w") as f:
         json.dump(payload, f, indent=2)

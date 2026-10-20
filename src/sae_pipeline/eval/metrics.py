@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -304,33 +305,19 @@ def streaming_reconstruction_metrics(
 
 
 @torch.no_grad()
-def delta_ce(
-    model,
-    tokenizer,
-    sae: JumpReLUSAE,
-    sequences: torch.Tensor,           # (B, T) token ids
-    hook_register,                     # callable: (model, sae) -> contextmanager
-) -> dict[str, float]:
-    """Run the model with and without the SAE patched in; return CE delta.
-
-    `hook_register` should install a forward hook that replaces the activation at
-    the target site with sae.decode(sae.encode(activation)). The exact wiring
-    depends on the component, so it's passed in.
-    """
+def delta_ce(model, sae, sequences: torch.Tensor, hook_register) -> dict[str, float]:
+    """Compare next-token cross entropy with and without a temporary SAE patch."""
+    model_training, sae_training = model.training, sae.training
+    model.eval()
     sae.eval()
     sequences = sequences.to(next(model.parameters()).device)
-
-    # Baseline: clean forward pass
-    out_clean = model(sequences, labels=sequences)
-    ce_clean = float(out_clean.loss)
-
-    # Patched: SAE in the loop
-    with hook_register(model, sae):
-        out_patched = model(sequences, labels=sequences)
-        ce_patched = float(out_patched.loss)
-
-    return {
-        "ce_clean": ce_clean,
-        "ce_patched": ce_patched,
-        "delta_ce": ce_patched - ce_clean,
-    }
+    try:
+        ce_clean = float(model(sequences, labels=sequences).loss)
+        with hook_register(model, sae):
+            ce_patched = float(model(sequences, labels=sequences).loss)
+        if not math.isfinite(ce_clean) or not math.isfinite(ce_patched):
+            raise FloatingPointError("Nonfinite behavioural fidelity loss")
+        return {"ce_clean": ce_clean, "ce_patched": ce_patched, "delta_ce": ce_patched - ce_clean}
+    finally:
+        model.train(model_training)
+        sae.train(sae_training)
