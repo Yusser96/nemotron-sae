@@ -170,9 +170,12 @@ class FillStream:
         self.root, self.name, self.slugs, self.device = root, name, slugs, device
         self.deadline, self.max_idle_seconds, self.poll_seconds = deadline, max_idle_seconds, poll_seconds
         self.fill, self.sequence = 0, 0
+        self.skipped_fills = 0
         self._loaded: tuple[int, torch.Tensor, dict[str, torch.Tensor]] | None = None
         self._next: tuple[int, Future] | None = None
         self._batch: tuple[torch.Tensor, dict[str, torch.Tensor]] | None = None
+        self._batch_metrics = {"batch_count": 0, "materialization_seconds": 0.0,
+                              "materialized_bytes": 0, "materialized_tokens": 0}
         self._reader = ThreadPoolExecutor(max_workers=1)
         self._wait(lambda: (root / HEADER).exists(), idle_limit=True)
         produced = json.loads((root / HEADER).read_text(encoding="utf-8"))
@@ -191,38 +194,83 @@ class FillStream:
                 raise TimeoutError(f"No fill arrived in {self.root} for {self.max_idle_seconds:.0f} s")
             time.sleep(self.poll_seconds)
 
-    def _read(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _read(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, float | int]]:
+        started = time.perf_counter()
         fill = fill_dir(self.root, index)
-        token_ids = load_file(fill / "token_ids.safetensors")["token_ids"]
-        return token_ids, {slug: load_file(fill / f"{slug}.safetensors")["activations"] for slug in self.slugs}
+        paths = [fill / "token_ids.safetensors", *(fill / f"{slug}.safetensors" for slug in self.slugs)]
+        byte_count = sum(path.stat().st_size for path in paths)
+        token_ids = load_file(paths[0])["token_ids"]
+        rows = {slug: load_file(fill / f"{slug}.safetensors")["activations"] for slug in self.slugs}
+        mapping_or_load_seconds = time.perf_counter() - started
+        log.info("%s loaded fill %d in %.3fs (%d tokens)", self.name, index,
+                 mapping_or_load_seconds, token_ids.numel())
+        return token_ids, rows, {"mapping_or_load_seconds": mapping_or_load_seconds,
+                                 "file_bytes": byte_count}
 
     def _open(self, index: int) -> None:
         """Make fill ``index`` (or the oldest after it, if it was deleted) the loaded one."""
         wanted = index
+        started = time.perf_counter()
+        availability_wait = 0.0
+        future_wait = 0.0
+        prefetch_wait = 0.0
+        direct_read_wait = 0.0
         while True:
             # Only this wait idles the consumer: the prefetch waits while it trains.
+            wait_started = time.perf_counter()
             self._wait(lambda: any(i >= wanted for i in published_fills(self.root)), idle_limit=True)
+            availability_wait += time.perf_counter() - wait_started
             available = min(i for i in published_fills(self.root) if i >= wanted)
             mark_position(self.root, self.name, available)
             try:
                 if self._next is not None and self._next[0] == available:
-                    token_ids, rows = self._next[1].result()
+                    future_started = time.perf_counter()
+                    token_ids, rows, read_stats, prefetch_wait = self._next[1].result()
+                    future_wait += time.perf_counter() - future_started
                 else:
-                    token_ids, rows = self._read(available)
+                    token_ids, rows, read_stats = self._read(available)
+                    direct_read_wait += float(read_stats["mapping_or_load_seconds"])
                 break
             except FileNotFoundError:
                 # Deleted while being read: a full buffer waits only for the fastest consumer.
                 self._next, wanted = None, available + 1
         if available != index:
+            self.skipped_fills += available - index
+            journal = _consumer_path(self.root, f"{self.name}.skipped.jsonl")
+            with journal.open("a", encoding="utf-8") as output:
+                output.write(json.dumps({"first": index, "last": available - 1,
+                                         "next": available, "skipped_fills": self.skipped_fills}) + "\n")
             log.warning("%s: fills %d-%d were deleted; continuing from fill %d", self.name, index, available - 1, available)
             self.fill, self.sequence = available, 0
         self._loaded = (available, token_ids, rows)
+        journal = _consumer_path(self.root, f"{self.name}.io.jsonl")
+        mapping_or_load_seconds = float(read_stats["mapping_or_load_seconds"])
+        file_bytes = int(read_stats["file_bytes"])
+        foreground_wait = availability_wait + future_wait + direct_read_wait
+        with journal.open("a", encoding="utf-8") as output:
+            output.write(json.dumps({"event": "fill_open", "fill": available, "requested_fill": index,
+                                     "input_wait_seconds": foreground_wait,
+                                     "fill_open_seconds": time.perf_counter() - started,
+                                     "availability_wait_seconds": availability_wait,
+                                     "future_wait_seconds": future_wait,
+                                     "foreground_read_seconds": direct_read_wait,
+                                     "foreground_wait_seconds": foreground_wait,
+                                     "prefetch_wait_seconds": prefetch_wait,
+                                     "mapping_or_load_seconds": mapping_or_load_seconds,
+                                     "file_bytes": file_bytes,
+                                     "mapping_or_load_file_bytes_per_second": (
+                                         file_bytes / mapping_or_load_seconds if mapping_or_load_seconds > 0 else None),
+                                     "mapping_method": "safetensors.load_file (may mmap; file sizes are logical bytes)",
+                                     "tokens": token_ids.numel(), "prefetch_workers": 1}) + "\n")
         self._next = (available + 1, self._reader.submit(self._read_when_published, available + 1))
 
-    def _read_when_published(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    def _read_when_published(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, float | int], float]:
         # A later fill being published means this one was too, though it may be deleted since.
+        started = time.perf_counter()
         self._wait(lambda: any(i >= index for i in published_fills(self.root)))
-        return self._read(index)
+        wait_seconds = time.perf_counter() - started
+        token_ids, rows, stats = self._read(index)
+        return token_ids, rows, stats, wait_seconds
 
     def next_batch(self, batch_size: int) -> torch.Tensor:
         token_parts, row_parts = [], {slug: [] for slug in self.slugs}
@@ -240,9 +288,39 @@ class FillStream:
             needed -= take
             if self.sequence == token_ids.shape[0]:
                 self.fill, self.sequence = self.fill + 1, 0
+        materialization_started = time.perf_counter()
         batch = torch.cat(token_parts)
-        self._batch = (batch, {slug: torch.cat(parts) for slug, parts in row_parts.items()})
+        rows = {slug: torch.cat(parts) for slug, parts in row_parts.items()}
+        materialization_seconds = time.perf_counter() - materialization_started
+        materialized_bytes = batch.numel() * batch.element_size() + sum(
+            value.numel() * value.element_size() for value in rows.values())
+        self._batch_metrics["batch_count"] += 1
+        self._batch_metrics["materialization_seconds"] += materialization_seconds
+        self._batch_metrics["materialized_bytes"] += materialized_bytes
+        self._batch_metrics["materialized_tokens"] += batch.numel()
+        if self._batch_metrics["batch_count"] >= 100:
+            self._journal_batch_metrics()
+        self._batch = (batch, rows)
         return batch
+
+    def _journal_batch_metrics(self) -> None:
+        metrics = self._batch_metrics
+        if not metrics["batch_count"]:
+            return
+        elapsed = float(metrics["materialization_seconds"])
+        record = {
+            "event": "batch_materialization",
+            "batch_count": int(metrics["batch_count"]),
+            "materialization_seconds": elapsed,
+            "materialized_bytes": int(metrics["materialized_bytes"]),
+            "materialized_tokens": int(metrics["materialized_tokens"]),
+            "materialized_bytes_per_second": (metrics["materialized_bytes"] / elapsed if elapsed > 0 else None),
+        }
+        journal = _consumer_path(self.root, f"{self.name}.io.jsonl")
+        with journal.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(record) + "\n")
+        self._batch_metrics = {"batch_count": 0, "materialization_seconds": 0.0,
+                               "materialized_bytes": 0, "materialized_tokens": 0}
 
     def extract(self, token_ids: torch.Tensor) -> ActivationBatch:
         if self._batch is None or self._batch[0] is not token_ids:
@@ -252,12 +330,17 @@ class FillStream:
         return ActivationBatch(token_ids, {slug: value.to(self.device) for slug, value in rows.items()})
 
     def state_dict(self) -> dict[str, object]:
-        return {"fill": self.fill, "sequence": self.sequence}
+        state = {"fill": self.fill, "sequence": self.sequence}
+        if self.skipped_fills:
+            state["skipped_fills"] = self.skipped_fills
+        return state
 
     def load_state_dict(self, state: dict[str, object]) -> None:
         self.fill, self.sequence = int(state["fill"]), int(state["sequence"])
+        self.skipped_fills = int(state.get("skipped_fills", 0))
 
     def close(self) -> None:
         # A prefetch may still be waiting for a fill that will never come.
         self.deadline = 0.0
+        self._journal_batch_metrics()
         self._reader.shutdown(cancel_futures=True)

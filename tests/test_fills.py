@@ -183,6 +183,21 @@ def test_a_consumer_waiting_past_its_deadline_times_out(tmp_path):
     stream.close()
 
 
+def test_skipped_fill_ranges_are_journaled_and_survive_resume(tmp_path):
+    _write_fill(tmp_path, 3, sequences=1, first_token=30)
+    stream = _stream(tmp_path)
+    assert stream.next_batch(1).tolist() == [[30, 31]]
+    state = stream.state_dict()
+    stream.close()
+    assert state["skipped_fills"] == 3
+    rows = [json.loads(row) for row in (tmp_path / "consumers/c0.skipped.jsonl").read_text().splitlines()]
+    assert rows == [{"first": 0, "last": 2, "next": 3, "skipped_fills": 3}]
+    resumed = _stream(tmp_path)
+    resumed.load_state_dict(state)
+    assert resumed.state_dict()["skipped_fills"] == 3
+    resumed.close()
+
+
 def test_a_consumer_refuses_fills_of_another_model_or_without_its_sites(tmp_path):
     write_header(tmp_path, {**HEADER, "slugs": ["a"]})
     with pytest.raises(ValueError, match="holds fills"):
@@ -217,3 +232,28 @@ def test_a_consumer_left_without_fills_gives_up_after_its_idle_limit(tmp_path):
     with pytest.raises(TimeoutError, match="for 0 s"):
         stream.next_batch(1)
     stream.close()
+
+
+def test_fill_io_journal_separates_foreground_wait_and_read_cost(tmp_path):
+    _write_fill(tmp_path, 0, sequences=2, first_token=0)
+    stream = _stream(tmp_path)
+    stream.next_batch(1)
+    stream.close()
+
+    records = [json.loads(line) for line in (tmp_path / "consumers/c0.io.jsonl").read_text().splitlines()]
+    record = next(item for item in records if item["event"] == "fill_open")
+    batches = next(item for item in records if item["event"] == "batch_materialization")
+    fill = fill_dir(tmp_path, 0)
+    expected_bytes = sum((fill / name).stat().st_size for name in ("token_ids.safetensors", "a.safetensors"))
+    assert record["file_bytes"] == expected_bytes
+    assert record["mapping_or_load_seconds"] >= 0
+    assert "may mmap" in record["mapping_method"]
+    assert record["foreground_wait_seconds"] >= 0
+    assert record["input_wait_seconds"] == record["foreground_wait_seconds"]
+    assert record["fill_open_seconds"] >= record["foreground_wait_seconds"]
+    if record["mapping_or_load_seconds"] > 0:
+        assert record["mapping_or_load_file_bytes_per_second"] == pytest.approx(
+            expected_bytes / record["mapping_or_load_seconds"])
+    assert batches["batch_count"] == 1
+    assert batches["materialized_tokens"] == 2
+    assert batches["materialized_bytes"] == 40
