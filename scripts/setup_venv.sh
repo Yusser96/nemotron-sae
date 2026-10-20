@@ -3,8 +3,9 @@
 # Always uses the same .venv at the repo root — never creates per-subdirectory
 # venvs, regardless of where you invoke the script from.
 #
-# On macOS the CPU subset is installed (skips mamba_ssm + causal-conv1d).
-# On Linux + CUDA the full requirements.txt is installed.
+# Dependencies come from pyproject.toml. On macOS the CUDA-only packages are
+# skipped; on Linux + CUDA torch comes from the cu128 index and mamba_ssm +
+# causal-conv1d are built from source against it.
 
 set -euo pipefail
 
@@ -69,8 +70,8 @@ source "$VENV/bin/activate"
 python -m pip install --upgrade pip wheel setuptools
 
 if [ "$(uname)" = "Darwin" ]; then
-    echo ">>> macOS detected — using requirements-cpu.txt (skips CUDA-only packages)"
-    python -m pip install -r "$REPO_ROOT/requirements-cpu.txt"
+    echo ">>> macOS detected — installing without the CUDA-only packages"
+    python -m pip install -e "$REPO_ROOT[dev]"
 else
     # Linux / CUDA path. Two complications resolved here:
     #
@@ -98,8 +99,8 @@ else
     export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;9.0;10.0+PTX}"
     echo ">>> Building source extensions with TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
 
-    echo ">>> Installing full requirements.txt with --no-build-isolation"
-    python -m pip install --no-build-isolation -r "$REPO_ROOT/requirements.txt"
+    echo ">>> Installing the project with its GPU extras (--no-build-isolation)"
+    python -m pip install --no-build-isolation -e "$REPO_ROOT[gpu,dev]"
 
     # Build mamba_ssm + causal-conv1d from GitHub main against the current torch.
     # PyPI/NGC mamba_ssm 2.3.x has a c10::Warning constructor mismatch with
@@ -127,8 +128,5 @@ else
     echo ">>> Post-build sanity: did torch survive intact?"
     python -c "import torch; print(f'torch={torch.__version__}  CUDA={torch.version.cuda}')"
 fi
-
-# Editable install of the project itself.
-python -m pip install -e "$REPO_ROOT"
 
 echo ">>> Done. Activate with: source $VENV/bin/activate"

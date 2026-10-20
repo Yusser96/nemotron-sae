@@ -34,12 +34,6 @@ gpu = [
     "bitsandbytes>=0.44",
 ]
 
-[dependency-groups]
-dev = [
-    "pytest>=8",
-    "pytest-xdist>=3",
-]
-
 [tool.setuptools.packages.find]
 where = ["src"]
 
