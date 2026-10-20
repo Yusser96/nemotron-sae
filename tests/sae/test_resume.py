@@ -5,7 +5,8 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from sae_pipeline.config import SAECfg
-from sae_pipeline.sae.train import build_sae, train_sae
+from sae_pipeline.sae.jumprelu import JumpReLUSAE
+from sae_pipeline.sae.train import train_sae
 from tests.synthetic import write_cache
 
 
@@ -73,7 +74,7 @@ def test_weight_only_finetune_starts_at_one_and_preserves_source(
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     source = source_dir / "sae_step_0000099.safetensors"
-    source_model = build_sae("jumprelu", d_in=4, d_sae=7)
+    source_model = JumpReLUSAE(d_in=4, d_sae=7)
     save_file(
         {
             key: value.detach().cpu().contiguous()

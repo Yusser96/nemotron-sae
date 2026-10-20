@@ -42,7 +42,7 @@ def _site(slug: str, cfg: PipelineCfg, d_in: int, device: str, out_dir: Path, sc
     sae_cfg = cfg.sae
     d_sae = sae_cfg.d_sae if isinstance(sae_cfg.d_sae, int) else sae_cfg.d_sae[0]
     l0_target = sae_cfg.l0_target if isinstance(sae_cfg.l0_target, int) else sae_cfg.l0_target[0]
-    sae, optim = build_sae_and_optimizer(sae_cfg, arch="jumprelu", d_in=d_in, d_sae=d_sae, device=device)
+    sae, optim = build_sae_and_optimizer(sae_cfg, d_in=d_in, d_sae=d_sae, device=device)
     return StreamingSite(
         slug=slug,
         cfg=sae_cfg,

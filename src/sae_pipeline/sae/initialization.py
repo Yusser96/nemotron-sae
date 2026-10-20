@@ -4,7 +4,6 @@ import hashlib
 import math
 import torch
 from sae_pipeline.sae.checkpoint import load_sae_weights, resolve_checkpoint
-from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 
 def parameter_digest(sae):
@@ -23,10 +22,6 @@ def initialize_sae(sae, cfg, *, normalization_scale=1.0, checkpoint_filename=Non
     The checkpoint is unfolded into normalized training coordinates first.
     """
     mode = cfg.initialization_mode
-    if mode not in ("checkpoint", "random", "partial_reset"):
-        raise ValueError(f"Unsupported initialization mode {mode}")
-    if not isinstance(sae, JumpReLUSAE):
-        raise ValueError("Explicit streaming initialization requires JumpReLU")
     indices = torch.empty(0, dtype=torch.long)
     source = None
     fresh = None

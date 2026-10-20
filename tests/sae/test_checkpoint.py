@@ -15,11 +15,11 @@ from sae_pipeline.sae.checkpoint import (
     save_checkpoint_pair,
     write_raw_export,
 )
-from sae_pipeline.sae.train import build_sae
+from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 
 def _write_weights(path: Path, d_in: int = 3, d_sae: int = 5) -> None:
-    model = build_sae("jumprelu", d_in=d_in, d_sae=d_sae)
+    model = JumpReLUSAE(d_in=d_in, d_sae=d_sae)
     save_file(
         {key: value.detach().contiguous() for key, value in model.state_dict().items()},
         str(path),
@@ -70,40 +70,40 @@ def test_hf_repository_url_is_normalized_and_downloaded(monkeypatch, tmp_path: P
 def test_legacy_weights_load_and_dimension_mismatch(tmp_path: Path):
     weights = tmp_path / "sae_step_0000001.safetensors"
     _write_weights(weights, d_in=3, d_sae=5)
-    compatible = build_sae("jumprelu", d_in=3, d_sae=5)
+    compatible = JumpReLUSAE(d_in=3, d_sae=5)
     load_sae_weights(compatible, weights)
 
-    incompatible = build_sae("jumprelu", d_in=3, d_sae=6)
+    incompatible = JumpReLUSAE(d_in=3, d_sae=6)
     with pytest.raises(ValueError, match="incompatible tensor dimensions"):
         load_sae_weights(incompatible, weights)
 
 
 def test_sae_lens_jumprelu_weights_are_adapted(tmp_path: Path):
-    model = build_sae("jumprelu", d_in=3, d_sae=5)
+    model = JumpReLUSAE(d_in=3, d_sae=5)
     state = {key: value.detach().contiguous() for key, value in model.state_dict().items()}
     state["W_dec"] = state["W_dec"].T.contiguous()
     state["threshold"] = state.pop("log_theta").exp()
     weights = tmp_path / "sae_weights.safetensors"
     save_file(state, str(weights))
 
-    loaded = build_sae("jumprelu", d_in=3, d_sae=5)
+    loaded = JumpReLUSAE(d_in=3, d_sae=5)
     load_sae_weights(loaded, weights)
     assert torch.equal(loaded.W_dec, state["W_dec"].T)
     assert torch.equal(loaded.theta, state["threshold"])
 
 
 def test_square_raw_export_preserves_reconstruction_and_native_layout(tmp_path):
-    source = build_sae("jumprelu", d_in=3, d_sae=3)
+    source = JumpReLUSAE(d_in=3, d_sae=3)
     with torch.no_grad():
         source.b_dec.copy_(torch.tensor([1., 2., 3.]))
     x = torch.randn(16, 3)
     raw = write_raw_export(source, tmp_path / "raw.safetensors", input_scale=1.)
-    loaded = build_sae("jumprelu", 3, 3, pre_encoder_bias=False)
+    loaded = JumpReLUSAE(3, 3, pre_encoder_bias=False)
     load_sae_weights(loaded, raw)
     torch.testing.assert_close(source(x)[0], loaded(x)[0])
     native = tmp_path / "native.safetensors"
     save_file({k: v.contiguous() for k, v in source.state_dict().items()}, str(native))
-    canonical = build_sae("jumprelu", 3, 3)
+    canonical = JumpReLUSAE(3, 3)
     load_sae_weights(canonical, native)
     assert torch.equal(source.W_dec, canonical.W_dec)
 
@@ -132,7 +132,7 @@ def test_hf_explicit_arbitrary_filename_is_allowed_for_finetuning(monkeypatch, t
 def test_retention_only_removes_old_complete_pairs(tmp_path: Path):
     orphan = tmp_path / "sae_step_0000000.safetensors"
     _write_weights(orphan)
-    model = build_sae("jumprelu", d_in=3, d_sae=5)
+    model = JumpReLUSAE(d_in=3, d_sae=5)
 
     for step in (1, 2, 3):
         save_checkpoint_pair(
@@ -189,7 +189,7 @@ def test_local_directory_explicit_raw_export_is_usable_for_finetuning(tmp_path, 
     assert resolved.weights_path == weights
     assert resolved.step == -1
     assert resolved.trainer_state_path is None
-    load_sae_weights(build_sae("jumprelu", d_in=3, d_sae=5), resolved.weights_path)
+    load_sae_weights(JumpReLUSAE(d_in=3, d_sae=5), resolved.weights_path)
     with pytest.raises(ValueError, match="Resume requires"):
         resolve_checkpoint(tmp_path, filename=filename, require_trainer_state=True)
 
@@ -249,7 +249,7 @@ def test_trainer_state_round_trips_with_weights_only(tmp_path: Path):
 
 
 def test_failed_save_does_not_commit_partial_pair(monkeypatch, tmp_path: Path):
-    model = build_sae("jumprelu", d_in=3, d_sae=5)
+    model = JumpReLUSAE(d_in=3, d_sae=5)
 
     def fail_save(*args, **kwargs):
         raise RuntimeError("simulated failure")
@@ -264,7 +264,7 @@ def test_failed_save_does_not_commit_partial_pair(monkeypatch, tmp_path: Path):
 
 def test_write_raw_export_is_atomic_and_matches_the_export_state(tmp_path: Path):
     torch.manual_seed(0)
-    sae = build_sae("jumprelu", d_in=4, d_sae=6)
+    sae = JumpReLUSAE(d_in=4, d_sae=6)
     center = torch.randn(4)
     path = write_raw_export(sae, tmp_path / "export.safetensors", input_scale=0.5, activation_center=center)
 

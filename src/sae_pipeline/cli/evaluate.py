@@ -27,7 +27,7 @@ from sae_pipeline.eval.output import evaluation_directory
 from sae_pipeline.eval.plots import plot_eval_summary, refresh_plot
 from sae_pipeline.sae.checkpoint import load_sae_weights, resolve_checkpoint
 from sae_pipeline.sae.normalization import normalization_path
-from sae_pipeline.sae.train import build_sae
+from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 log = logging.getLogger(__name__)
 
@@ -105,8 +105,7 @@ def main() -> None:
     )
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    sae = build_sae(
-        arch,
+    sae = JumpReLUSAE(
         d_in=manifest.d_activation,
         d_sae=width,
         bandwidth=cfg.sae.bandwidth,

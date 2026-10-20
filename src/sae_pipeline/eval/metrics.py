@@ -17,8 +17,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.jumprelu import inverse_simpson_from_mass
+from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 
 @dataclass
@@ -118,7 +118,7 @@ def firing_concentration(frequency: torch.Tensor) -> FiringConcentration:
 
 @torch.no_grad()
 def reconstruction_metrics(
-    sae: SparseAutoencoder,
+    sae: JumpReLUSAE,
     activations: torch.Tensor,
     dead_threshold_tokens: int = 50_000,
     return_arrays: bool = False,
@@ -150,7 +150,7 @@ def _gini(values: torch.Tensor) -> float:
 
 @torch.no_grad()
 def streaming_reconstruction_metrics(
-    sae: SparseAutoencoder,
+    sae: JumpReLUSAE,
     activation_batches,
     *,
     dead_threshold_tokens: int = 50_000,
@@ -328,7 +328,7 @@ def streaming_reconstruction_metrics(
 def delta_ce(
     model,
     tokenizer,
-    sae: SparseAutoencoder,
+    sae: JumpReLUSAE,
     sequences: torch.Tensor,           # (B, T) token ids
     hook_register,                     # callable: (model, sae) -> contextmanager
 ) -> dict[str, float]:

@@ -15,7 +15,6 @@ from dataclasses import dataclass
 import torch
 
 from sae_pipeline.config import SAECfg
-from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.jumprelu import JumpReLUSAE, inverse_simpson_from_mass
 
 
@@ -139,7 +138,7 @@ class LossTerms:
 
 
 def training_loss(
-    sae: SparseAutoencoder,
+    sae: JumpReLUSAE,
     x: torch.Tensor,
     cfg: SAECfg,
     coefficients: LossCoefficients,
@@ -166,11 +165,11 @@ def training_loss(
         reconstruction = squared_error.sum(dim=-1).mean()
     else:
         reconstruction = squared_error.mean()
-    l0_penalty = quad_l0_loss(sae.l0(x), target_l0)  # type: ignore[attr-defined]
+    l0_penalty = quad_l0_loss(sae.l0(x), target_l0)
 
     inverse_simpson_penalty = reconstruction.new_zeros(())
     d_is = u_is = 0.0
-    if cfg.inverse_simpson_floor > 0 and cfg.inverse_simpson_max_scale > 0 and isinstance(sae, JumpReLUSAE):
+    if cfg.inverse_simpson_floor > 0 and cfg.inverse_simpson_max_scale > 0:
         firing = sae.jump_relu_gate(x).mean(dim=0)
         if usage is not None:
             with torch.no_grad():
@@ -186,7 +185,7 @@ def training_loss(
         inverse_simpson_penalty = coefficients.lambda_is * gap.square()
 
     auxk_penalty = reconstruction.new_zeros(())
-    if cfg.auxk_scale > 0 and tokens_since_fired is not None and isinstance(sae, JumpReLUSAE):
+    if cfg.auxk_scale > 0 and tokens_since_fired is not None:
         # A fraction of the current reconstruction loss, whatever its reduction or input scale.
         auxk_penalty = (
             cfg.auxk_scale
@@ -224,7 +223,7 @@ class GradientStats:
 
 
 def optimizer_step(
-    sae: SparseAutoencoder,
+    sae: JumpReLUSAE,
     optim: torch.optim.Optimizer,
     loss: torch.Tensor,
     x: torch.Tensor,
@@ -243,9 +242,9 @@ def optimizer_step(
     # encoder GEMM and three host synchronizations on every unlogged update.
     if step % cfg.log_every == 0:
         with torch.no_grad():
-            z = sae.gate_input(x)  # type: ignore[attr-defined]
+            z = sae.gate_input(x)
             ste_window_pct = 100.0 * (
-                (z - sae.theta).abs() < (cfg.bandwidth / 2.0)  # type: ignore[attr-defined]
+                (z - sae.theta).abs() < (cfg.bandwidth / 2.0)
             ).float().mean().item()
             theta_grad = getattr(sae, "log_theta").grad
             encoder_grad = getattr(sae, "W_enc").grad

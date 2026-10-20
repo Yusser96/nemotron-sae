@@ -30,7 +30,6 @@ from sae_pipeline.config import EarlyStoppingCfg, SAECfg, StreamCfg
 from sae_pipeline.eval.metrics import ReconMetrics, streaming_reconstruction_metrics
 from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves, refresh_plot
 from sae_pipeline.extraction.base import ActivationExtractor
-from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.checkpoint import (
     capture_random_state,
     load_sae_weights,
@@ -74,7 +73,7 @@ class StreamingSite:
 
     slug: str
     cfg: SAECfg
-    sae: SparseAutoencoder
+    sae: JumpReLUSAE
     optim: torch.optim.Optimizer
     arch: str
     l0_target: int
@@ -170,7 +169,7 @@ def init_streaming_site(
             raise ValueError(f"{slug}: normalization scale must be finite and positive")
 
     _seed_training(sae_cfg.seed)
-    sae, optim = build_sae_and_optimizer(sae_cfg, arch=arch, d_in=d_in, d_sae=d_sae, device=device)
+    sae, optim = build_sae_and_optimizer(sae_cfg, d_in=d_in, d_sae=d_sae, device=device)
     validation_readers = {lang: ShardReader(path) for lang, path in sorted(validation_cache_dirs.items())}
     validation_cache_signature = _probe_cache_signature(validation_readers)
     ever_fired = torch.zeros(d_sae, dtype=torch.bool, device=device)
@@ -309,7 +308,6 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     if residual_reset_due(cfg, step):
         # No cache to calibrate on (residual_reset_calibration_tokens is for
         # train_sae): new directions and thresholds come from this batch.
-        assert isinstance(site.sae, JumpReLUSAE)
         site.feature_resets += resample_underused_features(
             site.sae,
             site.optim,
@@ -444,8 +442,8 @@ def _plot_title(site: StreamingSite) -> str:
 
 
 def write_export(site: StreamingSite, path: Path) -> Path | None:
-    """Raw-activation export, for whole-vector-normalised JumpReLU sites only."""
-    if site.cfg.input_normalization != "whole_vector" or not isinstance(site.sae, JumpReLUSAE):
+    """Raw-activation export, for whole-vector-normalised sites only."""
+    if site.cfg.input_normalization != "whole_vector":
         return None
     return write_raw_export(site.sae, path, input_scale=site.normalization_scale)
 

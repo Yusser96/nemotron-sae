@@ -25,7 +25,6 @@ from sae_pipeline.eval.metrics import (
     streaming_reconstruction_metrics,
 )
 from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves, refresh_plot
-from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.checkpoint import (
     capture_random_state,
     load_sae_weights,
@@ -55,29 +54,11 @@ from sae_pipeline.sae.objective import (
 log = logging.getLogger(__name__)
 
 
-def build_sae(
-    arch: str,
-    d_in: int,
-    d_sae: int,
-    bandwidth: float = 0.001,
-    pre_encoder_bias: bool = True,
-) -> SparseAutoencoder:
-    if arch == "jumprelu":
-        return JumpReLUSAE(
-            d_in=d_in,
-            d_sae=d_sae,
-            bandwidth=bandwidth,
-            pre_encoder_bias=pre_encoder_bias,
-        )
-    raise ValueError(f"Unknown SAE arch {arch!r}")
-
-
 def build_sae_and_optimizer(
-    cfg: SAECfg, *, arch: str, d_in: int, d_sae: int, device: str
-) -> tuple[SparseAutoencoder, torch.optim.Optimizer]:
+    cfg: SAECfg, *, d_in: int, d_sae: int, device: str
+) -> tuple[JumpReLUSAE, torch.optim.Optimizer]:
     """Build the SAE and its Adam optimizer from one SAECfg, ready to train."""
-    sae = build_sae(
-        arch,
+    sae = JumpReLUSAE(
         d_in=d_in,
         d_sae=d_sae,
         bandwidth=cfg.bandwidth,
@@ -140,7 +121,7 @@ def record_firing(
 
 @torch.no_grad()
 def step_log(
-    sae: SparseAutoencoder,
+    sae: JumpReLUSAE,
     x: torch.Tensor,
     *,
     step: int,
@@ -166,13 +147,13 @@ def step_log(
     dead_latents = dead_below_threshold = 0
     if dead is not None:
         dead_latents = int(dead.sum())
-        dead_below_threshold = int((dead & (sae.gate_input(x) > 0).any(dim=0)).sum())  # type: ignore[attr-defined]
+        dead_below_threshold = int((dead & (sae.gate_input(x) > 0).any(dim=0)).sum())
     return StepLog(
         step=step,
         loss=float(loss.detach()),
         mse=float(terms.mse.detach()),
         l0_penalty=float(terms.l0_penalty.detach()),
-        hard_l0=sae.hard_l0(x).item(),  # type: ignore[attr-defined]
+        hard_l0=sae.hard_l0(x).item(),
         lr=lr,
         lambda_l0=lambda_l0,
         dead_pct=dead_pct_from_fired(ever_fired),
@@ -870,7 +851,7 @@ def train_sae(
             normalization.n_tokens,
         )
 
-    sae, optim = build_sae_and_optimizer(cfg, arch=arch, d_in=d_in, d_sae=d_sae, device=device)
+    sae, optim = build_sae_and_optimizer(cfg, d_in=d_in, d_sae=d_sae, device=device)
 
     buffer = ActivationBuffer(
         cache_dir=cache_dir,
@@ -899,8 +880,6 @@ def train_sae(
         if cfg.checkpoint_format == "raw_export":
             if is_resume:
                 raise ValueError("raw_export checkpoints can only be fine-tuned, not resumed")
-            if not isinstance(sae, JumpReLUSAE):
-                raise ValueError("raw_export conversion is currently implemented for JumpReLU only")
             if cfg.input_normalization != "whole_vector":
                 raise ValueError("raw_export fine-tuning requires whole_vector input normalisation")
             sae.unfold_raw_export(normalization_scale)
@@ -1254,7 +1233,7 @@ def train_sae(
 
     if final_checkpoint is None:
         raise ValueError("Training produced no checkpoint; n_steps must be positive")
-    if cfg.input_normalization == "whole_vector" and isinstance(sae, JumpReLUSAE):
+    if cfg.input_normalization == "whole_vector":
         export_path = write_raw_export(
             sae,
             out_dir / f"sae_export_step_{completed_step:07d}.safetensors",

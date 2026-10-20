@@ -117,7 +117,7 @@ def test_combined_feature_use_strategy_is_valid():
 
 
 def test_unsupported_sae_architectures_are_rejected_by_config():
-    """Do not let schema-valid configs fail later inside build_sae."""
+    """Only the implemented JumpReLU architecture passes validation."""
     for arch in ("topk", "batchtopk", "matryoshka"):
         with pytest.raises(ValueError):
             SAECfg(arch=arch)
