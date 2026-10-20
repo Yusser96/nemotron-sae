@@ -29,6 +29,10 @@ experiments/
 env.sh
 .env
 .claude/
+.agents
+.codex
+.uv-cache
+.venv*
 
 # Local/private experiment configurations.
 configs/finetuning.yml
@@ -52,5 +56,10 @@ slurm/soofi_*.sh
 tests/*soofi*.py
 tests/test_select_l26_program.py
 internal_docs/
-internal-docs/
 sae_pipeline.tar.gz
+
+# Private SAE study staging and operator entrypoints.
+/temp/
+/scripts/soofi_studies/
+/tests/test_sae_study_recovery.py
+/tests/test_sae_validation_report.py
