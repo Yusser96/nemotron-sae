@@ -124,8 +124,11 @@ def test_unsupported_sae_architectures_are_rejected_by_config():
 
 
 def test_early_stopping_config_rejects_invalid_thresholds():
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError) as error:
         EarlyStoppingCfg(patience=0)
+    detail = error.value.errors()[0]
+    assert detail["type"] == "greater_than" and detail["loc"] == ("patience",)
+    assert detail["input"] == 0 and detail["ctx"] == {"gt": 0}
     with pytest.raises(ValueError, match="positive"):
         EarlyStoppingCfg(fvu_relative_tolerance=0.0)
 
