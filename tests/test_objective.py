@@ -197,6 +197,7 @@ def test_cosine_decay_needs_a_run_length():
 
 
 def _one_update(cfg: SAECfg, *, step: int) -> tuple[JumpReLUSAE, torch.Tensor, torch.optim.Optimizer]:
+    cfg = cfg.model_copy(update={"log_every": 1})
     torch.manual_seed(1)
     sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
     before = sae.W_dec.detach().clone()
@@ -207,6 +208,17 @@ def _one_update(cfg: SAECfg, *, step: int) -> tuple[JumpReLUSAE, torch.Tensor, t
     assert 0.0 <= stats.ste_window_pct <= 100.0
     assert stats.encoder_grad_norm > 0.0
     return sae, before, optim
+
+
+def test_optimizer_step_skips_gradient_diagnostics_between_logged_steps():
+    torch.manual_seed(1)
+    sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+    optim = torch.optim.Adam(sae.parameters())
+    cfg = SAECfg(log_every=10)
+    x = torch.randn(32, 6)
+    terms = training_loss(sae, x, cfg, LossCoefficients(lr=1e-2, lambda_l0=1.0, lambda_is=0.0), target_l0=3.0)
+    stats = optimizer_step(sae, optim, terms.total, x, cfg, step=5, lr=1e-2)
+    assert (stats.ste_window_pct, stats.theta_grad_norm, stats.encoder_grad_norm) == (0.0, 0.0, 0.0)
 
 
 def test_optimizer_step_sets_lr_and_keeps_unit_norm_decoder():
