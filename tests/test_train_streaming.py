@@ -339,6 +339,15 @@ def test_runs_to_the_token_cap_with_scheduled_evaluations(tmp_path):
     assert stream.position == 3 * TOKENS_PER_FWD // SEQ_LEN
 
 
+def test_nonfinite_warm_start_is_rejected_before_training(tmp_path):
+    path = _warm_start(tmp_path / "warm.safetensors")
+    tensors = load_file(str(path))
+    tensors["W_enc"][0, 0] = math.nan
+    save_file(tensors, str(path))
+    with pytest.raises(ValueError, match="non-finite checkpoint parameter W_enc"):
+        _site(tmp_path, _sae_cfg(path))
+
+
 def test_pauses_at_the_time_limit_and_resumes_without_repeating_tokens(tmp_path, monkeypatch):
     warm = _warm_start(tmp_path / "warm.safetensors")
     clock = itertools.count()

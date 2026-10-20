@@ -109,6 +109,9 @@ class SAECfg(BaseModel):
     decoder_unit_norm: bool = True
     pre_encoder_bias: bool = True
     input_normalization: InputNormalization = "none"
+    initialization_mode: Literal["checkpoint", "random", "partial_reset"] = "checkpoint"
+    initialization_reset_fraction: float = Field(default=0.5, gt=0.0, lt=1.0)
+    initialization_reset_seed: int = 42
     checkpoint_format: CheckpointFormat = "native"
     lr_schedule: LRSchedule = "cosine_decay"
     gradient_clip_norm: float | None = None

@@ -212,20 +212,18 @@ def init_streaming_site(
         last_reset_step = state.get("last_reset_step")
         log.info("%s: resumed at step %d", slug, step)
     else:
-        if sae_cfg.checkpoint_source is None:
-            raise ValueError(f"{slug}: streaming training needs sae.checkpoint_source as a warm start")
-        source = resolve_checkpoint(
-            sae_cfg.checkpoint_source,
-            filename=checkpoint_filename,
-            revision=sae_cfg.checkpoint_revision,
-            require_trainer_state=False,
+        from sae_pipeline.sae.initialization import initialize_sae
+        receipt = initialize_sae(
+            sae, sae_cfg, normalization_scale=normalization_scale,
+            checkpoint_filename=checkpoint_filename,
         )
-        load_sae_weights(sae, source.weights_path)
-        if sae_cfg.checkpoint_format == "raw_export":
-            if not isinstance(sae, JumpReLUSAE) or sae_cfg.input_normalization != "whole_vector":
-                raise ValueError(f"{slug}: raw_export warm starts need a JumpReLU SAE with whole_vector input")
-            sae.unfold_raw_export(normalization_scale)
-        log.info("%s: fine-tuning %s with a fresh optimizer", slug, source.weights_path)
+        (out_dir / "initialization.json").write_text(json.dumps(receipt, indent=2))
+        log.info("%s: %s initialization, %d reset latents, fresh optimizer",
+                 slug, receipt["mode"], receipt["reset_count"])
+
+    for name, parameter in sae.named_parameters():
+        if not torch.isfinite(parameter).all():
+            raise ValueError(f"{slug}: non-finite checkpoint parameter {name}")
 
     if sae_cfg.input_normalization == "whole_vector":
         write_normalization(normalization_path(out_dir), statistic)
