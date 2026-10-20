@@ -366,6 +366,28 @@ class EarlyStoppingCfg(BaseModel):
         return self
 
 
+class GPUBufferCfg(BaseModel):
+    """GPU activation queue ceilings, fitted to each allocated device's live VRAM."""
+
+    max_frames: int = Field(default=128, ge=4, strict=True)
+    max_gib: float = Field(default=16.0, gt=0, allow_inf_nan=False)
+    max_vram_fraction: float = Field(default=0.20, gt=0, le=1, allow_inf_nan=False)
+    workspace_reserve_gib: float = Field(default=12.0, ge=0, allow_inf_nan=False)
+    worker_reserve_gib: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    high_water_fraction: float = Field(default=0.75, gt=0, lt=1, allow_inf_nan=False)
+    low_water_fraction: float = Field(default=0.25, gt=0, lt=1, allow_inf_nan=False)
+    producer_workspace_reserve_gib: float = Field(default=6.0, ge=0, allow_inf_nan=False)
+    producer_inflight_frames: int = Field(default=3, ge=1, le=16, strict=True)
+    helper_max_frames: int = Field(default=8, ge=4, strict=True)
+    helper_max_gib: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _ordered_watermarks(self):
+        if self.low_water_fraction >= self.high_water_fraction:
+            raise ValueError("GPU buffer low watermark must be below its high watermark")
+        return self
+
+
 class StreamCfg(BaseModel):
     """Training from live model activations instead of an activation cache.
 
@@ -374,6 +396,8 @@ class StreamCfg(BaseModel):
     ``cache.tokens_per_fwd`` activations per site, split into whole
     ``sae.batch_size`` batches, so resuming needs only the token stream state.
     """
+
+    gpu_buffer: GPUBufferCfg = Field(default_factory=GPUBufferCfg)
 
     enabled: bool = False
     model_device: str = "cuda:0"
