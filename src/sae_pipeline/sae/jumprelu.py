@@ -232,13 +232,3 @@ def inverse_simpson_from_mass(
     raw_d_is = 1.0 / (probabilities.square().sum() + eps)
     d_is = torch.where(total > 0, raw_d_is, torch.zeros_like(raw_d_is))
     return d_is, d_is / float(d_sae), probabilities
-
-
-def compute_inverse_simpson(
-    firing_frequency: torch.Tensor,
-    d_sae: int,
-    eps: float = 1e-12,
-) -> tuple[float, float]:
-    """Compute ``(D_IS, u_IS)`` from feature firing frequencies or counts."""
-    d_is, u_is, _ = inverse_simpson_from_mass(firing_frequency, d_sae, eps)
-    return float(d_is.item()), float(u_is.item())

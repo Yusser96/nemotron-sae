@@ -29,27 +29,6 @@ class ShardReader:
             with safe_open(str(path), framework="pt", device="cpu") as f:
                 yield f.get_tensor("x")
 
-    def iter_batches(self, batch_size: int, infinite: bool = True) -> Iterator[torch.Tensor]:
-        """Yield (batch_size, d) batches by concatenating across shards as needed.
-
-        Robust to shards smaller than batch_size: we buffer leftovers and stitch them
-        with the next shard. Drops the final partial batch each pass.
-        """
-        leftover: torch.Tensor | None = None
-        while True:
-            for shard in self.iter_shards():
-                buf = shard if leftover is None else torch.cat([leftover, shard], dim=0)
-                leftover = None
-                n = buf.shape[0]
-                i = 0
-                while i + batch_size <= n:
-                    yield buf[i : i + batch_size]
-                    i += batch_size
-                if i < n:
-                    leftover = buf[i:].contiguous()
-            if not infinite:
-                return
-            # New pass: keep leftover bridging into the next iteration of shards.
 
 
 class _BatchStream:

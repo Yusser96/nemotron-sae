@@ -1,10 +1,7 @@
 """Reconstruction selection and a non-controlling historical stopping observer."""
 from __future__ import annotations
-import hashlib
 import json
 import os
-from pathlib import Path
-import shutil
 import math
 from dataclasses import asdict
 from sae_pipeline.sae.train import ObjectiveEarlyStop
@@ -35,9 +32,9 @@ def observe_selection(site, evaluation, rule):
     observer.load_state_dict(state.get('observer', {}))
     # The historical trainer did not feed its initial baseline into plateau state.
     if site.step>0 and site.step % rule.evaluation_interval_steps==0:
-        improved, reduced, stopped = observer.update(objective, rule, eligible=site.step >= rule.minimum_steps)
+        _, reduced, stopped = observer.update(objective, rule, eligible=site.step >= rule.minimum_steps)
     else:
-        improved=reduced=stopped=False
+        reduced = stopped = False
     state['observer'] = observer.state_dict()
     if stopped and state.get('first_stop') is None:
         relative = f'selection/first_stop_step_{site.step:07d}.safetensors'

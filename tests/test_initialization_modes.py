@@ -1,5 +1,3 @@
-from pathlib import Path
-import json
 import torch
 import pytest
 from safetensors.torch import save_file

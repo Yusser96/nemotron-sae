@@ -123,34 +123,9 @@ def _sorted_weight_names(names: list[str]) -> list[str]:
     )
 
 
-def _select_name(
-    names: list[str],
-    filename: str | None,
-    require_trainer_state: bool,
-) -> tuple[str, str | None]:
+def _select_name(names: list[str], require_trainer_state: bool) -> tuple[str, str | None]:
+    """The latest checkpoint in ``names`` and its trainer state, if present or required."""
     available = set(names)
-    if filename is not None:
-        selected = filename
-        if selected not in available:
-            raise FileNotFoundError(f"Checkpoint {selected!r} was not found")
-        basename = PurePosixPath(selected).name
-        parent = PurePosixPath(selected).parent
-        if _WEIGHTS_RE.match(basename):
-            state_name = str(parent / companion_state_name(selected))
-        else:
-            state_name = None
-        if state_name not in available:
-            if require_trainer_state:
-                if state_name is None:
-                    raise ValueError(
-                        "Resume requires a checkpoint named sae_step_<step>.safetensors"
-                    )
-                raise FileNotFoundError(
-                    f"Resume requires companion state {state_name!r}"
-                )
-            state_name = None
-        return selected, state_name
-
     candidates = _sorted_weight_names(names)
     if require_trainer_state:
         complete: list[tuple[str, str]] = []
@@ -233,9 +208,7 @@ def resolve_checkpoint(
         # Automatic latest-checkpoint discovery remains top-level only,
         # matching prune_checkpoints() and avoiding unrelated nested runs.
         relative_names = [path.name for path in local.iterdir() if path.is_file()]
-        selected, state_name = _select_name(
-            relative_names, filename, require_trainer_state
-        )
+        selected, state_name = _select_name(relative_names, require_trainer_state)
         weights_path = local / selected
         state_path = local / state_name if state_name is not None else None
         return ResolvedCheckpoint(
@@ -265,9 +238,7 @@ def resolve_checkpoint(
                 raise FileNotFoundError(f"Resume requires companion state {state_name!r}")
     else:
         repo_files = list_repo_files(repo_id=repo_id, revision=revision)
-        selected, state_name = _select_name(
-            list(repo_files), None, require_trainer_state
-        )
+        selected, state_name = _select_name(list(repo_files), require_trainer_state)
     weights_path = Path(
         hf_hub_download(repo_id=repo_id, filename=selected, revision=revision)
     )

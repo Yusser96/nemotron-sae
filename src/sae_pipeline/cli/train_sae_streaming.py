@@ -44,7 +44,6 @@ from sae_pipeline.extraction.vllm_worker import hookable
 from sae_pipeline.hooks.components import select_sites, site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import dump_topology, enumerate_hooks
-from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.train_streaming import committed_stream_checkpoints, TokenStream, init_streaming_site, run_streaming_training, state_paths
 
 log = logging.getLogger(__name__)

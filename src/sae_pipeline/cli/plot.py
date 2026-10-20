@@ -21,7 +21,6 @@ from sae_pipeline.config import PipelineCfg
 from sae_pipeline.cli._site import add_site_arguments, cli_site
 from sae_pipeline.eval.output import evaluation_directory
 from sae_pipeline.eval.plots import plot_eval_summary, plot_training_curves
-from sae_pipeline.hooks.components import ComponentSpec
 
 log = logging.getLogger(__name__)
 
