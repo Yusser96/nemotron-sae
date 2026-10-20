@@ -66,6 +66,8 @@ def _load_source_dataset(cfg: DataCfg, source: DataSourceCfg) -> Any:
     load_kwargs: dict[str, Any] = {"split": cfg.split, "streaming": cfg.streaming}
     if source.name is not None:
         load_kwargs["name"] = source.name
+    if source.revision is not None:
+        load_kwargs["revision"] = source.revision
     ds = load_dataset(source.source, **load_kwargs)
     if cfg.streaming and cfg.shuffle_buffer:
         ds = ds.shuffle(seed=cfg.seed, buffer_size=cfg.shuffle_buffer)

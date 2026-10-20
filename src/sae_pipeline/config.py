@@ -47,6 +47,7 @@ class DataSourceCfg(BaseModel):
     """One independently streamed corpus in a multilingual activation mix."""
 
     source: str
+    revision: str | None = None
     name: str | None = None
     text_field: str = "text"
     language: str | None = None
