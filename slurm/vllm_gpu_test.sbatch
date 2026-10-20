@@ -37,5 +37,5 @@ if ! PYTHONPATH="$OVERLAY" python3 -c "import pytest" 2>/dev/null; then
     python3 -m pip install --quiet --no-deps --target "$OVERLAY" pytest pluggy iniconfig
 fi
 [[ -z "$HF_HOME" ]] && unset HF_HOME
-PYTHONPATH="$PWD/src:$OVERLAY" python3 -m pytest tests/test_vllm_extraction_gpu.py -m cuda -v -s -p no:cacheprovider
+PYTHONPATH="$PWD/src:$OVERLAY" python3 -m pytest tests/extraction/test_vllm_gpu.py -m cuda -v -s -p no:cacheprovider
 '

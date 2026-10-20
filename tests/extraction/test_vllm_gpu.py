@@ -1,6 +1,6 @@
 """Real-engine check of the vLLM hook extraction (needs vLLM, a GPU and a NemotronH model).
 
-Run with ``SAE_TEST_MODEL=<hf id or path> pytest -m cuda tests/test_vllm_extraction_gpu.py -s``.
+Run with ``SAE_TEST_MODEL=<hf id or path> pytest -m cuda tests/extraction/test_vllm_gpu.py -s``.
 ``SAE_TEST_SINK`` optionally points the sink somewhere specific (e.g. /dev/shm).
 Layers 0, 1 and 5 of NemotronH are a Mamba, a MoE and an attention block.
 """

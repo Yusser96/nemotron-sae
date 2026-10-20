@@ -18,8 +18,8 @@ from sae_pipeline.extraction.remote import (
     take_tokens,
 )
 from sae_pipeline.extraction.vllm import serve_activations
-from tests.test_vllm_extractor import SPECS, _cfg, _FakeEngine, _reference
-from tests.test_vllm_worker_extension import D, _Worker
+from tests.extraction.test_vllm import SPECS, _cfg, _FakeEngine, _reference
+from tests.extraction.test_vllm_worker import D, _Worker
 
 
 def _free_port() -> int:

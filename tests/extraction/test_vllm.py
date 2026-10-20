@@ -12,7 +12,7 @@ from sae_pipeline.extraction.vllm import VLLMExtractor, fit_sequences, produce_f
 from sae_pipeline.extraction.vllm_worker import ActivationHookExtension
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.checkpoint import load_trainer_state
-from tests.test_vllm_worker_extension import _CausalLM
+from tests.extraction.test_vllm_worker import _CausalLM
 
 SPECS = {
     "L0_mamba_out": ComponentSpec.parse(0, "mamba_out"),

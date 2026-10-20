@@ -55,7 +55,7 @@ RECIPES = {
 }
 
 # Captured from the pre-refactor implementation (commit 5b5d34f) with
-# ``python -m tests.test_train_golden`` -- regenerate only for an intended
+# ``python -m tests.sae.test_train_golden`` -- regenerate only for an intended
 # behaviour change.
 GOLDEN_PATH = Path(__file__).parent / "golden" / "train_sae.json"
 

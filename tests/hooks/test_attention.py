@@ -5,7 +5,7 @@ from torch import nn
 from sae_pipeline.hooks.components import ComponentSpec, resolve
 from sae_pipeline.hooks.extractor import capture, capture_many
 from sae_pipeline.model.topology import HookSite, enumerate_hooks
-from tests.test_vllm_worker_extension import _Worker
+from tests.extraction.test_vllm_worker import _Worker
 
 
 class FakeAttention(nn.Module):
@@ -57,7 +57,7 @@ def test_topology_classifies_mixers_and_resolves_individual_heads():
 
 
 def test_keyword_residual_input_is_captured():
-    from tests.test_extractor import _Model
+    from tests.hooks.test_extractor import _Model
     model = _Model()
     x = torch.randn(2, 3, 3)
     with capture(model, ComponentSpec.parse(0, "resid_pre"), HookSite("resid_pre", 0, "layers.0")) as buf:
