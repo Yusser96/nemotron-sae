@@ -61,6 +61,13 @@ class ReconMetrics:
     q90: float = 0.0
     q99: float = 0.0
     support_n_tokens: int = 0
+    explained_variance: float = 0.0
+    l0_p10: float = 0.0
+    l0_p50: float = 0.0
+    l0_p90: float = 0.0
+    l0_p99: float = 0.0
+    rare_nonzero_lt_1e5: int = 0
+    rare_nonzero_lt_1e4: int = 0
 
 
 @dataclass
@@ -169,6 +176,7 @@ def streaming_reconstruction_metrics(
     l0_sum = 0.0
     err_sum = 0.0
     x_mean = None
+    residual_sum = None
     variance_sum = torch.zeros((), dtype=torch.float64, device=device)
     support_counts = torch.zeros(sae.d_sae, dtype=torch.float64, device=device)
     l0_parts: list[torch.Tensor] = []
@@ -195,7 +203,10 @@ def streaming_reconstruction_metrics(
         activations = activations[:n_batch]
         x_hat = sae.decode(f[:n_batch])
         l0_per_token = active[:n_batch].sum(dim=-1)
-        err_per_token = (activations - x_hat).pow(2).sum(dim=-1)
+        residual = activations - x_hat
+        residual_batch_sum = residual.to(torch.float64).sum(dim=0)
+        residual_sum = residual_batch_sum if residual_sum is None else residual_sum + residual_batch_sum
+        err_per_token = residual.pow(2).sum(dim=-1)
         l0_sum += float(l0_per_token.sum().item())
         err_sum += float(err_per_token.sum().item())
         # Merge centred second moments in float64. E[x²] - E[x]² loses
@@ -215,8 +226,8 @@ def streaming_reconstruction_metrics(
             x_mean += delta * (n_batch / combined_n)
         n_total += n_batch
 
+        l0_parts.append(l0_per_token.detach().cpu().to(torch.int32))
         if return_arrays:
-            l0_parts.append(l0_per_token.detach().cpu().to(torch.int32))
             err_parts.append(err_per_token.detach().cpu().float())
 
     if n_total == 0 or x_mean is None:
@@ -287,6 +298,13 @@ def streaming_reconstruction_metrics(
         q90=q90,
         q99=q99,
         support_n_tokens=support_seen,
+        explained_variance=1.0 - max(0.0, err_sum - float(residual_sum.square().sum()) / n_float) / max(float(variance_sum), 1e-12),
+        l0_p10=float(torch.quantile(torch.cat(l0_parts).float(), 0.10)),
+        l0_p50=float(torch.quantile(torch.cat(l0_parts).float(), 0.50)),
+        l0_p90=float(torch.quantile(torch.cat(l0_parts).float(), 0.90)),
+        l0_p99=float(torch.quantile(torch.cat(l0_parts).float(), 0.99)),
+        rare_nonzero_lt_1e5=int(((firing_frequency > 0) & (firing_frequency < 1e-5)).sum()),
+        rare_nonzero_lt_1e4=int(((firing_frequency > 0) & (firing_frequency < 1e-4)).sum()),
     )
     if not return_arrays:
         return metrics
