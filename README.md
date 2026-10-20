@@ -276,7 +276,7 @@ data-induced bug surfaces in dev too.
 ## Memory & GPU efficiency
 
 - LM weights live on GPU only (`device_map="auto"`); BF16 by default,
-  FP8 sibling repo or 4-bit `bitsandbytes` for ≤ 24 GB GPUs.
+  a pre-quantized checkpoint, or 4-bit `bitsandbytes` for ≤ 24 GB GPUs.
 - Activation buffer is bounded:
   `n_batches_in_buffer × batch_size × d_model × 4 B` ≈ 360 MB at defaults.
 - Shards are memory-mapped, never fully loaded.

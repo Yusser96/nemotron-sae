@@ -61,14 +61,9 @@ def _normalise_model_runtime_config(model: torch.nn.Module) -> None:
 
 
 def _resolve_quantization_kwargs(cfg: ModelCfg) -> dict[str, Any]:
-    """Decide whether to apply BF16, FP8 (sibling repo), or 4-bit quantization."""
+    """BF16, ``cfg.dtype`` (auto), or 4-bit NF4 weights; pre-quantized checkpoints load via auto."""
     if cfg.load_quant == "bf16":
         return {"torch_dtype": torch.bfloat16}
-
-    if cfg.load_quant == "fp8":
-        # Use the FP8 sibling repo instead of mid-flight quantization.
-        log.info("FP8 selected: caller should set model.name to the FP8 sibling repo.")
-        return {"torch_dtype": torch.bfloat16}  # FP8 weights load in BF16-typed wrapper
 
     if cfg.load_quant == "nf4":
         from transformers import BitsAndBytesConfig
@@ -81,7 +76,6 @@ def _resolve_quantization_kwargs(cfg: ModelCfg) -> dict[str, Any]:
         )
         return {"quantization_config": bnb}
 
-    # auto: use BF16 by default
     return {"torch_dtype": _DTYPE_MAP[cfg.dtype]}
 
 

@@ -14,7 +14,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-Quant = Literal["auto", "bf16", "fp8", "nf4"]
+Quant = Literal["auto", "bf16", "nf4"]
 # Only JumpReLU has a trainer.
 SAEArch = Literal["jumprelu"]
 CheckpointMode = Literal["finetune", "resume"]
