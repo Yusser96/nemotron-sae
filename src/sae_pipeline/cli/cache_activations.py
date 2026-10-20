@@ -28,7 +28,7 @@ from sae_pipeline.config import PipelineCfg
 from sae_pipeline.cli._site import cli_site
 from sae_pipeline.data.streaming import make_token_loader
 from sae_pipeline.extraction.base import ActivationExtractor
-from sae_pipeline.extraction.hf import HFHookExtractor
+from sae_pipeline.extraction.build import build_extractor
 from sae_pipeline.hooks.components import ComponentSpec, resolve, site_requests
 from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
 from sae_pipeline.model.topology import HookSite, dump_topology, enumerate_hooks
@@ -136,7 +136,7 @@ def _reconcile_manifests(
         extraction_recipe = {
             "model": {key: value for key, value in cfg.model.model_dump().items() if key != "device_map"},
             "backend": cfg.extraction.backend,
-            "vllm": cfg.extraction.vllm.model_dump() if cfg.extraction.backend == "vllm" else None,
+            "vllm": cfg.extraction.vllm.model_dump() if cfg.extraction.backend in {"vllm", "nemotron_extraction_vllm"} else None,
             "component": spec.component,
             "hook_name": site.module_path,
             "hook_semantics_version": 2,
@@ -224,7 +224,7 @@ def main() -> None:
     if cfg.cache.tokens_per_fwd % cfg.data.seq_len:
         p.error("cache.tokens_per_fwd must be divisible by data.seq_len")
 
-    use_vllm = cfg.extraction.backend == "vllm"
+    use_vllm = cfg.extraction.backend in {"vllm", "nemotron_extraction_vllm"}
     model = None
     sites: list[HookSite] = []
     if use_vllm:
@@ -297,13 +297,9 @@ def main() -> None:
     resume_batches = already_cached // cfg.cache.tokens_per_fwd
     log.info("Resuming after %d cached tokens (%d forward passes)", already_cached, resume_batches)
     extractor: ActivationExtractor
-    if use_vllm:
-        from sae_pipeline.extraction.vllm import VLLMExtractor
-
-        extractor = VLLMExtractor(cfg, {slug: spec for slug, (spec, _site) in requests.items()})
-    else:
-        assert model is not None
-        extractor = HFHookExtractor(model, requests, model_device=next(model.parameters()).device)
+    extractor, _ = build_extractor(cfg, cfg.extraction.backend, requests=requests,
+        model=model, tokenizer=tokenizer,
+        device=str(next(model.parameters()).device) if model is not None else "cuda:0")
     try:
         _cache_forwards(
             args=args,

@@ -108,7 +108,10 @@ target:
     )
     monkeypatch.setattr(cache_activations, "load_model_and_tokenizer", _no_hf_model)
     monkeypatch.setattr(cache_activations, "load_tokenizer", lambda _cfg: _Tokenizer())
-    monkeypatch.setattr(vllm, "VLLMExtractor", lambda cfg, specs: _FakeExtractor())
+    def fake_extractor(cfg, specs, *, capture_device):
+        assert capture_device == "cpu"
+        return _FakeExtractor()
+    monkeypatch.setattr(vllm, "VLLMExtractor", fake_extractor)
     monkeypatch.setattr(
         cache_activations,
         "make_token_loader",

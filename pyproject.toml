@@ -25,10 +25,20 @@ dependencies = [
     "matplotlib>=3.8",
 ]
 
+[project.scripts]
+sae-cache = "sae_pipeline.cli.cache_activations:main"
+sae-train = "sae_pipeline.cli.train_sae:main"
+sae-train-streaming = "sae_pipeline.cli.train_sae_streaming:main"
+sae-evaluate = "sae_pipeline.cli.evaluate:main"
+sae-plot = "sae_pipeline.cli.plot:main"
+sae-launch = "sae_pipeline.cli.launch:main"
+
 [project.optional-dependencies]
+extraction = ["nemotron-extraction==1.1.0"]
 dev = [
     "pytest>=8",
     "pytest-xdist>=3",
+    "ruff>=0.11",
 ]
 gpu = [
     "bitsandbytes>=0.44",

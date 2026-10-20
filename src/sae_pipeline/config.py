@@ -29,7 +29,7 @@ FeatureUseStrategy = Literal[
     "frequency_residual_reset",
 ]
 ActivationCentering = Literal["none", "mean"]
-ExtractionBackend = Literal["hf_hooks", "vllm", "vllm_remote"]
+ExtractionBackend = Literal["hf_hooks", "vllm", "vllm_remote", "nemotron_extraction_hf", "nemotron_extraction_vllm"]
 SinkLifecycle = Literal["consume", "cache"]
 
 
@@ -278,8 +278,8 @@ class TargetCfg(BaseModel):
 
 
 class EvalCfg(BaseModel):
-    delta_ce_n_seqs: int = 2048
-    delta_ce_seq_len: int = 1024
+    delta_ce_n_seqs: int = Field(default=2048, gt=0)
+    delta_ce_seq_len: int = Field(default=1024, gt=1)
     fvu_n_tokens: int = Field(default=65_536, gt=0)
     dead_n_tokens: int = Field(default=50_000, gt=0)
     # Training trajectories use one fixed sample for every metric and split.

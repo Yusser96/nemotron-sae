@@ -39,11 +39,11 @@ from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.fills import FillStream, mark_done
-from sae_pipeline.extraction.hf import HFHookExtractor
+from sae_pipeline.extraction.build import build_extractor
 from sae_pipeline.extraction.remote import RemoteExtractor
 from sae_pipeline.extraction.vllm_worker import hookable
 from sae_pipeline.hooks.components import select_sites, site_requests
-from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
+from sae_pipeline.model.loader import load_tokenizer
 from sae_pipeline.model.topology import dump_topology, enumerate_hooks
 from sae_pipeline.sae.train_streaming import committed_stream_checkpoints, TokenStream, init_streaming_site, run_streaming_training, state_paths
 
@@ -137,7 +137,7 @@ def main() -> None:
     backend = "fills" if args.fills is not None else cfg.extraction.backend
     extractor: ActivationExtractor
     token_stream: TokenStream | None = None
-    if backend in ("vllm", "vllm_remote"):
+    if backend in ("vllm", "vllm_remote", "nemotron_extraction_vllm"):
         # Fail before loading anything if a site has no module boundary in vLLM.
         unsupported = [slug for slug, (spec, _site) in requests.items() if not hookable(spec)]
         if unsupported:
@@ -167,23 +167,13 @@ def main() -> None:
             dtype=getattr(torch, cfg.model.dtype),
             device=cfg.stream.sae_device,
         )
-    elif backend == "vllm":
-        from sae_pipeline.extraction.vllm import VLLMExtractor
-
-        # Start the engine before the SAEs allocate: vLLM sizes itself from
-        # extraction.vllm.gpu_memory_utilization at startup.
-        specs = {slug: spec for slug, (spec, _site) in requests.items()}
-        extractor = VLLMExtractor(cfg, specs, capture_device=cfg.stream.sae_device)
     else:
-        # Pin the whole model to one device: with several GPUs visible, a plain
-        # "auto" device_map would spread its layers across all of them.
-        model_cfg = cfg.model.model_copy(update={"device_map": {"": cfg.stream.model_device}})
-        model, tokenizer = load_model_and_tokenizer(model_cfg)
-        model.eval()
-        dump_topology(enumerate_hooks(model), out_root / "model_topology.json")
-        extractor = HFHookExtractor(
-            model, requests, model_device=cfg.stream.model_device, capture_device=cfg.stream.sae_device
-        )
+        extractor, loaded_tokenizer = build_extractor(cfg, backend, requests=requests,
+            device=cfg.stream.model_device, capture_device=cfg.stream.sae_device)
+        if loaded_tokenizer is not None:
+            tokenizer = loaded_tokenizer
+        if backend in {"hf_hooks", "nemotron_extraction_hf"}:
+            dump_topology(enumerate_hooks(extractor.model), out_root / "model_topology.json")
 
     sites = {}
     try:
