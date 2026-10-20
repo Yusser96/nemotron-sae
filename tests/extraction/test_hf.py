@@ -3,7 +3,6 @@ from torch import nn
 
 from sae_pipeline.extraction.hf import HFHookExtractor
 from sae_pipeline.hooks.components import ComponentSpec
-from sae_pipeline.hooks.extractor import capture_many
 from sae_pipeline.model.topology import HookSite
 
 
@@ -23,18 +22,17 @@ REQUESTS = {
 }
 
 
-def test_hf_extractor_returns_the_same_activations_as_capture_many():
+def test_hf_extractor_returns_each_tokens_residual_before_and_after_the_layer():
     torch.manual_seed(0)
     model = _Model()
     token_ids = torch.randint(0, 10, (2, 5))
 
-    with capture_many(model, REQUESTS) as buffers:
-        model(token_ids)
-        expected = {slug: buffer.consume() for slug, buffer in buffers.items()}
     batch = HFHookExtractor(model, REQUESTS, model_device="cpu").extract(token_ids)
 
+    with torch.no_grad():
+        embedded = model.embed(token_ids).reshape(-1, 3)
+        expected = {"pre": embedded, "post": model.layers[0](embedded)}
     assert torch.equal(batch.token_ids, token_ids)
     assert batch.activations.keys() == expected.keys()
     for slug, value in expected.items():
-        assert batch.activations[slug].shape == (10, 3)
         torch.testing.assert_close(batch.activations[slug], value)

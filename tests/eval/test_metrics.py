@@ -1,4 +1,4 @@
-"""Smoke-test reconstruction_metrics on a controlled synthetic SAE."""
+"""Reconstruction and feature-use metrics on SAEs with known outputs."""
 
 import numpy as np
 import torch
@@ -8,25 +8,6 @@ from sae_pipeline.eval.metrics import (
     streaming_reconstruction_metrics,
 )
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
-
-
-def test_recon_metrics_perfect_identity_on_zero_input():
-    """Zero input → zero reconstruction → FVU = NaN-protected, L0 = 0."""
-    sae = JumpReLUSAE(d_in=16, d_sae=64)
-    x = torch.zeros(128, 16) + 1e-9
-    m = reconstruction_metrics(sae, x, dead_threshold_tokens=128)
-    assert m.l0 >= 0.0
-    assert m.fvu >= 0.0
-    assert 0.0 <= m.dead_pct <= 100.0
-
-
-def test_recon_metrics_runs_on_random_input():
-    sae = JumpReLUSAE(d_in=16, d_sae=64)
-    x = torch.randn(2048, 16)
-    m = reconstruction_metrics(sae, x, dead_threshold_tokens=512)
-    assert m.n_tokens == 2048
-    assert m.l0 >= 0.0
-    assert m.fvu > 0.0      # untrained SAE has nonzero error
 
 
 def test_fvu_is_one_for_predict_the_mean_baseline():
@@ -44,6 +25,7 @@ def test_fvu_is_one_for_predict_the_mean_baseline():
         sae.b_dec.copy_(x.mean(dim=0))
     m = reconstruction_metrics(sae, x, dead_threshold_tokens=4096)
     assert m.l0 == 0.0
+    assert m.dead_pct == 100.0
     assert abs(m.fvu - 1.0) < 1e-4
 
 

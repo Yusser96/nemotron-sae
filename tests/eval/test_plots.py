@@ -1,4 +1,4 @@
-"""Smoke-test the plotting module on synthetic training/eval artifacts."""
+"""Plots from synthetic training, validation and evaluation logs."""
 
 import json
 from pathlib import Path
@@ -78,9 +78,7 @@ def test_plot_training_handles_empty_log(tmp_path: Path):
     out_dir = tmp_path / "plots"
     written = plot_training_curves(log_path, out_dir)
     assert written == []
-    # Empty input should not produce a file
-    assert not (out_dir / "training_overview.png").exists() or \
-           (out_dir / "training_overview.png").stat().st_size == 0
+    assert not (out_dir / "training_overview.png").exists()
 
 
 def test_plot_validation_curves_separates_languages(tmp_path: Path):
@@ -131,7 +129,7 @@ def test_plot_validation_curves_with_inverse_simpson(tmp_path: Path):
     assert written[0].stat().st_size > 5_000
 
 
-def test_plot_validation_curves_with_train_val_average_legend(tmp_path: Path):
+def test_plot_validation_curves_with_train_val_average_legend(tmp_path: Path, monkeypatch):
     log_path = tmp_path / "validation_log.jsonl"
     rows = []
     for step in (10_000, 20_000):
@@ -170,7 +168,12 @@ def test_plot_validation_curves_with_train_val_average_legend(tmp_path: Path):
         })
     log_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-    out_dir = tmp_path / "plots"
-    written = plot_validation_curves(log_path, out_dir, title_prefix="Bilingual Run")
-    assert written == [out_dir / "validation_evolution.png"]
-    assert written[0].stat().st_size > 5_000
+    figures = []
+    monkeypatch.setattr("sae_pipeline.eval.plots.plt.close", figures.append)
+    plot_validation_curves(log_path, tmp_path / "plots", title_prefix="Bilingual Run")
+
+    fvu_axis = figures[0].axes[0]
+    lines = {line.get_label(): line for line in fvu_axis.get_lines()}
+    assert list(lines) == ["Val (DE)", "Val (EN)", "Val Average", "Train (Probe)"]
+    assert list(lines["Val Average"].get_ydata()) == [0.5, 0.5]
+    assert list(lines["Train (Probe)"].get_ydata()) == [0.40, 0.40]
