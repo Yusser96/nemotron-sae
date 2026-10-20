@@ -343,7 +343,6 @@ class EvalCfg(BaseModel):
     dead_n_tokens: int = 50_000
     # Training trajectories use one fixed sample for every metric and split.
     trajectory_n_tokens: int = 50_000
-    interp_enabled: bool = False  # auto-interp via OPENAI_API_KEY
 
     @field_validator("fvu_n_tokens", "dead_n_tokens", "trajectory_n_tokens")
     @classmethod
@@ -581,8 +580,6 @@ class ExtractionCfg(BaseModel):
 
 
 class LogCfg(BaseModel):
-    use_wandb: bool = False
-    wandb_project: str = "nemotron-sae"
     log_dir: Path = Path("outputs/logs")
 
 

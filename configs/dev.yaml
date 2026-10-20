@@ -52,8 +52,6 @@ eval:
   delta_ce_seq_len: 512
   fvu_n_tokens: 16384
   dead_n_tokens: 10000
-  interp_enabled: false
 
 log:
-  use_wandb: false
   log_dir: outputs/logs

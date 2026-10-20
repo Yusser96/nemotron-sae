@@ -33,9 +33,6 @@ dev = [
 gpu = [
     "bitsandbytes>=0.44",
 ]
-logging = [
-    "wandb>=0.18",
-]
 
 [dependency-groups]
 dev = [
