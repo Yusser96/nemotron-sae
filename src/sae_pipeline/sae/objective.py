@@ -252,7 +252,7 @@ def optimizer_step(
             theta_grad_norm = 0.0 if theta_grad is None else theta_grad.norm().item()
             encoder_grad_norm = 0.0 if encoder_grad is None else encoder_grad.norm().item()
     if cfg.gradient_clip_norm is not None:
-        torch.nn.utils.clip_grad_norm_(sae.parameters(), cfg.gradient_clip_norm)
+        torch.nn.utils.clip_grad_norm_(sae.parameters(), cfg.gradient_clip_norm, error_if_nonfinite=True)
     if step <= cfg.decoder_freeze_steps:
         sae.W_dec.grad = None
     if cfg.decoder_unit_norm and step > cfg.decoder_freeze_steps:

@@ -339,6 +339,22 @@ def test_runs_to_the_token_cap_with_scheduled_evaluations(tmp_path):
     assert stream.position == 3 * TOKENS_PER_FWD // SEQ_LEN
 
 
+def test_boundary_metrics_include_off_interval_terminal_without_plateau_update(tmp_path):
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), eval_interval_steps=100, lr=0.0)
+    site = _site(tmp_path, cfg, _validation_dirs(tmp_path))
+    early = EarlyStoppingCfg(enabled=True, mode="objective", minimum_steps=0, patience=3, lr_plateau_patience=1)
+    done = _run(tmp_path, site, _CountingStream(), stream_cfg=StreamCfg(enabled=True, token_cap=3 * BATCH), early_stopping=early)
+    site.close()
+    assert done and site.step == 3
+    assert site.early_stop.best is None and site.early_stop.checks_since_improve == 0
+    initial = json.loads((site.out_dir / "initial_metrics.json").read_text())
+    terminal = json.loads((site.out_dir / "terminal_metrics.json").read_text())
+    assert initial["tokens"] == 0 and terminal["tokens"] == 3 * BATCH
+    assert set(initial["metrics"]) == set(terminal["metrics"]) == {"de", "en"}
+    assert all("l0" in row and "fvu" in row for row in terminal["metrics"].values())
+    assert not site.validation_log_path.read_text()
+
+
 def test_nonfinite_warm_start_is_rejected_before_training(tmp_path):
     path = _warm_start(tmp_path / "warm.safetensors")
     tensors = load_file(str(path))
@@ -346,6 +362,17 @@ def test_nonfinite_warm_start_is_rejected_before_training(tmp_path):
     save_file(tensors, str(path))
     with pytest.raises(ValueError, match="non-finite checkpoint parameter W_enc"):
         _site(tmp_path, _sae_cfg(path))
+
+
+def test_terminal_divergence_is_detected_even_between_scheduled_evaluations(tmp_path, monkeypatch):
+    _evaluations(monkeypatch, l0=4 * L0_TARGET)
+    cfg = _sae_cfg(_warm_start(tmp_path / "warm.safetensors"), eval_interval_steps=100, l0_warmup_steps=0)
+    site = _site(tmp_path, cfg, _validation_dirs(tmp_path))
+    _run(tmp_path, site, _CountingStream(), stream_cfg=StreamCfg(enabled=True, token_cap=3 * BATCH))
+    site.close()
+    terminal = json.loads((site.out_dir / "terminal_metrics.json").read_text())
+    assert terminal["diverged"] and not terminal["healthy"]
+    assert not list(site.out_dir.glob("*_final.safetensors"))
 
 
 def test_pauses_at_the_time_limit_and_resumes_without_repeating_tokens(tmp_path, monkeypatch):

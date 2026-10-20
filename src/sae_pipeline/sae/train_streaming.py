@@ -408,7 +408,23 @@ def record_baseline(site: StreamingSite, device: str) -> None:
         for language in evaluation.metrics
     }
     path.write_text(json.dumps(site.baseline))
+    _write_diagnostic(site, evaluation, "initial")
     log.info("%s: warm-start baseline %s", site.slug, site.baseline)
+
+
+def _write_diagnostic(site: StreamingSite, evaluation: SiteEvaluation, phase: str, **extra) -> None:
+    """Full boundary metrics without changing plateau or learning-rate state."""
+    payload = {
+        "phase": phase, "step": site.step, "tokens": site.tokens_seen(),
+        "validation_objective_mixed": evaluation.mixed_objective,
+        "metrics": {language: {**asdict(metrics), "validation_objective": evaluation.objective[language]}
+                    for language, metrics in evaluation.metrics.items()},
+        **extra,
+    }
+    path = site.out_dir / f"{phase}_metrics.json"
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload))
+    os.replace(temporary, path)
 
 
 def _plot_title(site: StreamingSite) -> str:
@@ -482,11 +498,37 @@ class Stop:
     diverged: bool = False
 
 
+def finite_evaluation_error(evaluation):
+    values = list(evaluation.objective.values())
+    values.append(evaluation.mixed_objective)
+    for metrics in evaluation.metrics.values():
+        values.extend(value for value in vars(metrics).values()
+                      if isinstance(value, (int, float)) and not isinstance(value, bool))
+    if any(not math.isfinite(value) for value in values):
+        return 'nonfinite validation objective or metric'
+    return None
+
+
+def threshold_warnings(site, evaluation, step):
+    """Return finite warning labels; caller logs them in the normal eval cadence."""
+    if finite_evaluation_error(evaluation) is not None:
+        return ()
+    warnings = []
+    l0 = max(metrics.l0 for metrics in evaluation.metrics.values())
+    if step >= site.cfg.l0_warmup_steps and l0 > 3.0 * site.l0_target:
+        warnings.append('l0')
+    best = site.early_stop.best
+    if best is not None and evaluation.mixed_objective > 10.0 * best:
+        warnings.append('objective')
+    return tuple(warnings)
+
+
 def _divergence(site: StreamingSite, evaluation: SiteEvaluation, step: int, cfg: EarlyStoppingCfg) -> str | None:
     """How this evaluation shows ``site`` diverging, if it does (see ``EarlyStoppingCfg``)."""
     objective = evaluation.mixed_objective
-    if not math.isfinite(objective):
-        return f"validation objective {objective}"
+    error = finite_evaluation_error(evaluation)
+    if error is not None:
+        return error
     l0 = max(metrics.l0 for metrics in evaluation.metrics.values())
     if (
         cfg.divergence_l0_factor is not None
@@ -512,6 +554,9 @@ def evaluate_and_update(
     evaluation = evaluate_site(site, device)
     objective = evaluation.mixed_objective
     divergence = _divergence(site, evaluation, step, early_stopping)
+    warnings = threshold_warnings(site, evaluation, step)
+    if warnings:
+        log.warning("%s finite diagnostic threshold warnings at step %d: %s", site.slug, step, ",".join(warnings))
     if divergence is None:
         is_best, lr_reduced, should_stop = site.early_stop.update(
             objective, early_stopping, eligible=early_stopping.enabled and step >= early_stopping.minimum_steps
@@ -532,6 +577,8 @@ def evaluate_and_update(
             "checks_since_improve": site.early_stop.checks_since_improve,
             "early_stop_triggered": should_stop,
             "diverged": divergence,
+            "finite_l0_overshoot": float("l0" in warnings),
+            "finite_objective_overshoot": float("objective" in warnings),
         }
         if site.baseline is not None and language in site.baseline:
             baseline = site.baseline[language]
@@ -583,11 +630,22 @@ def _save_stream_state(path: Path, token_stream: TokenStream, tokens_processed: 
     os.replace(temporary, path)
 
 
-def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = True) -> None:
+def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = True,
+            early_stopping: EarlyStoppingCfg | None = None) -> None:
     log.info("Stopping %d site(s): %s", len(sites), reason)
     for site in sites:
+        export_healthy = final_export
+        divergence = None
+        if site.validation_readers:
+            device = str(next(site.sae.parameters()).device)
+            evaluation = evaluate_site(site, device)
+            if early_stopping is not None:
+                divergence = _divergence(site, evaluation, site.step, early_stopping)
+                export_healthy = export_healthy and divergence is None
+            _write_diagnostic(site, evaluation, "terminal", reason=reason,
+                              diverged=divergence, healthy=export_healthy)
         site.stopped = True
-        if final_export:
+        if export_healthy:
             write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
         else:
             log.warning("%s: no final export from diverged weights; its result is %s", site.slug, site.out_dir / "best")
@@ -693,7 +751,7 @@ def run_streaming_training(
             done = True
             break
         if stream_cfg.token_cap is not None and all(site.tokens_seen() >= stream_cfg.token_cap for site in active):
-            _finish(active, f"reached the {stream_cfg.token_cap}-token cap")
+            _finish(active, f"reached the {stream_cfg.token_cap}-token cap", early_stopping=early_stopping)
             done = True
             break
         if stream_cfg.stop_after_seconds is not None and time.monotonic() - started >= stream_cfg.stop_after_seconds:
@@ -703,7 +761,7 @@ def run_streaming_training(
         try:
             token_batch = token_stream.next_batch(tokens_per_fwd // seq_len)
         except StopIteration:
-            _finish(active, "the training corpus is exhausted")
+            _finish(active, "the training corpus is exhausted", early_stopping=early_stopping)
             done = True
             break
         except TimeoutError as error:
@@ -723,7 +781,7 @@ def run_streaming_training(
             x_all = x_all[torch.randperm(x_all.shape[0], device=x_all.device)]
             for x in x_all.split(batch_size):
                 if stream_cfg.token_cap is not None and site.tokens_seen() >= stream_cfg.token_cap:
-                    _finish([site], f"reached the {stream_cfg.token_cap}-token cap")
+                    _finish([site], f"reached the {stream_cfg.token_cap}-token cap", early_stopping=early_stopping)
                     checkpointed = True
                     break
                 site.step += 1
@@ -750,7 +808,8 @@ def run_streaming_training(
                 if stop is None and stream_cfg.token_cap is not None and site.tokens_seen() >= stream_cfg.token_cap:
                     stop = Stop(f"reached the {stream_cfg.token_cap}-token cap")
                 if stop is not None:
-                    _finish([site], f"{site.slug} {stop.reason} at step {step}", final_export=not stop.diverged)
+                    _finish([site], f"{site.slug} {stop.reason} at step {step}", final_export=not stop.diverged,
+                            early_stopping=early_stopping)
                     checkpointed = True
                     break
         if checkpointed:
