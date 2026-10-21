@@ -28,6 +28,10 @@ env.sh
 .claude/
 .agents/
 .codex/
+AGENTS.md
+CLAUDE.md
+claude.sh
+*.stackdump
 
 # Private configurations, launchers, tests and records.
 configs/finetuning.yml
