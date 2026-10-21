@@ -50,11 +50,11 @@ from sae_pipeline.config import PipelineCfg
 
 config, layer, component, arch, width, l0 = sys.argv[1:]
 cfg = PipelineCfg.from_yaml(config)
-slug = f"L{layer}_{component}"
+slug, stem = f"L{layer}_{component}", f"{arch}_w{width}_l0_{l0}"
 paths = [
     Path(cfg.cache.cache_dir) / cfg.run_id / slug / "manifest.json",
-    Path(cfg.sae.ckpt_dir) / cfg.run_id / slug / f"{arch}_w{width}_l0_{l0}",
-    Path(cfg.log.log_dir) / cfg.run_id / slug,
+    Path(cfg.sae.ckpt_dir) / cfg.run_id / slug / stem,
+    Path(cfg.log.log_dir) / cfg.run_id / slug / "train" / f"{stem}_eval.json",
 ]
 for path in paths:
     if not path.exists():
