@@ -5,31 +5,8 @@ from dataclasses import dataclass
 GiB = 1024**3
 
 
-def priority_key(job):
-    """Prefer warm starts globally, then residual sites within each start."""
-    return (
-        0 if job["start"] == "warm" else 1,
-        0 if job["slug"].endswith("_resid_post") else 1,
-        int(job["slug"].split("_")[0][1:]),
-        job["id"],
-    )
 
 
-def priority_waves(jobs):
-    """Admit warm before scratch; launch residuals first within each stage.
-
-    Other sites share the same forward passes and can fill spare GPU capacity.
-    Kernel priority hints favor residuals without creating a residual-only barrier.
-    """
-    ordered = sorted(jobs, key=priority_key)
-    return [
-        wave
-        for wave in (
-            [j for j in ordered if j["start"] == "warm"],
-            [j for j in ordered if j["start"] != "warm"],
-        )
-        if wave
-    ]
 
 
 @dataclass(frozen=True)
