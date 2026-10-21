@@ -1,12 +1,8 @@
-"""Pure scheduling and memory policy for shared GPU activation streams."""
+"""Pure memory policy for shared GPU activation streams."""
 
 from dataclasses import dataclass
 
 GiB = 1024**3
-
-
-
-
 
 
 @dataclass(frozen=True)
