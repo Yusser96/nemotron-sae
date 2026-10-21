@@ -28,7 +28,6 @@ values. Set `model.token_env_var` to the name of the environment variable to use
 ```sh
 python -m sae_pipeline.cli.cache_activations --config configs/dev.yaml --layer 25 --component resid_post
 python -m sae_pipeline.cli.train_sae --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30
-python -m sae_pipeline.cli.evaluate --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30
 ```
 
 For exact model paths, configure `target.sites` and select a `--site` slug instead
@@ -53,9 +52,8 @@ count and patience. Numerical safeguards remain active independently of plateau
 stopping. Rerun the identical command to resume the committed stream cursor,
 optimizer, random state and selection state after a time-limited pause.
 
-For a separate activation producer, use the existing `--fills DIR --consumer NAME`
-consumer interface and a distinct name per independent trainer. Checkpoints and
-full local logs are retained independently of optional external scalar tracking.
+To train from a separate activation producer, pass `--fills DIR --consumer NAME`,
+with a distinct name for each trainer.
 
 ## Evaluate and plot
 
@@ -85,10 +83,11 @@ exports already fold these transformations into the weights; select
 the committed weight/state pair referenced by its stream-state file. Preserve the
 pair and cursor together; a raw export alone cannot resume an optimizer.
 
-The default HF and vLLM backends remain available. The optional `extraction` extra
-pins `nemotron-extraction==1.1.0` and enables `nemotron_extraction_hf` and
-`nemotron_extraction_vllm`. These adapters are opt-in; validate numerical agreement
-for the chosen model and sites before switching an existing experiment.
+`extraction.backend` defaults to `hf_hooks`; `vllm` and `vllm_remote` are also
+built in. The optional `extraction` extra pins `nemotron-extraction==1.1.0` and
+adds the `nemotron_extraction_hf` and `nemotron_extraction_vllm` backends. Check
+them with `python -m sae_pipeline.cli.compare_activations` on your model and sites
+before switching an existing experiment.
 
 ## Development
 
@@ -96,3 +95,5 @@ for the chosen model and sites before switching an existing experiment.
 python -m pytest -q -m 'not cuda' -p no:cacheprovider -n 6
 python -m ruff check --no-cache --select F src tests
 ```
+
+The adapter tests skip unless `nemotron-extraction` is installed (`.[dev,extraction]`).
