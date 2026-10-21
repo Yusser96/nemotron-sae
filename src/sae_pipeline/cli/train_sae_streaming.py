@@ -39,7 +39,7 @@ from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.fills import FillStream, mark_done
-from sae_pipeline.extraction.build import build_extractor
+from sae_pipeline.extraction.build import HF_BACKENDS, build_extractor
 from sae_pipeline.extraction.remote import RemoteExtractor
 from sae_pipeline.extraction.vllm_worker import hookable
 from sae_pipeline.hooks.components import select_sites, site_requests
@@ -168,11 +168,14 @@ def main() -> None:
             device=cfg.stream.sae_device,
         )
     else:
-        extractor, loaded_tokenizer = build_extractor(cfg, backend, requests=requests,
-            device=cfg.stream.model_device, capture_device=cfg.stream.sae_device)
+        # Start a vLLM engine before the SAEs allocate: it sizes itself from
+        # extraction.vllm.gpu_memory_utilization at startup.
+        extractor, loaded_tokenizer = build_extractor(
+            cfg, backend, requests=requests, device=cfg.stream.model_device, capture_device=cfg.stream.sae_device
+        )
         if loaded_tokenizer is not None:
             tokenizer = loaded_tokenizer
-        if backend in {"hf_hooks", "nemotron_extraction_hf"}:
+        if backend in HF_BACKENDS:
             dump_topology(enumerate_hooks(extractor.model), out_root / "model_topology.json")
 
     sites = {}

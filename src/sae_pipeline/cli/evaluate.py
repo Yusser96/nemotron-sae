@@ -194,7 +194,6 @@ def main() -> None:
         behavioural = {key: value / count for key, value in sums.items()}
         behavioural.update(delta_ce_n_seqs=count, delta_ce_seq_len=cfg.eval.delta_ce_seq_len)
 
-
     out_dir = evaluation_directory(cfg.log.log_dir, args.output_id or cfg.run_id,
                                    spec.slug, args.partition, args.language, args.output_tag)
     out_dir.mkdir(parents=True, exist_ok=True)
