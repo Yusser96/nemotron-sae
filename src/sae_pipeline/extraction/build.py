@@ -7,6 +7,7 @@ from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.hooks.components import site_requests
 
 HF_BACKENDS = {"hf_hooks", "nemotron_extraction_hf"}
+LOCAL_BACKENDS = ("hf_hooks", "vllm", "nemotron_extraction_hf", "nemotron_extraction_vllm")
 
 
 def build_extractor(
