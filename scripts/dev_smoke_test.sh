@@ -12,8 +12,9 @@ cd "$REPO_ROOT"
 
 # shellcheck disable=SC1091
 source "$REPO_ROOT/.venv/bin/activate"
+# Optional: export the token variable named by model.token_env_var.
 # shellcheck disable=SC1091
-source "$REPO_ROOT/env.sh"   # HF_TOKEN, OPENAI_API_KEY
+if [ -f "$REPO_ROOT/env.sh" ]; then source "$REPO_ROOT/env.sh"; fi
 
 CONFIG="${CONFIG:-configs/dev.yaml}"
 LAYER="${LAYER:-25}"
