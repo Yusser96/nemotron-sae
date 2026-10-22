@@ -25,4 +25,3 @@ def test_sae_variant_accepts_scalar_config_and_names_checkpoint_directory():
     arch, width, l0 = sae_variant(cfg)
     assert (arch, width, l0) == ("jumprelu", 16384, 50)
     assert variant_stem(arch, width, l0) == "jumprelu_w16384_l0_50"
-

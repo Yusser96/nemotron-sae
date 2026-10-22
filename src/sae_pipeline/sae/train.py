@@ -28,8 +28,15 @@ from sae_pipeline.eval.plots import (
     plot_validation_curves,
     refresh_plot,
 )
-from sae_pipeline.sae.checkpoint import (capture_random_state, load_sae_weights, load_trainer_state, restore_random_state, save_checkpoint_pair, write_raw_export)
-from sae_pipeline.sae.checkpoint_source import (resolve_checkpoint)
+from sae_pipeline.sae.checkpoint import (
+    capture_random_state,
+    load_sae_weights,
+    load_trainer_state,
+    restore_random_state,
+    save_checkpoint_pair,
+    write_raw_export,
+)
+from sae_pipeline.sae.checkpoint_source import resolve_checkpoint
 from sae_pipeline.sae.early_stopping import StabilityEarlyStop
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.normalization import (
@@ -67,7 +74,9 @@ def build_sae_and_optimizer(
         d_in=d_in,
         d_sae=d_sae,
         bandwidth=cfg.bandwidth,
-        pre_encoder_bias=(cfg.pre_encoder_bias or cfg.input_normalization == "whole_vector"),
+        pre_encoder_bias=(
+            cfg.pre_encoder_bias or cfg.input_normalization == "whole_vector"
+        ),
     ).to(device)
     optim = torch.optim.Adam(
         sae.parameters(),
@@ -115,7 +124,10 @@ def _restore_resume_state(
         )
     optim.load_state_dict(trainer_state["optimizer"])
     saved_fired = trainer_state["ever_fired"]
-    if not isinstance(saved_fired, torch.Tensor) or saved_fired.shape != ever_fired.shape:
+    if (
+        not isinstance(saved_fired, torch.Tensor)
+        or saved_fired.shape != ever_fired.shape
+    ):
         raise ValueError(
             "Dead-feature state dimension mismatch: checkpoint has "
             f"{getattr(saved_fired, 'shape', None)}, current SAE has {ever_fired.shape}"
@@ -123,7 +135,10 @@ def _restore_resume_state(
     ever_fired.copy_(saved_fired.to(device=device, dtype=torch.bool))
     saved_frequency = trainer_state.get("feature_frequency")
     if saved_frequency is not None:
-        if not isinstance(saved_frequency, torch.Tensor) or saved_frequency.shape != feature_frequency.shape:
+        if (
+            not isinstance(saved_frequency, torch.Tensor)
+            or saved_frequency.shape != feature_frequency.shape
+        ):
             raise ValueError(
                 "Feature-frequency state dimension mismatch: checkpoint has "
                 f"{getattr(saved_frequency, 'shape', None)}, current SAE has {feature_frequency.shape}"
@@ -148,9 +163,8 @@ def _restore_resume_state(
             "Resume checkpoint has no validation-cache signature; "
             "early-stopping patience restarts"
         )
-    if (
-        isinstance(saved_early_stop, dict)
-        and (not validation_readers or saved_probe_signature == validation_cache_signature)
+    if isinstance(saved_early_stop, dict) and (
+        not validation_readers or saved_probe_signature == validation_cache_signature
     ):
         early_stop_monitor.load_state_dict(saved_early_stop)
     elif early_stopping.enabled and saved_probe_signature is not None:
@@ -174,25 +188,37 @@ def _restore_resume_state(
     return start_step, frequency_penalty_scale, feature_resets, reset_target_step
 
 
-def _reject_streaming_only_options(cfg: SAECfg, early_stopping: EarlyStoppingCfg) -> None:
+def _reject_streaming_only_options(
+    cfg: SAECfg, early_stopping: EarlyStoppingCfg
+) -> None:
     if early_stopping.enabled and early_stopping.mode != "stability":
-        raise ValueError("Cached training supports early_stopping.mode='stability'; use streaming training for objective mode")
+        raise ValueError(
+            "Cached training supports early_stopping.mode='stability'; use streaming training for objective mode"
+        )
     if cfg.inverse_simpson_window_steps != 1:
-        raise NotImplementedError("inverse_simpson_window_steps applies to streaming training only")
+        raise NotImplementedError(
+            "inverse_simpson_window_steps applies to streaming training only"
+        )
     if cfg.auxk_scale > 0:
         raise NotImplementedError("auxk_scale applies to streaming training only")
 
 
-def _input_scale(cfg: SAECfg, cache_dir: str | Path, metadata_dir: Path, out_dir: Path, device: str) -> float:
+def _input_scale(
+    cfg: SAECfg, cache_dir: str | Path, metadata_dir: Path, out_dir: Path, device: str
+) -> float:
     """The whole-vector normalisation scale (1 without normalisation), recorded next to the checkpoints."""
     if cfg.input_normalization != "whole_vector":
         return 1.0
-    normalization = resolve_whole_vector_normalization(cache_dir, metadata_dir, device=device)
+    normalization = resolve_whole_vector_normalization(
+        cache_dir, metadata_dir, device=device
+    )
     if normalization_path(out_dir) != normalization_path(metadata_dir):
         write_normalization(normalization_path(out_dir), normalization)
     log.info(
         "Whole-vector input normalisation: c=%.8g, E[||x||²]=%.8g over %d tokens",
-        normalization.input_scale, normalization.mean_squared_norm, normalization.n_tokens,
+        normalization.input_scale,
+        normalization.mean_squared_norm,
+        normalization.n_tokens,
     )
     return normalization.input_scale
 
@@ -211,22 +237,36 @@ def _load_source_weights(cfg: SAECfg, sae: JumpReLUSAE, input_scale: float):
     load_sae_weights(sae, source.weights_path)
     if cfg.checkpoint_format == "raw_export":
         if resume:
-            raise ValueError("raw_export checkpoints can only be fine-tuned, not resumed")
+            raise ValueError(
+                "raw_export checkpoints can only be fine-tuned, not resumed"
+            )
         if cfg.input_normalization != "whole_vector":
-            raise ValueError("raw_export fine-tuning requires whole_vector input normalisation")
+            raise ValueError(
+                "raw_export fine-tuning requires whole_vector input normalisation"
+            )
         sae.unfold_raw_export(input_scale)
     return source
 
 
 def _activation_center(
-    cfg: SAECfg, cache_dir: str | Path, metadata_dir: Path, out_dir: Path, *, input_scale: float, d_in: int, device: str
+    cfg: SAECfg,
+    cache_dir: str | Path,
+    metadata_dir: Path,
+    out_dir: Path,
+    *,
+    input_scale: float,
+    d_in: int,
+    device: str,
 ) -> torch.Tensor | None:
     """The mean activation subtracted from every input under ``activation_centering: mean``."""
     if cfg.activation_centering != "mean":
         return None
     centre_metadata_dir = Path(cfg.centering_dir) if cfg.centering_dir else metadata_dir
     centre = resolve_activation_center(
-        cache_dir, centre_metadata_dir, sample_tokens=cfg.centering_sample_tokens, input_scale=input_scale
+        cache_dir,
+        centre_metadata_dir,
+        sample_tokens=cfg.centering_sample_tokens,
+        input_scale=input_scale,
     )
     center = torch.tensor(centre.mean, device=device, dtype=torch.float32)
     if center.numel() != d_in:
@@ -237,8 +277,12 @@ def _activation_center(
 
 
 def _frequency_penalty(
-    cfg: SAECfg, step: int, f: torch.Tensor, feature_frequency: torch.Tensor,
-    reconstruction: torch.Tensor, scale: float | None,
+    cfg: SAECfg,
+    step: int,
+    f: torch.Tensor,
+    feature_frequency: torch.Tensor,
+    reconstruction: torch.Tensor,
+    scale: float | None,
 ) -> tuple[torch.Tensor, float | None]:
     """Penalty on latents firing above ``feature_frequency_threshold``, and its scale.
 
@@ -251,12 +295,20 @@ def _frequency_penalty(
     ):
         return reconstruction.new_zeros(()), scale
     weights = (
-        (feature_frequency - cfg.feature_frequency_threshold)
-        / max(1.0 - cfg.feature_frequency_threshold, 1.0e-6)
-    ).clamp(0.0, 1.0).detach()
+        (
+            (feature_frequency - cfg.feature_frequency_threshold)
+            / max(1.0 - cfg.feature_frequency_threshold, 1.0e-6)
+        )
+        .clamp(0.0, 1.0)
+        .detach()
+    )
     weighted_activation = (weights * f).mean()
     if scale is None:
-        target = cfg.feature_frequency_penalty_fraction * cfg.feature_frequency_penalty_multiplier * reconstruction.detach()
+        target = (
+            cfg.feature_frequency_penalty_fraction
+            * cfg.feature_frequency_penalty_multiplier
+            * reconstruction.detach()
+        )
         scale = float((target / weighted_activation.detach().clamp_min(1.0e-8)).item())
     return scale * weighted_activation, scale
 
@@ -278,8 +330,13 @@ def _probe_metrics(
         metrics, arrays = streaming_reconstruction_metrics(
             sae, batches(reader), dead_threshold_tokens=probe_tokens, return_arrays=True
         )
-        if not all(math.isfinite(float(value)) for value in (metrics.l0, metrics.fvu, metrics.dead_pct)):
-            raise FloatingPointError(f"Non-finite evaluation metric at step {step} for {split}: {metrics}")
+        if not all(
+            math.isfinite(float(value))
+            for value in (metrics.l0, metrics.fvu, metrics.dead_pct)
+        ):
+            raise FloatingPointError(
+                f"Non-finite evaluation metric at step {step} for {split}: {metrics}"
+            )
         np.savez_compressed(
             eval_dir / f"eval_arrays_step_{step:07d}_{split}.npz",
             firing_frequency=arrays.firing_frequency,
@@ -288,8 +345,16 @@ def _probe_metrics(
         )
         log.info(
             "eval step=%d split=%s fvu=%.6g l0=%.4f inactive@%d=%.2f%% D_IS=%.1f u_IS=%.2f%% D50=%.2f%% D90=%.2f%%",
-            step, split, metrics.fvu, metrics.l0, metrics.n_tokens, metrics.dead_pct,
-            metrics.d_is, metrics.u_is * 100.0, metrics.d_50, metrics.d_90,
+            step,
+            split,
+            metrics.fvu,
+            metrics.l0,
+            metrics.n_tokens,
+            metrics.dead_pct,
+            metrics.d_is,
+            metrics.u_is * 100.0,
+            metrics.d_50,
+            metrics.d_90,
         )
         results[split] = metrics
     sae.train()
@@ -297,8 +362,14 @@ def _probe_metrics(
 
 
 def _validation_rows(
-    metrics: dict[str, ReconMetrics], *, step: int, target_l0: float, stable: bool, l0_ok: bool,
-    stable_intervals: int, stop_now: bool,
+    metrics: dict[str, ReconMetrics],
+    *,
+    step: int,
+    target_l0: float,
+    stable: bool,
+    l0_ok: bool,
+    stable_intervals: int,
+    stop_now: bool,
 ) -> list[dict[str, object]]:
     rows = []
     for split, split_metrics in metrics.items():
@@ -343,40 +414,58 @@ def train_sae(
     out_dir.mkdir(parents=True, exist_ok=True)
     early_stopping = early_stopping or EarlyStoppingCfg()
     if early_stopping.score != "reconstruction":
-        raise ValueError("Full-training-loss stopping is supported by the streaming trainer; use train_sae_streaming")
+        raise ValueError(
+            "Full-training-loss stopping is supported by the streaming trainer; use train_sae_streaming"
+        )
     validation_cache_dirs = validation_cache_dirs or {}
-    validation_readers, validation_cache_signature, train_probe_reader, probe_tokens = prepare_validation_probes(
+    validation_readers, validation_cache_signature, train_probe_reader, probe_tokens = (
+        prepare_validation_probes(
             cache_dir,
             d_in,
             validation_cache_dirs=validation_cache_dirs,
             validation_tokens=validation_tokens,
             validation_dead_tokens=validation_dead_tokens,
             early_stopping=early_stopping,
+        )
     )
     early_stop_monitor = StabilityEarlyStop()
     eval_interval = cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
     log.info(
         "Training SAE: arch=%s d_in=%d d_sae=%d l0=%d steps=%d device=%s",
-        arch, d_in, d_sae, l0_target, cfg.n_steps, device,
+        arch,
+        d_in,
+        d_sae,
+        l0_target,
+        cfg.n_steps,
+        device,
     )
     if early_stopping.enabled:
         log.info(
             "Validation early stopping: evaluate every %d steps after step %d; patience=%d; "
             "FVU relative tolerance=%.3g; EV absolute tolerance=%.3g; L0 tolerance=%.1f%%",
-            eval_interval, early_stopping.minimum_steps, early_stopping.patience,
-            early_stopping.fvu_relative_tolerance, early_stopping.ev_absolute_tolerance,
+            eval_interval,
+            early_stopping.minimum_steps,
+            early_stopping.patience,
+            early_stopping.fvu_relative_tolerance,
+            early_stopping.ev_absolute_tolerance,
             100.0 * early_stopping.l0_relative_tolerance,
         )
     if cfg.inverse_simpson_floor > 0 and cfg.inverse_simpson_max_scale > 0:
         log.info(
             "Inverse-Simpson regularizer: utilization floor=%.4f, max scale=%.4g, warm-up=%d steps",
-            cfg.inverse_simpson_floor, cfg.inverse_simpson_max_scale, inverse_simpson_warmup_steps(cfg),
+            cfg.inverse_simpson_floor,
+            cfg.inverse_simpson_max_scale,
+            inverse_simpson_warmup_steps(cfg),
         )
 
     metadata_dir = Path(normalization_dir) if normalization_dir else out_dir
     normalization_scale = _input_scale(cfg, cache_dir, metadata_dir, out_dir, device)
     sae, optim = build_sae_and_optimizer(cfg, d_in=d_in, d_sae=d_sae, device=device)
-    buffer = ActivationBuffer(cache_dir=cache_dir, batch_size=cfg.batch_size, n_batches_in_buffer=cfg.n_batches_in_buffer)
+    buffer = ActivationBuffer(
+        cache_dir=cache_dir,
+        batch_size=cfg.batch_size,
+        n_batches_in_buffer=cfg.n_batches_in_buffer,
+    )
     ever_fired = torch.zeros(d_sae, dtype=torch.bool, device=device)
     feature_frequency = torch.zeros(d_sae, dtype=torch.float32, device=device)
     frequency_penalty_scale: float | None = None
@@ -387,24 +476,35 @@ def train_sae(
     source_checkpoint = _load_source_weights(cfg, sae, normalization_scale)
     resumed = source_checkpoint is not None and cfg.checkpoint_mode == "resume"
     if resumed:
-        start_step, frequency_penalty_scale, feature_resets, reset_target_step = _restore_resume_state(
-            source_checkpoint,
-            optim=optim,
-            ever_fired=ever_fired,
-            feature_frequency=feature_frequency,
-            early_stop_monitor=early_stop_monitor,
-            buffer=buffer,
-            validation_readers=validation_readers,
-            validation_cache_signature=validation_cache_signature,
-            early_stopping=early_stopping,
-            n_steps=cfg.n_steps,
-            device=device,
+        start_step, frequency_penalty_scale, feature_resets, reset_target_step = (
+            _restore_resume_state(
+                source_checkpoint,
+                optim=optim,
+                ever_fired=ever_fired,
+                feature_frequency=feature_frequency,
+                early_stop_monitor=early_stop_monitor,
+                buffer=buffer,
+                validation_readers=validation_readers,
+                validation_cache_signature=validation_cache_signature,
+                early_stopping=early_stopping,
+                n_steps=cfg.n_steps,
+                device=device,
+            )
         )
     elif source_checkpoint is not None:
-        log.info("Fine-tuning weights from %s with fresh optimizer and step numbering", source_checkpoint.weights_path)
+        log.info(
+            "Fine-tuning weights from %s with fresh optimizer and step numbering",
+            source_checkpoint.weights_path,
+        )
 
     activation_center = _activation_center(
-        cfg, cache_dir, metadata_dir, out_dir, input_scale=normalization_scale, d_in=d_in, device=device
+        cfg,
+        cache_dir,
+        metadata_dir,
+        out_dir,
+        input_scale=normalization_scale,
+        d_in=d_in,
+        device=device,
     )
     if activation_center is not None and not resumed:
         # A resumed checkpoint is already centred.
@@ -420,7 +520,11 @@ def train_sae(
             sample_tokens=cfg.active_subspace_sample_tokens,
             rank=cfg.active_subspace_rank,
             input_scale=normalization_scale,
-            centre=(activation_center if activation_center is not None else torch.zeros(d_in, device=device)),
+            centre=(
+                activation_center
+                if activation_center is not None
+                else torch.zeros(d_in, device=device)
+            ),
             device=device,
             metadata_dir=metadata_dir,
         )
@@ -458,7 +562,11 @@ def train_sae(
             },
             keep_last=cfg.keep_last_checkpoints,
         )
-        log.info("Wrote checkpoint pair %s and %s", saved.weights_path, saved.trainer_state_path)
+        log.info(
+            "Wrote checkpoint pair %s and %s",
+            saved.weights_path,
+            saved.trainer_state_path,
+        )
         # The JSONL is flushed at every checkpoint step, so this plot remains
         # useful if a later allocation ends before the final checkpoint.
         refresh_plot(
@@ -472,15 +580,25 @@ def train_sae(
         return saved.weights_path
 
     t_start = time.time()
-    final_checkpoint = source_checkpoint.weights_path if source_checkpoint is not None else None
+    final_checkpoint = (
+        source_checkpoint.weights_path if source_checkpoint is not None else None
+    )
     completed_step = start_step
     if resumed and start_step == cfg.n_steps:
-        log.info("Resume checkpoint is already at target step %d; writing it into %s", cfg.n_steps, out_dir)
+        log.info(
+            "Resume checkpoint is already at target step %d; writing it into %s",
+            cfg.n_steps,
+            out_dir,
+        )
         final_checkpoint = write_checkpoint(start_step)
     log_mode = "a" if resumed else "w"
     with ExitStack() as stack:
         log_f = stack.enter_context(open(log_path, log_mode))
-        validation_f = stack.enter_context(open(validation_log_path, log_mode)) if validation_readers else None
+        validation_f = (
+            stack.enter_context(open(validation_log_path, log_mode))
+            if validation_readers
+            else None
+        )
         for step in range(start_step + 1, cfg.n_steps + 1):
             completed_step = step
             x = buffer.next_batch().to(device, dtype=torch.float32)
@@ -490,7 +608,9 @@ def train_sae(
                 x = x - activation_center
 
             coefficients = coefficients_at(cfg, step, n_steps=cfg.n_steps)
-            target_l0 = scheduled_l0_target(step, l0_target, cfg) + reset_l0_allowance(cfg, step, reset_target_step)
+            target_l0 = scheduled_l0_target(step, l0_target, cfg) + reset_l0_allowance(
+                cfg, step, reset_target_step
+            )
             terms = training_loss(sae, x, cfg, coefficients, target_l0=target_l0)
             record_firing(
                 terms.f,
@@ -499,7 +619,12 @@ def train_sae(
                 ema_decay=cfg.feature_frequency_ema_decay,
             )
             feature_use_penalty, frequency_penalty_scale = _frequency_penalty(
-                cfg, step, terms.f, feature_frequency, terms.reconstruction, frequency_penalty_scale
+                cfg,
+                step,
+                terms.f,
+                feature_frequency,
+                terms.reconstruction,
+                frequency_penalty_scale,
             )
             loss = terms.total + feature_use_penalty
             if not torch.isfinite(loss):
@@ -508,25 +633,39 @@ def train_sae(
                     f"reconstruction={terms.reconstruction.detach().item()} "
                     f"l0_penalty={terms.l0_penalty.detach().item()}"
                 )
-            gradient_stats = optimizer_step(sae, optim, loss, x, cfg, step=step, lr=coefficients.lr)
+            gradient_stats = optimizer_step(
+                sae, optim, loss, x, cfg, step=step, lr=coefficients.lr
+            )
 
             if residual_reset_due(cfg, step):
                 calibration_x = calibration_residuals = None
                 if cfg.residual_reset_calibration_tokens > 0:
-                    calibration_x, calibration_residuals, calibrated_frequency = load_reset_calibration(
-                        sae,
-                        cache_dir,
-                        sample_tokens=cfg.residual_reset_calibration_tokens,
-                        pool_size=cfg.residual_reset_pool_size,
-                        normalization_scale=normalization_scale,
-                        activation_center=activation_center,
-                        batch_size=cfg.batch_size,
-                        device=device,
+                    calibration_x, calibration_residuals, calibrated_frequency = (
+                        load_reset_calibration(
+                            sae,
+                            cache_dir,
+                            sample_tokens=cfg.residual_reset_calibration_tokens,
+                            pool_size=cfg.residual_reset_pool_size,
+                            normalization_scale=normalization_scale,
+                            activation_center=activation_center,
+                            batch_size=cfg.batch_size,
+                            device=device,
+                        )
                     )
-                    feature_frequency.copy_(calibrated_frequency.to(dtype=torch.float32))
+                    feature_frequency.copy_(
+                        calibrated_frequency.to(dtype=torch.float32)
+                    )
                 feature_resets += resample_underused_features(
-                    sae, optim, x, terms.x_hat.detach(), feature_frequency, ever_fired, cfg,
-                    subspace, calibration_x, calibration_residuals,
+                    sae,
+                    optim,
+                    x,
+                    terms.x_hat.detach(),
+                    feature_frequency,
+                    ever_fired,
+                    cfg,
+                    subspace,
+                    calibration_x,
+                    calibration_residuals,
                 )
                 reset_target_step = step
                 del calibration_x, calibration_residuals
@@ -551,16 +690,30 @@ def train_sae(
                 log_f.flush()
                 log.info(
                     "step=%d loss=%.4f recon=%.4f l0=%.1f dead=%.1f%% D_is=%.1f u_is=%.2f%% is_pen=%.4f lr=%.2e lam=%.2e",
-                    step, entry.loss, entry.reconstruction_loss, entry.hard_l0, entry.dead_pct, entry.d_is,
-                    entry.u_is * 100.0, entry.inverse_simpson_penalty, coefficients.lr, coefficients.lambda_l0,
+                    step,
+                    entry.loss,
+                    entry.reconstruction_loss,
+                    entry.hard_l0,
+                    entry.dead_pct,
+                    entry.d_is,
+                    entry.u_is * 100.0,
+                    entry.inverse_simpson_penalty,
+                    coefficients.lr,
+                    coefficients.lambda_l0,
                 )
 
-            validation_due = bool(validation_readers) and (step % eval_interval == 0 or step == cfg.n_steps)
+            validation_due = bool(validation_readers) and (
+                step % eval_interval == 0 or step == cfg.n_steps
+            )
             stop_now = False
             if validation_due:
                 metrics = _probe_metrics(
-                    sae, {"train_probe": train_probe_reader, **validation_readers}, probe_batches,
-                    probe_tokens=probe_tokens, step=step, out_dir=out_dir,
+                    sae,
+                    {"train_probe": train_probe_reader, **validation_readers},
+                    probe_batches,
+                    probe_tokens=probe_tokens,
+                    step=step,
+                    out_dir=out_dir,
                 )
                 stable, l0_ok = False, True
                 if early_stopping.enabled:
@@ -572,11 +725,17 @@ def train_sae(
                     )
                     stop_now = (
                         step >= early_stopping.minimum_steps
-                        and early_stop_monitor.stable_intervals >= early_stopping.patience
+                        and early_stop_monitor.stable_intervals
+                        >= early_stopping.patience
                     )
                 for row in _validation_rows(
-                    metrics, step=step, target_l0=target_l0, stable=stable, l0_ok=l0_ok,
-                    stable_intervals=early_stop_monitor.stable_intervals, stop_now=stop_now,
+                    metrics,
+                    step=step,
+                    target_l0=target_l0,
+                    stable=stable,
+                    l0_ok=l0_ok,
+                    stable_intervals=early_stop_monitor.stable_intervals,
+                    stop_now=stop_now,
                 ):
                     validation_f.write(json.dumps(row) + "\n")
                 validation_f.flush()
@@ -594,7 +753,9 @@ def train_sae(
                 log.info(
                     "Early stopping at step %d: validation FVU plateaued for %d "
                     "evaluations and L0 stayed within %.1f%% of target",
-                    step, early_stop_monitor.stable_intervals, 100.0 * early_stopping.l0_relative_tolerance,
+                    step,
+                    early_stop_monitor.stable_intervals,
+                    100.0 * early_stopping.l0_relative_tolerance,
                 )
                 break
 

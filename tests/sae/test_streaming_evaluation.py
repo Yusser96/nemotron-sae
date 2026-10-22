@@ -260,4 +260,3 @@ def test_disabled_early_stopping_keeps_learning_rate_on_plateau(tmp_path):
     site.close()
     assert site.early_stop.lr_scale == 1.0
     assert site.early_stop.checks_since_improve == 0
-

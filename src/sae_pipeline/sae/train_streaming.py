@@ -34,8 +34,17 @@ from sae_pipeline.eval.plots import (
     refresh_plot,
 )
 from sae_pipeline.extraction.base import ActivationExtractor
-from sae_pipeline.sae.checkpoint import (capture_random_state, load_sae_weights, load_trainer_state, prune_checkpoints, restore_random_state, save_checkpoint_pair, write_raw_export, write_text_atomic)
-from sae_pipeline.sae.checkpoint_source import (resolve_checkpoint)
+from sae_pipeline.sae.checkpoint import (
+    capture_random_state,
+    load_sae_weights,
+    load_trainer_state,
+    prune_checkpoints,
+    restore_random_state,
+    save_checkpoint_pair,
+    write_raw_export,
+    write_text_atomic,
+)
+from sae_pipeline.sae.checkpoint_source import resolve_checkpoint
 from sae_pipeline.sae.early_stopping import ObjectiveEarlyStop
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
 from sae_pipeline.sae.normalization import (
@@ -128,11 +137,17 @@ def _reject_unsupported(cfg: SAECfg, slug: str) -> None:
             f"{slug}: streaming training does not implement feature_use_strategy {cfg.feature_use_strategy!r}"
         )
     if cfg.activation_centering != "none":
-        raise NotImplementedError(f"{slug}: streaming training does not implement activation_centering")
+        raise NotImplementedError(
+            f"{slug}: streaming training does not implement activation_centering"
+        )
     if cfg.active_subspace_rank is not None:
-        raise NotImplementedError(f"{slug}: streaming training does not implement active_subspace_rank")
+        raise NotImplementedError(
+            f"{slug}: streaming training does not implement active_subspace_rank"
+        )
     if cfg.lr_schedule == "cosine_decay":
-        raise ValueError(f"{slug}: cosine_decay needs a fixed n_steps horizon, which streaming does not have")
+        raise ValueError(
+            f"{slug}: cosine_decay needs a fixed n_steps horizon, which streaming does not have"
+        )
 
 
 def init_streaming_site(
@@ -174,7 +189,9 @@ def init_streaming_site(
 
     seed_training(sae_cfg.seed)
     sae, optim = build_sae_and_optimizer(sae_cfg, d_in=d_in, d_sae=d_sae, device=device)
-    validation_readers = {lang: ShardReader(path) for lang, path in sorted(validation_cache_dirs.items())}
+    validation_readers = {
+        lang: ShardReader(path) for lang, path in sorted(validation_cache_dirs.items())
+    }
     validation_cache_signature = probe_cache_signature(validation_readers)
     ever_fired = torch.zeros(d_sae, dtype=torch.bool, device=device)
     feature_frequency = torch.zeros(d_sae, dtype=torch.float32, device=device)
@@ -189,31 +206,49 @@ def init_streaming_site(
         assert resume_checkpoint.trainer_state_path is not None
         state = load_trainer_state(resume_checkpoint.trainer_state_path)
         if state.get("normalization_scale", normalization_scale) != normalization_scale:
-            raise ValueError(f"{slug}: normalization scale differs from the resume checkpoint")
+            raise ValueError(
+                f"{slug}: normalization scale differs from the resume checkpoint"
+            )
         saved_signature = state.get("validation_cache_signature")
-        validation_changed = saved_signature is not None and saved_signature != validation_cache_signature
+        validation_changed = (
+            saved_signature is not None
+            and saved_signature != validation_cache_signature
+        )
         if validation_changed and not new_validation:
-            raise ValueError(f"{slug}: validation caches differ from the resume checkpoint")
+            raise ValueError(
+                f"{slug}: validation caches differ from the resume checkpoint"
+            )
         step = int(state["global_step"])
         optim.load_state_dict(state["optimizer"])
         ever_fired.copy_(state["ever_fired"].to(device=device, dtype=torch.bool))
-        feature_frequency.copy_(state["feature_frequency"].to(device=device, dtype=torch.float32))
+        feature_frequency.copy_(
+            state["feature_frequency"].to(device=device, dtype=torch.float32)
+        )
         # Checkpoints from before the window existed: it refills over its length.
         if "inverse_simpson_usage" in state:
-            inverse_simpson_usage.copy_(state["inverse_simpson_usage"].to(device=device, dtype=torch.float32))
+            inverse_simpson_usage.copy_(
+                state["inverse_simpson_usage"].to(device=device, dtype=torch.float32)
+            )
         # Checkpoints from before AuxK: every latent counts as just fired.
         if "tokens_since_fired" in state:
-            tokens_since_fired.copy_(state["tokens_since_fired"].to(device=device, dtype=torch.int64))
+            tokens_since_fired.copy_(
+                state["tokens_since_fired"].to(device=device, dtype=torch.int64)
+            )
         early_stop.load_state_dict(state["early_stop"])
         if state.get("best_selection_policy") != "reconstruction_v1":
             early_stop.best, early_stop.checks_since_improve = None, 0
-            log.warning("%s: best was not scored on reconstruction alone; reset best/plateau baseline", slug)
+            log.warning(
+                "%s: best was not scored on reconstruction alone; reset best/plateau baseline",
+                slug,
+            )
         if validation_changed:
             early_stop.best, early_stop.checks_since_improve = None, 0
             baseline = out_dir / "baseline_metrics.json"
             if baseline.exists():
                 baseline.replace(out_dir / "baseline_metrics_previous_validation.json")
-            log.warning("%s: new validation caches; early stopping starts over on them", slug)
+            log.warning(
+                "%s: new validation caches; early stopping starts over on them", slug
+            )
         stopped = bool(state.get("stopped", False))
         next_milestone_index = int(state.get("next_milestone_index", 0))
         feature_resets = int(state.get("feature_resets", 0))
@@ -221,12 +256,18 @@ def init_streaming_site(
         log.info("%s: resumed at step %d", slug, step)
     else:
         receipt = initialize_sae(
-            sae, sae_cfg, normalization_scale=normalization_scale,
+            sae,
+            sae_cfg,
+            normalization_scale=normalization_scale,
             checkpoint_filename=checkpoint_filename,
         )
         (out_dir / "initialization.json").write_text(json.dumps(receipt, indent=2))
-        log.info("%s: %s initialization, %d reset latents, fresh optimizer",
-                 slug, receipt["mode"], receipt["reset_count"])
+        log.info(
+            "%s: %s initialization, %d reset latents, fresh optimizer",
+            slug,
+            receipt["mode"],
+            receipt["reset_count"],
+        )
 
     for name, parameter in sae.named_parameters():
         if not torch.isfinite(parameter).all():
@@ -243,7 +284,11 @@ def init_streaming_site(
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
-                        log.warning("%s: dropping an interrupted line and the rest of %s", slug, path)
+                        log.warning(
+                            "%s: dropping an interrupted line and the rest of %s",
+                            slug,
+                            path,
+                        )
                         break
                     if int(row["step"]) <= step:
                         rows.append(line)
@@ -273,13 +318,21 @@ def init_streaming_site(
         next_milestone_index=next_milestone_index,
         feature_resets=feature_resets,
         last_reset_step=last_reset_step,
-        selection_state={} if resume_checkpoint is None else state.get("selection_state", {}),
-        stopping_state={} if resume_checkpoint is None else state.get("stopping_state", {}),
-        resume_weights_name=None if resume_checkpoint is None else resume_checkpoint.weights_path.name,
+        selection_state={}
+        if resume_checkpoint is None
+        else state.get("selection_state", {}),
+        stopping_state={}
+        if resume_checkpoint is None
+        else state.get("stopping_state", {}),
+        resume_weights_name=None
+        if resume_checkpoint is None
+        else resume_checkpoint.weights_path.name,
     )
 
 
-def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepLog | None:
+def streaming_step(
+    site: StreamingSite, x_raw: torch.Tensor, step: int
+) -> StepLog | None:
     """One optimisation step on one captured batch; returns a log row every ``log_every`` steps."""
 
     cfg = site.cfg
@@ -289,7 +342,9 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     if site.normalization_scale != 1.0:
         x = x * site.normalization_scale
 
-    target_l0 = scheduled_l0_target(step, site.l0_target, cfg) + reset_l0_allowance(cfg, step, site.last_reset_step)
+    target_l0 = scheduled_l0_target(step, site.l0_target, cfg) + reset_l0_allowance(
+        cfg, step, site.last_reset_step
+    )
     terms = training_loss(
         site.sae,
         x,
@@ -300,14 +355,18 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
         tokens_since_fired=site.tokens_since_fired,
     )
     if not torch.isfinite(terms.total):
-        raise FloatingPointError(f"{site.slug}: non-finite training loss at step {step}")
+        raise FloatingPointError(
+            f"{site.slug}: non-finite training loss at step {step}"
+        )
     record_firing(
         terms.f,
         feature_frequency=site.feature_frequency,
         ever_fired=site.ever_fired,
         ema_decay=cfg.feature_frequency_ema_decay,
     )
-    gradient_stats = optimizer_step(site.sae, site.optim, terms.total, x, cfg, step=step, lr=lr)
+    gradient_stats = optimizer_step(
+        site.sae, site.optim, terms.total, x, cfg, step=step, lr=lr
+    )
     if residual_reset_due(cfg, step):
         # No cache to calibrate on (residual_reset_calibration_tokens is for
         # train_sae): new directions and thresholds come from this batch.
@@ -337,7 +396,9 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
         ever_fired=site.ever_fired,
         feature_frequency=site.feature_frequency,
         feature_resets=site.feature_resets,
-        dead=site.tokens_since_fired >= cfg.auxk_dead_tokens if cfg.auxk_scale > 0 else None,
+        dead=site.tokens_since_fired >= cfg.auxk_dead_tokens
+        if cfg.auxk_scale > 0
+        else None,
     )
 
 
@@ -354,7 +415,9 @@ class SiteEvaluation:
     coefficients: dict[str, float] = field(default_factory=dict)
 
     def stopping_score(self, score: str) -> float:
-        values = self.training_objective if score == "full_training_loss" else self.objective
+        values = (
+            self.training_objective if score == "full_training_loss" else self.objective
+        )
         if not values:
             raise ValueError(f"No validation values for stopping score {score}")
         return sum(values.values()) / len(values)
@@ -368,15 +431,21 @@ def evaluate_site(site: StreamingSite, device: str) -> SiteEvaluation:
     """Score fixed probes without mutating training statistics, RNG or model mode."""
     metrics, objective, full_objective, components = {}, {}, {}, {}
     coefficients = coefficients_at(site.cfg, site.step)
-    target = scheduled_l0_target(site.step, site.l0_target, site.cfg) + reset_l0_allowance(
-        site.cfg, site.step, site.last_reset_step
-    )
+    target = scheduled_l0_target(
+        site.step, site.l0_target, site.cfg
+    ) + reset_l0_allowance(site.cfg, site.step, site.last_reset_step)
     rng = capture_random_state()
     modes = [(module, module.training) for module in site.sae.modules()]
     try:
         for language, reader in site.validation_readers.items():
-            totals = dict(reconstruction=0.0, sparsity_raw=0.0, sparsity_weighted=0.0,
-                          is_weighted=0.0, auxk_weighted=0.0, total=0.0)
+            totals = dict(
+                reconstruction=0.0,
+                sparsity_raw=0.0,
+                sparsity_weighted=0.0,
+                is_weighted=0.0,
+                auxk_weighted=0.0,
+                total=0.0,
+            )
             n_rows = 0
             usage = site.inverse_simpson_usage.detach().clone()
             dead = site.tokens_since_fired.detach().clone()
@@ -385,35 +454,65 @@ def evaluate_site(site: StreamingSite, device: str) -> SiteEvaluation:
                 nonlocal n_rows
                 for x in batches:
                     with torch.no_grad():
-                        terms = training_loss(site.sae, x, site.cfg, coefficients,
-                                              target_l0=target, usage=usage, tokens_since_fired=dead)
-                    values = dict(reconstruction=terms.reconstruction, sparsity_raw=terms.l0_penalty,
-                                  sparsity_weighted=coefficients.lambda_l0 * site.cfg.l0_penalty_scale * terms.l0_penalty,
-                                  is_weighted=terms.inverse_simpson_penalty,
-                                  auxk_weighted=terms.auxk_penalty, total=terms.total)
+                        terms = training_loss(
+                            site.sae,
+                            x,
+                            site.cfg,
+                            coefficients,
+                            target_l0=target,
+                            usage=usage,
+                            tokens_since_fired=dead,
+                        )
+                    values = dict(
+                        reconstruction=terms.reconstruction,
+                        sparsity_raw=terms.l0_penalty,
+                        sparsity_weighted=coefficients.lambda_l0
+                        * site.cfg.l0_penalty_scale
+                        * terms.l0_penalty,
+                        is_weighted=terms.inverse_simpson_penalty,
+                        auxk_weighted=terms.auxk_penalty,
+                        total=terms.total,
+                    )
                     for key, value in values.items():
                         number = float(value)
                         if not math.isfinite(number):
-                            raise FloatingPointError(f"{site.slug}: nonfinite validation {language}/{key}")
+                            raise FloatingPointError(
+                                f"{site.slug}: nonfinite validation {language}/{key}"
+                            )
                         totals[key] += number * x.shape[0]
                     n_rows += x.shape[0]
                     yield x
 
-            batches = validation_batches(reader, n_tokens=site.probe_tokens, batch_size=site.cfg.batch_size,
-                                          input_scale=site.normalization_scale, input_center=None, device=device)
-            result = streaming_reconstruction_metrics(site.sae, scored(batches), dead_threshold_tokens=site.probe_tokens)
+            batches = validation_batches(
+                reader,
+                n_tokens=site.probe_tokens,
+                batch_size=site.cfg.batch_size,
+                input_scale=site.normalization_scale,
+                input_center=None,
+                device=device,
+            )
+            result = streaming_reconstruction_metrics(
+                site.sae, scored(batches), dead_threshold_tokens=site.probe_tokens
+            )
             if n_rows != site.probe_tokens:
                 raise ValueError("Validation did not consume the fixed probe exactly")
             metrics[language] = result
-            components[language] = {key: value / n_rows for key, value in totals.items()}
-            objective[language] = components[language]['reconstruction']
-            full_objective[language] = components[language]['total']
+            components[language] = {
+                key: value / n_rows for key, value in totals.items()
+            }
+            objective[language] = components[language]["reconstruction"]
+            full_objective[language] = components[language]["total"]
     finally:
         for module, mode in modes:
             module.training = mode
         restore_random_state(rng)
-    return SiteEvaluation(metrics=metrics, objective=objective, training_objective=full_objective,
-                          loss_components=components, coefficients={**asdict(coefficients), 'target_l0': target})
+    return SiteEvaluation(
+        metrics=metrics,
+        objective=objective,
+        training_objective=full_objective,
+        loss_components=components,
+        coefficients={**asdict(coefficients), "target_l0": target},
+    )
 
 
 def record_baseline(site: StreamingSite, device: str) -> None:
@@ -426,45 +525,67 @@ def record_baseline(site: StreamingSite, device: str) -> None:
     path = site.out_dir / "baseline_metrics.json"
     if path.exists():
         site.baseline = json.loads(path.read_text())
-        reconstruction_missing=site.cfg.track_reconstruction_selection and not site.selection_state
-        full_missing=(site.stopping_state.get('policy',{}).get('score')=='full_training_loss'
-                      and not site.stopping_state.get('best_full_objective'))
+        reconstruction_missing = (
+            site.cfg.track_reconstruction_selection and not site.selection_state
+        )
+        full_missing = site.stopping_state.get("policy", {}).get(
+            "score"
+        ) == "full_training_loss" and not site.stopping_state.get("best_full_objective")
         if site.step == 0 and (reconstruction_missing or full_missing):
-            evaluation=evaluate_site(site, device)
+            evaluation = evaluate_site(site, device)
             if reconstruction_missing:
-                observe_selection(site, evaluation, EarlyStoppingCfg(mode="objective", patience=10))
+                observe_selection(
+                    site, evaluation, EarlyStoppingCfg(mode="objective", patience=10)
+                )
             if full_missing:
                 from sae_pipeline.sae.validation_stopping import observe_full_best
-                observe_full_best(site,evaluation)
+
+                observe_full_best(site, evaluation)
         return
     if site.step > 0:
-        log.warning("%s: no baseline from the start of this run; deltas are not reported", site.slug)
+        log.warning(
+            "%s: no baseline from the start of this run; deltas are not reported",
+            site.slug,
+        )
         return
     evaluation = evaluate_site(site, device)
     site.baseline = {
-        language: {"fvu": evaluation.metrics[language].fvu, "objective": evaluation.objective[language]}
+        language: {
+            "fvu": evaluation.metrics[language].fvu,
+            "objective": evaluation.objective[language],
+        }
         for language in evaluation.metrics
     }
     path.write_text(json.dumps(site.baseline))
     _write_diagnostic(site, evaluation, "initial")
-    if site.stopping_state.get('policy',{}).get('score')=='full_training_loss':
+    if site.stopping_state.get("policy", {}).get("score") == "full_training_loss":
         from sae_pipeline.sae.validation_stopping import observe_full_best
-        observe_full_best(site,evaluation)
+
+        observe_full_best(site, evaluation)
     if site.cfg.track_reconstruction_selection:
         observe_selection(site, evaluation, _SELECTION_RULE)
     log.info("%s: warm-start baseline %s", site.slug, site.baseline)
 
 
-def _write_diagnostic(site: StreamingSite, evaluation: SiteEvaluation, phase: str, **extra) -> None:
+def _write_diagnostic(
+    site: StreamingSite, evaluation: SiteEvaluation, phase: str, **extra
+) -> None:
     """Full boundary metrics without changing plateau or learning-rate state."""
     payload = {
-        "phase": phase, "step": site.step, "tokens": site.tokens_seen(),
+        "phase": phase,
+        "step": site.step,
+        "tokens": site.tokens_seen(),
         "validation_objective_mixed": evaluation.mixed_objective,
         "validation_training_objective": evaluation.training_objective,
         "loss_components": evaluation.loss_components,
         "loss_coefficients": evaluation.coefficients,
-        "metrics": {language: {**asdict(metrics), "validation_objective": evaluation.objective[language]}
-                    for language, metrics in evaluation.metrics.items()},
+        "metrics": {
+            language: {
+                **asdict(metrics),
+                "validation_objective": evaluation.objective[language],
+            }
+            for language, metrics in evaluation.metrics.items()
+        },
         **extra,
     }
     write_text_atomic(site.out_dir / f"{phase}_metrics.json", json.dumps(payload))
@@ -481,7 +602,9 @@ def write_export(site: StreamingSite, path: Path) -> Path | None:
     return write_raw_export(site.sae, path, input_scale=site.normalization_scale)
 
 
-def write_checkpoint(site: StreamingSite, step: int, *, snapshot_id: str | None = None) -> Path:
+def write_checkpoint(
+    site: StreamingSite, step: int, *, snapshot_id: str | None = None
+) -> Path:
     saved = save_checkpoint_pair(
         out_dir=site.out_dir,
         step=step,
@@ -526,14 +649,21 @@ def _write_best(site: StreamingSite, step: int) -> None:
     best_dir = site.out_dir / "best"
     best_dir.mkdir(parents=True, exist_ok=True)
     save_file(
-        {key: value.detach().cpu().contiguous() for key, value in site.sae.state_dict().items()},
+        {
+            key: value.detach().cpu().contiguous()
+            for key, value in site.sae.state_dict().items()
+        },
         str(best_dir / "sae_weights.safetensors"),
     )
     if site.cfg.input_normalization == "whole_vector":
-        statistic = load_whole_vector_normalization(site.out_dir, d_activation=site.sae.d_in)
+        statistic = load_whole_vector_normalization(
+            site.out_dir, d_activation=site.sae.d_in
+        )
         write_normalization(normalization_path(best_dir), statistic)
     write_export(site, best_dir / "sae_export.safetensors")
-    (best_dir / "step.json").write_text(json.dumps({"step": step, "tokens": site.tokens_seen()}))
+    (best_dir / "step.json").write_text(
+        json.dumps({"step": step, "tokens": site.tokens_seen()})
+    )
 
 
 @dataclass
@@ -545,13 +675,18 @@ class Stop:
 
 
 def finite_evaluation_error(evaluation):
-    values = list(evaluation.objective.values()) + list(evaluation.training_objective.values())
+    values = list(evaluation.objective.values()) + list(
+        evaluation.training_objective.values()
+    )
     values.append(evaluation.mixed_objective)
     for metrics in evaluation.metrics.values():
-        values.extend(value for value in vars(metrics).values()
-                      if isinstance(value, (int, float)) and not isinstance(value, bool))
+        values.extend(
+            value
+            for value in vars(metrics).values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
     if any(not math.isfinite(value) for value in values):
-        return 'nonfinite validation objective or metric'
+        return "nonfinite validation objective or metric"
     return None
 
 
@@ -562,14 +697,19 @@ def threshold_warnings(site, evaluation, step):
     warnings = []
     l0 = max(metrics.l0 for metrics in evaluation.metrics.values())
     if step >= site.cfg.l0_warmup_steps and l0 > _L0_WARNING_FACTOR * site.l0_target:
-        warnings.append('l0')
+        warnings.append("l0")
     best = site.early_stop.best
-    if best is not None and evaluation.mixed_objective > _OBJECTIVE_WARNING_FACTOR * best:
-        warnings.append('objective')
+    if (
+        best is not None
+        and evaluation.mixed_objective > _OBJECTIVE_WARNING_FACTOR * best
+    ):
+        warnings.append("objective")
     return tuple(warnings)
 
 
-def _divergence(site: StreamingSite, evaluation: SiteEvaluation, step: int, cfg: EarlyStoppingCfg) -> str | None:
+def _divergence(
+    site: StreamingSite, evaluation: SiteEvaluation, step: int, cfg: EarlyStoppingCfg
+) -> str | None:
     """How this evaluation shows ``site`` diverging, if it does (see ``EarlyStoppingCfg``)."""
     objective = evaluation.stopping_score(cfg.score)
     error = finite_evaluation_error(evaluation)
@@ -583,7 +723,11 @@ def _divergence(site: StreamingSite, evaluation: SiteEvaluation, step: int, cfg:
     ):
         return f"validation L0 {l0:.1f} above {cfg.divergence_l0_factor:g}x the target {site.l0_target}"
     best = site.early_stop.best
-    if cfg.divergence_objective_factor is not None and best is not None and objective > cfg.divergence_objective_factor * best:
+    if (
+        cfg.divergence_objective_factor is not None
+        and best is not None
+        and objective > cfg.divergence_objective_factor * best
+    ):
         return f"validation objective {objective:.4g} above {cfg.divergence_objective_factor:g}x its best {best:.4g}"
     return None
 
@@ -598,13 +742,23 @@ def evaluate_and_update(
     """
 
     evaluation = evaluate_site(site, device)
-    from sae_pipeline.sae.validation_stopping import configure_stopping, eligibility_step, observe_full_best
+    from sae_pipeline.sae.validation_stopping import (
+        configure_stopping,
+        eligibility_step,
+        observe_full_best,
+    )
+
     configure_stopping(site, early_stopping)
     objective = evaluation.stopping_score(early_stopping.score)
     divergence = _divergence(site, evaluation, step, early_stopping)
     warnings = threshold_warnings(site, evaluation, step)
     if warnings:
-        log.warning("%s finite diagnostic threshold warnings at step %d: %s", site.slug, step, ",".join(warnings))
+        log.warning(
+            "%s finite diagnostic threshold warnings at step %d: %s",
+            site.slug,
+            step,
+            ",".join(warnings),
+        )
     if site.cfg.track_reconstruction_selection and divergence is None:
         observe_selection(site, evaluation, early_stopping)
     selection_minimum = eligibility_step(site.cfg, early_stopping)
@@ -613,11 +767,15 @@ def evaluate_and_update(
     if divergence is None and early_stopping.score == "full_training_loss":
         observe_full_best(site, evaluation)
     if divergence is None and selection_eligible:
-        if early_stopping.score == "full_training_loss" and not site.stopping_state.get('baseline_initialized'):
+        if early_stopping.score == "full_training_loss" and not site.stopping_state.get(
+            "baseline_initialized"
+        ):
             site.early_stop.best, site.early_stop.checks_since_improve = None, 0
-            site.stopping_state['baseline_initialized'] = True
+            site.stopping_state["baseline_initialized"] = True
         is_best, lr_reduced, should_stop = site.early_stop.update(
-            objective, early_stopping, eligible=early_stopping.enabled and step >= early_stopping.minimum_steps
+            objective,
+            early_stopping,
+            eligible=early_stopping.enabled and step >= early_stopping.minimum_steps,
         )
     else:
         is_best, lr_reduced, should_stop = False, False, False
@@ -629,7 +787,9 @@ def evaluate_and_update(
             "language": language,
             "validation_objective": evaluation.objective[language],
             "validation_objective_mixed": evaluation.mixed_objective,
-            "validation_training_objective": evaluation.training_objective.get(language),
+            "validation_training_objective": evaluation.training_objective.get(
+                language
+            ),
             "validation_stopping_score": objective,
             "stopping_score_kind": early_stopping.score,
             "loss_components": evaluation.loss_components.get(language, {}),
@@ -650,14 +810,22 @@ def evaluate_and_update(
             row["baseline_fvu"] = baseline["fvu"]
             row["delta_fvu_vs_initial"] = metrics.fvu - baseline["fvu"]
             row["baseline_objective"] = baseline["objective"]
-            row["delta_objective_vs_initial"] = evaluation.objective[language] - baseline["objective"]
+            row["delta_objective_vs_initial"] = (
+                evaluation.objective[language] - baseline["objective"]
+            )
         site.validation_f.write(json.dumps(row) + "\n")
     site.validation_f.flush()
     log.info(
         "%s eval step=%d tokens=%d objective=%.6g best=%.6g stale=%d lr_scale=%.3g%s%s",
-        site.slug, step, site.tokens_seen(), objective, math.nan if site.early_stop.best is None else site.early_stop.best,
-        site.early_stop.checks_since_improve, site.early_stop.lr_scale,
-        " [new best]" if is_best else "", " [lr reduced]" if lr_reduced else "",
+        site.slug,
+        step,
+        site.tokens_seen(),
+        objective,
+        math.nan if site.early_stop.best is None else site.early_stop.best,
+        site.early_stop.checks_since_improve,
+        site.early_stop.lr_scale,
+        " [new best]" if is_best else "",
+        " [lr reduced]" if lr_reduced else "",
     )
     refresh_plot(
         plot_validation_curves,
@@ -681,7 +849,12 @@ class TokenStream(Protocol):
     def load_state_dict(self, state: dict[str, object]) -> None: ...
 
 
-def _save_stream_state(path: Path, token_stream: TokenStream, tokens_processed: int, checkpoints: dict[str, str]) -> None:
+def _save_stream_state(
+    path: Path,
+    token_stream: TokenStream,
+    tokens_processed: int,
+    checkpoints: dict[str, str],
+) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     torch.save(
         {
@@ -695,8 +868,13 @@ def _save_stream_state(path: Path, token_stream: TokenStream, tokens_processed: 
     os.replace(temporary, path)
 
 
-def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = True,
-            early_stopping: EarlyStoppingCfg | None = None) -> None:
+def _finish(
+    sites: list[StreamingSite],
+    reason: str,
+    *,
+    final_export: bool = True,
+    early_stopping: EarlyStoppingCfg | None = None,
+) -> None:
     log.info("Stopping %d site(s): %s", len(sites), reason)
     for site in sites:
         export_healthy = final_export
@@ -707,15 +885,28 @@ def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = Tru
             if early_stopping is not None:
                 divergence = _divergence(site, evaluation, site.step, early_stopping)
                 export_healthy = export_healthy and divergence is None
-            _write_diagnostic(site, evaluation, "terminal", reason=reason,
-                              diverged=divergence, healthy=export_healthy)
+            _write_diagnostic(
+                site,
+                evaluation,
+                "terminal",
+                reason=reason,
+                diverged=divergence,
+                healthy=export_healthy,
+            )
             if site.cfg.track_reconstruction_selection and export_healthy:
                 observe_selection(site, evaluation, early_stopping or _SELECTION_RULE)
         site.stopped = True
         if export_healthy:
-            write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
+            write_export(
+                site,
+                site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors",
+            )
         else:
-            log.warning("%s: no final export from diverged weights; its result is %s", site.slug, site.out_dir / "best")
+            log.warning(
+                "%s: no final export from diverged weights; its result is %s",
+                site.slug,
+                site.out_dir / "best",
+            )
 
 
 def state_paths(out_root: Path, name: str | None) -> tuple[Path, Path]:
@@ -724,7 +915,9 @@ def state_paths(out_root: Path, name: str | None) -> tuple[Path, Path]:
     return out_root / f"stream_state{suffix}.pt", out_root / f"DONE{suffix}"
 
 
-def committed_stream_checkpoints(out_root: Path, site_dirs: dict[str, Path], name: str | None = None):
+def committed_stream_checkpoints(
+    out_root: Path, site_dirs: dict[str, Path], name: str | None = None
+):
     """Select exactly the checkpoint pairs published with the token cursor.
 
     Orphan pairs from an interrupted transaction are deliberately ignored.
@@ -735,9 +928,15 @@ def committed_stream_checkpoints(out_root: Path, site_dirs: dict[str, Path], nam
     state = load_trainer_state(path)
     checkpoints = state.get("checkpoints", {})
     if set(checkpoints) != set(site_dirs):
-        raise ValueError("Streaming resume requires the same sites and a committed snapshot; legacy states cannot resume exactly")
-    return {slug: resolve_checkpoint(directory, filename=checkpoints[slug], require_trainer_state=True)
-            for slug, directory in site_dirs.items()}
+        raise ValueError(
+            "Streaming resume requires the same sites and a committed snapshot; legacy states cannot resume exactly"
+        )
+    return {
+        slug: resolve_checkpoint(
+            directory, filename=checkpoints[slug], require_trainer_state=True
+        )
+        for slug, directory in site_dirs.items()
+    }
 
 
 def run_streaming_training(
@@ -766,17 +965,23 @@ def run_streaming_training(
     """
 
     if early_stopping.enabled and early_stopping.mode != "objective":
-        raise ValueError("Streaming training supports only early_stopping.mode='objective'")
+        raise ValueError(
+            "Streaming training supports only early_stopping.mode='objective'"
+        )
     batch_sizes = {site.cfg.batch_size for site in sites.values()}
     if len(batch_sizes) != 1:
-        raise ValueError(f"All streamed sites must share one batch_size; got {batch_sizes}")
+        raise ValueError(
+            f"All streamed sites must share one batch_size; got {batch_sizes}"
+        )
     batch_size = batch_sizes.pop()
     if stream_cfg.token_cap is not None and stream_cfg.token_cap % batch_size:
         raise ValueError("stream.token_cap must be a multiple of sae.batch_size")
     if tokens_per_fwd <= 0 or seq_len <= 0:
         raise ValueError("tokens_per_fwd and seq_len must be positive")
     if tokens_per_fwd % batch_size or tokens_per_fwd % seq_len:
-        raise ValueError("tokens_per_fwd must be a multiple of both sae.batch_size and seq_len")
+        raise ValueError(
+            "tokens_per_fwd must be a multiple of both sae.batch_size and seq_len"
+        )
 
     out_root = Path(out_root)
     stream_state_path, done_path = state_paths(out_root, name)
@@ -784,11 +989,22 @@ def run_streaming_training(
     if stream_state_path.exists():
         saved = load_trainer_state(stream_state_path)
         if set(saved.get("checkpoints", {})) != set(sites):
-            raise ValueError("Streaming resume requires the same sites and a committed snapshot; legacy states cannot resume exactly")
+            raise ValueError(
+                "Streaming resume requires the same sites and a committed snapshot; legacy states cannot resume exactly"
+            )
         for slug, site in sites.items():
-            committed = resolve_checkpoint(site.out_dir, filename=saved["checkpoints"][slug], require_trainer_state=True)
-            if committed.step != site.step or committed.weights_path.name != site.resume_weights_name:
-                raise ValueError(f"{slug}: loaded step does not match the committed stream snapshot")
+            committed = resolve_checkpoint(
+                site.out_dir,
+                filename=saved["checkpoints"][slug],
+                require_trainer_state=True,
+            )
+            if (
+                committed.step != site.step
+                or committed.weights_path.name != site.resume_weights_name
+            ):
+                raise ValueError(
+                    f"{slug}: loaded step does not match the committed stream snapshot"
+                )
         token_stream.load_state_dict(saved["token_stream"])
         tokens_processed = int(saved["tokens_processed"])
         restore_random_state(saved["random_state"])
@@ -798,18 +1014,27 @@ def run_streaming_training(
         # Unique names keep the previous transaction immutable until the cursor
         # and every site's pair have been atomically published together.
         snapshot_id = str(time_ns())
-        checkpoints = {slug: write_checkpoint(site, site.step, snapshot_id=snapshot_id).name
-                       for slug, site in sites.items()}
-        _save_stream_state(stream_state_path, token_stream, tokens_processed, checkpoints)
+        checkpoints = {
+            slug: write_checkpoint(site, site.step, snapshot_id=snapshot_id).name
+            for slug, site in sites.items()
+        }
+        _save_stream_state(
+            stream_state_path, token_stream, tokens_processed, checkpoints
+        )
         for slug, site in sites.items():
-            prune_checkpoints(site.out_dir, keep_last=site.cfg.keep_last_checkpoints,
-                              protected_weights=checkpoints[slug])
+            prune_checkpoints(
+                site.out_dir,
+                keep_last=site.cfg.keep_last_checkpoints,
+                protected_weights=checkpoints[slug],
+            )
             from sae_pipeline.sae.validation_stopping import prune_full_best
+
             prune_full_best(site)
             if site.cfg.track_reconstruction_selection:
                 prune_selection(site)
 
     from sae_pipeline.sae.validation_stopping import configure_stopping
+
     for site in sites.values():
         configure_stopping(site, early_stopping)
         if not early_stopping.enabled:
@@ -823,18 +1048,31 @@ def run_streaming_training(
         if not active:
             done = True
             break
-        if stream_cfg.token_cap is not None and all(site.tokens_seen() >= stream_cfg.token_cap for site in active):
-            _finish(active, f"reached the {stream_cfg.token_cap}-token cap", early_stopping=early_stopping)
+        if stream_cfg.token_cap is not None and all(
+            site.tokens_seen() >= stream_cfg.token_cap for site in active
+        ):
+            _finish(
+                active,
+                f"reached the {stream_cfg.token_cap}-token cap",
+                early_stopping=early_stopping,
+            )
             done = True
             break
-        if stream_cfg.stop_after_seconds is not None and time.monotonic() - started >= stream_cfg.stop_after_seconds:
+        if (
+            stream_cfg.stop_after_seconds is not None
+            and time.monotonic() - started >= stream_cfg.stop_after_seconds
+        ):
             log.info("Pausing at the %.0fs time limit", stream_cfg.stop_after_seconds)
             done = False
             break
         try:
             token_batch = token_stream.next_batch(tokens_per_fwd // seq_len)
         except StopIteration:
-            _finish(active, "the training corpus is exhausted", early_stopping=early_stopping)
+            _finish(
+                active,
+                "the training corpus is exhausted",
+                early_stopping=early_stopping,
+            )
             done = True
             break
         except TimeoutError as error:
@@ -848,13 +1086,22 @@ def run_streaming_training(
         for site in active:
             x_all = captured[site.slug]
             if x_all.shape[0] != tokens_per_fwd:
-                raise RuntimeError(f"{site.slug}: captured {x_all.shape[0]} activations, expected {tokens_per_fwd}")
+                raise RuntimeError(
+                    f"{site.slug}: captured {x_all.shape[0]} activations, expected {tokens_per_fwd}"
+                )
             # Rows of one forward pass come in sequence order; shuffle them
             # locally so no SAE batch is a contiguous run of positions.
             x_all = x_all[torch.randperm(x_all.shape[0], device=x_all.device)]
             for x in x_all.split(batch_size):
-                if stream_cfg.token_cap is not None and site.tokens_seen() >= stream_cfg.token_cap:
-                    _finish([site], f"reached the {stream_cfg.token_cap}-token cap", early_stopping=early_stopping)
+                if (
+                    stream_cfg.token_cap is not None
+                    and site.tokens_seen() >= stream_cfg.token_cap
+                ):
+                    _finish(
+                        [site],
+                        f"reached the {stream_cfg.token_cap}-token cap",
+                        early_stopping=early_stopping,
+                    )
                     checkpointed = True
                     break
                 site.step += 1
@@ -863,7 +1110,10 @@ def run_streaming_training(
                 if entry is not None:
                     site.log_f.write(json.dumps(asdict(entry)) + "\n")
 
-                eval_interval = site.cfg.eval_interval_steps or early_stopping.evaluation_interval_steps
+                eval_interval = (
+                    site.cfg.eval_interval_steps
+                    or early_stopping.evaluation_interval_steps
+                )
                 stop = None
                 if site.validation_readers and step % eval_interval == 0:
                     stop = evaluate_and_update(site, step, device, early_stopping)
@@ -876,13 +1126,25 @@ def run_streaming_training(
                     site.tokens_seen() >= milestones[site.next_milestone_index]
                 ):
                     milestone = milestones[site.next_milestone_index]
-                    write_export(site, site.out_dir / f"sae_export_step_{step:07d}_milestone_{milestone}.safetensors")
+                    write_export(
+                        site,
+                        site.out_dir
+                        / f"sae_export_step_{step:07d}_milestone_{milestone}.safetensors",
+                    )
                     site.next_milestone_index += 1
-                if stop is None and stream_cfg.token_cap is not None and site.tokens_seen() >= stream_cfg.token_cap:
+                if (
+                    stop is None
+                    and stream_cfg.token_cap is not None
+                    and site.tokens_seen() >= stream_cfg.token_cap
+                ):
                     stop = Stop(f"reached the {stream_cfg.token_cap}-token cap")
                 if stop is not None:
-                    _finish([site], f"{site.slug} {stop.reason} at step {step}", final_export=not stop.diverged,
-                            early_stopping=early_stopping)
+                    _finish(
+                        [site],
+                        f"{site.slug} {stop.reason} at step {step}",
+                        final_export=not stop.diverged,
+                        early_stopping=early_stopping,
+                    )
                     checkpointed = True
                     break
         if checkpointed:

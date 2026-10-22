@@ -250,4 +250,3 @@ def test_interrupted_multi_site_snapshot_keeps_previous_pairs_and_resumes_exactl
         for key, weights in reference[slug].sae.state_dict().items():
             torch.testing.assert_close(resumed[slug].sae.state_dict()[key], weights, rtol=0, atol=0)
         assert logged_steps(resumed[slug]) == list(range(1, 9))
-

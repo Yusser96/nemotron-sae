@@ -190,4 +190,3 @@ def test_cached_training_rejects_unimplemented_objective_stop_before_io(tmp_path
                   arch="jumprelu", d_sae=D_SAE, l0_target=L0_TARGET, out_dir=tmp_path / "out",
                   early_stopping=EarlyStoppingCfg(enabled=True, mode="objective", patience=4))
     assert not (tmp_path / "out").exists()
-
