@@ -814,6 +814,8 @@ def train_sae(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     early_stopping = early_stopping or EarlyStoppingCfg()
+    if early_stopping.score != "reconstruction":
+        raise ValueError("Full-training-loss stopping is supported by the streaming trainer; use train_sae_streaming")
     validation_cache_dirs = validation_cache_dirs or {}
     validation_readers, validation_cache_signature, train_probe_reader, probe_tokens = (
         _prepare_validation_probes(

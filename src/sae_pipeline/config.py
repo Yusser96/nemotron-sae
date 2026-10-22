@@ -361,8 +361,8 @@ class EarlyStoppingCfg(BaseModel):
 
     ``mode="stability"`` stops once validation FVU/L0 stop moving between
     consecutive evaluations. ``mode="objective"`` is for long open-ended runs:
-    it tracks the reconstruction loss on held-out data (without the L0,
-    Inverse-Simpson or AuxK penalties), reduces the
+    it tracks the selected held-out score (reconstruction by default, or the
+    complete training objective for streaming runs), reduces the
     learning rate when that plateaus, and stops after sustained
     non-improvement.
     """
@@ -375,6 +375,7 @@ class EarlyStoppingCfg(BaseModel):
     ev_absolute_tolerance: float = 0.005
     l0_relative_tolerance: float = 0.10
     mode: EarlyStoppingMode = "stability"
+    score: Literal["reconstruction", "full_training_loss"] = "reconstruction"
     # ``objective`` mode only: an evaluation improves on the best so far when
     # it is lower by more than this relative margin; every
     # ``lr_plateau_patience`` non-improving evaluations scale the learning

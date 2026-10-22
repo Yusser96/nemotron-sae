@@ -46,7 +46,6 @@ from sae_pipeline.sae.normalization import load_whole_vector_normalization, norm
 from sae_pipeline.sae.objective import (
     LossCoefficients,
     coefficients_at,
-    inverse_simpson_warmup_steps,
     optimizer_step,
     training_loss,
 )
@@ -102,6 +101,7 @@ class StreamingSite:
     baseline: dict[str, dict[str, float]] | None = None
     resume_weights_name: str | None = None
     selection_state: dict = field(default_factory=dict)
+    stopping_state: dict = field(default_factory=dict)
 
     @property
     def log_path(self) -> Path:
@@ -273,6 +273,7 @@ def init_streaming_site(
         feature_resets=feature_resets,
         last_reset_step=last_reset_step,
         selection_state={} if resume_checkpoint is None else state.get("selection_state", {}),
+        stopping_state={} if resume_checkpoint is None else state.get("stopping_state", {}),
         resume_weights_name=None if resume_checkpoint is None else resume_checkpoint.weights_path.name,
     )
 
@@ -340,8 +341,7 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     )
 
 
-# Held-out scoring uses the reconstruction term alone, so it compares across
-# penalty warmup and across runs that weight the penalties differently.
+# Reconstruction remains independent of the optional full-training-loss stop score.
 _NO_PENALTIES = LossCoefficients(lr=0.0, lambda_l0=0.0, lambda_is=0.0)
 
 
@@ -349,6 +349,15 @@ _NO_PENALTIES = LossCoefficients(lr=0.0, lambda_l0=0.0, lambda_is=0.0)
 class SiteEvaluation:
     metrics: dict[str, ReconMetrics]
     objective: dict[str, float]
+    training_objective: dict[str, float] = field(default_factory=dict)
+    loss_components: dict[str, dict[str, float]] = field(default_factory=dict)
+    coefficients: dict[str, float] = field(default_factory=dict)
+
+    def stopping_score(self, score: str) -> float:
+        values = self.training_objective if score == "full_training_loss" else self.objective
+        if not values:
+            raise ValueError(f"No validation values for stopping score {score}")
+        return sum(values.values()) / len(values)
 
     @property
     def mixed_objective(self) -> float:
@@ -356,42 +365,55 @@ class SiteEvaluation:
 
 
 def evaluate_site(site: StreamingSite, device: str) -> SiteEvaluation:
-    """Reconstruction metrics and the held-out reconstruction loss, per language.
+    """Score fixed probes without mutating training statistics, RNG or model mode."""
+    metrics, objective, full_objective, components = {}, {}, {}, {}
+    coefficients = coefficients_at(site.cfg, site.step)
+    target = _scheduled_l0_target(site.step, site.l0_target, site.cfg) + reset_l0_allowance(
+        site.cfg, site.step, site.last_reset_step
+    )
+    rng = capture_random_state()
+    modes = [(module, module.training) for module in site.sae.modules()]
+    try:
+        for language, reader in site.validation_readers.items():
+            totals = dict(reconstruction=0.0, sparsity_raw=0.0, sparsity_weighted=0.0,
+                          is_weighted=0.0, auxk_weighted=0.0, total=0.0)
+            n_rows = 0
+            usage = site.inverse_simpson_usage.detach().clone()
+            dead = site.tokens_since_fired.detach().clone()
 
-    One pass over each validation set: every batch is scored with the
-    training loss's reconstruction term on its way to the metrics. The L0,
-    Inverse-Simpson and AuxK penalties steer training but do not decide when
-    it stops.
-    """
+            def scored(batches: Iterable[torch.Tensor]) -> Iterator[torch.Tensor]:
+                nonlocal n_rows
+                for x in batches:
+                    with torch.no_grad():
+                        terms = training_loss(site.sae, x, site.cfg, coefficients,
+                                              target_l0=target, usage=usage, tokens_since_fired=dead)
+                    values = dict(reconstruction=terms.reconstruction, sparsity_raw=terms.l0_penalty,
+                                  sparsity_weighted=coefficients.lambda_l0 * site.cfg.l0_penalty_scale * terms.l0_penalty,
+                                  is_weighted=terms.inverse_simpson_penalty,
+                                  auxk_weighted=terms.auxk_penalty, total=terms.total)
+                    for key, value in values.items():
+                        number = float(value)
+                        if not math.isfinite(number):
+                            raise FloatingPointError(f"{site.slug}: nonfinite validation {language}/{key}")
+                        totals[key] += number * x.shape[0]
+                    n_rows += x.shape[0]
+                    yield x
 
-    metrics: dict[str, ReconMetrics] = {}
-    objective: dict[str, float] = {}
-    for language, reader in site.validation_readers.items():
-        weighted_total, n_rows = 0.0, 0
-
-        def scored(batches: Iterable[torch.Tensor]) -> Iterator[torch.Tensor]:
-            nonlocal weighted_total, n_rows
-            for x in batches:
-                with torch.no_grad():
-                    terms = training_loss(site.sae, x, site.cfg, _NO_PENALTIES, target_l0=float(site.l0_target))
-                weighted_total += float(terms.reconstruction) * x.shape[0]
-                n_rows += x.shape[0]
-                yield x
-
-        batches = _validation_batches(
-            reader,
-            n_tokens=site.probe_tokens,
-            batch_size=site.cfg.batch_size,
-            input_scale=site.normalization_scale,
-            input_center=None,
-            device=device,
-        )
-        result = streaming_reconstruction_metrics(site.sae, scored(batches), dead_threshold_tokens=site.probe_tokens)
-        assert isinstance(result, ReconMetrics)
-        metrics[language] = result
-        objective[language] = weighted_total / n_rows
-    site.sae.train()
-    return SiteEvaluation(metrics=metrics, objective=objective)
+            batches = _validation_batches(reader, n_tokens=site.probe_tokens, batch_size=site.cfg.batch_size,
+                                          input_scale=site.normalization_scale, input_center=None, device=device)
+            result = streaming_reconstruction_metrics(site.sae, scored(batches), dead_threshold_tokens=site.probe_tokens)
+            if n_rows != site.probe_tokens:
+                raise ValueError("Validation did not consume the fixed probe exactly")
+            metrics[language] = result
+            components[language] = {key: value / n_rows for key, value in totals.items()}
+            objective[language] = components[language]['reconstruction']
+            full_objective[language] = components[language]['total']
+    finally:
+        for module, mode in modes:
+            module.training = mode
+        restore_random_state(rng)
+    return SiteEvaluation(metrics=metrics, objective=objective, training_objective=full_objective,
+                          loss_components=components, coefficients={**asdict(coefficients), 'target_l0': target})
 
 
 def record_baseline(site: StreamingSite, device: str) -> None:
@@ -429,6 +451,9 @@ def _write_diagnostic(site: StreamingSite, evaluation: SiteEvaluation, phase: st
     payload = {
         "phase": phase, "step": site.step, "tokens": site.tokens_seen(),
         "validation_objective_mixed": evaluation.mixed_objective,
+        "validation_training_objective": evaluation.training_objective,
+        "loss_components": evaluation.loss_components,
+        "loss_coefficients": evaluation.coefficients,
         "metrics": {language: {**asdict(metrics), "validation_objective": evaluation.objective[language]}
                     for language, metrics in evaluation.metrics.items()},
         **extra,
@@ -458,6 +483,7 @@ def write_checkpoint(site: StreamingSite, step: int, *, snapshot_id: str | None 
         trainer_state={
             "version": 1,
             "selection_state": site.selection_state,
+            "stopping_state": site.stopping_state,
             "global_step": step,
             "optimizer": site.optim.state_dict(),
             "random_state": capture_random_state(),
@@ -513,7 +539,7 @@ class Stop:
 
 
 def finite_evaluation_error(evaluation):
-    values = list(evaluation.objective.values())
+    values = list(evaluation.objective.values()) + list(evaluation.training_objective.values())
     values.append(evaluation.mixed_objective)
     for metrics in evaluation.metrics.values():
         values.extend(value for value in vars(metrics).values()
@@ -566,7 +592,9 @@ def evaluate_and_update(
     """
 
     evaluation = evaluate_site(site, device)
-    objective = evaluation.mixed_objective
+    from sae_pipeline.sae.validation_stopping import configure_stopping, eligibility_step, observe_full_best
+    configure_stopping(site, early_stopping)
+    objective = evaluation.stopping_score(early_stopping.score)
     divergence = _divergence(site, evaluation, step, early_stopping)
     warnings = threshold_warnings(site, evaluation, step)
     if warnings:
@@ -574,15 +602,14 @@ def evaluate_and_update(
     if site.cfg.track_reconstruction_selection and divergence is None:
         from sae_pipeline.sae.selection import observe_selection
         observe_selection(site, evaluation, early_stopping)
-    selection_minimum = max(
-        site.cfg.warmup_steps, site.cfg.l0_warmup_steps,
-        site.cfg.l0_target_warmup_steps,
-        inverse_simpson_warmup_steps(site.cfg)
-        if site.cfg.inverse_simpson_floor > 0 and site.cfg.inverse_simpson_max_scale > 0 else 0,
-        early_stopping.minimum_steps if early_stopping.enabled else 0,
-    )
+    selection_minimum = eligibility_step(site.cfg, early_stopping)
     selection_eligible = step >= selection_minimum
     if divergence is None and selection_eligible:
+        if early_stopping.score == "full_training_loss" and not site.stopping_state.get('baseline_initialized'):
+            site.early_stop.best, site.early_stop.checks_since_improve = None, 0
+            site.stopping_state['baseline_initialized'] = True
+        if early_stopping.score == "full_training_loss":
+            observe_full_best(site, evaluation)
         is_best, lr_reduced, should_stop = site.early_stop.update(
             objective, early_stopping, eligible=early_stopping.enabled and step >= early_stopping.minimum_steps
         )
@@ -595,7 +622,12 @@ def evaluate_and_update(
             "tokens": site.tokens_seen(),
             "language": language,
             "validation_objective": evaluation.objective[language],
-            "validation_objective_mixed": objective,
+            "validation_objective_mixed": evaluation.mixed_objective,
+            "validation_training_objective": evaluation.training_objective.get(language),
+            "validation_stopping_score": objective,
+            "stopping_score_kind": early_stopping.score,
+            "loss_components": evaluation.loss_components.get(language, {}),
+            "loss_coefficients": evaluation.coefficients,
             "is_best": is_best,
             "selection_eligible": selection_eligible,
             "selection_minimum_steps": selection_minimum,
@@ -767,11 +799,15 @@ def run_streaming_training(
         for slug, site in sites.items():
             prune_checkpoints(site.out_dir, keep_last=site.cfg.keep_last_checkpoints,
                               protected_weights=checkpoints[slug])
+            from sae_pipeline.sae.validation_stopping import prune_full_best
+            prune_full_best(site)
             if site.cfg.track_reconstruction_selection:
                 from sae_pipeline.sae.selection import prune_selection
                 prune_selection(site)
 
+    from sae_pipeline.sae.validation_stopping import configure_stopping
     for site in sites.values():
+        configure_stopping(site, early_stopping)
         if not early_stopping.enabled:
             site.early_stop.lr_scale = 1.0
         if site.validation_readers:
