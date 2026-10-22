@@ -426,9 +426,17 @@ def record_baseline(site: StreamingSite, device: str) -> None:
     path = site.out_dir / "baseline_metrics.json"
     if path.exists():
         site.baseline = json.loads(path.read_text())
-        if site.step == 0 and site.cfg.track_reconstruction_selection and not site.selection_state:
-            from sae_pipeline.sae.selection import observe_selection
-            observe_selection(site, evaluate_site(site, device), EarlyStoppingCfg(mode="objective", patience=10))
+        reconstruction_missing=site.cfg.track_reconstruction_selection and not site.selection_state
+        full_missing=(site.stopping_state.get('policy',{}).get('score')=='full_training_loss'
+                      and not site.stopping_state.get('best_full_objective'))
+        if site.step == 0 and (reconstruction_missing or full_missing):
+            evaluation=evaluate_site(site, device)
+            if reconstruction_missing:
+                from sae_pipeline.sae.selection import observe_selection
+                observe_selection(site, evaluation, EarlyStoppingCfg(mode="objective", patience=10))
+            if full_missing:
+                from sae_pipeline.sae.validation_stopping import observe_full_best
+                observe_full_best(site,evaluation)
         return
     if site.step > 0:
         log.warning("%s: no baseline from the start of this run; deltas are not reported", site.slug)
@@ -440,6 +448,9 @@ def record_baseline(site: StreamingSite, device: str) -> None:
     }
     path.write_text(json.dumps(site.baseline))
     _write_diagnostic(site, evaluation, "initial")
+    if site.stopping_state.get('policy',{}).get('score')=='full_training_loss':
+        from sae_pipeline.sae.validation_stopping import observe_full_best
+        observe_full_best(site,evaluation)
     if site.cfg.track_reconstruction_selection:
         from sae_pipeline.sae.selection import observe_selection
         observe_selection(site, evaluation, EarlyStoppingCfg(mode="objective", patience=10))
@@ -565,7 +576,7 @@ def threshold_warnings(site, evaluation, step):
 
 def _divergence(site: StreamingSite, evaluation: SiteEvaluation, step: int, cfg: EarlyStoppingCfg) -> str | None:
     """How this evaluation shows ``site`` diverging, if it does (see ``EarlyStoppingCfg``)."""
-    objective = evaluation.mixed_objective
+    objective = evaluation.stopping_score(cfg.score)
     error = finite_evaluation_error(evaluation)
     if error is not None:
         return error
@@ -604,12 +615,13 @@ def evaluate_and_update(
         observe_selection(site, evaluation, early_stopping)
     selection_minimum = eligibility_step(site.cfg, early_stopping)
     selection_eligible = step >= selection_minimum
+    # Best exports are independent of the protected stopping baseline/patience.
+    if divergence is None and early_stopping.score == "full_training_loss":
+        observe_full_best(site, evaluation)
     if divergence is None and selection_eligible:
         if early_stopping.score == "full_training_loss" and not site.stopping_state.get('baseline_initialized'):
             site.early_stop.best, site.early_stop.checks_since_improve = None, 0
             site.stopping_state['baseline_initialized'] = True
-        if early_stopping.score == "full_training_loss":
-            observe_full_best(site, evaluation)
         is_best, lr_reduced, should_stop = site.early_stop.update(
             objective, early_stopping, eligible=early_stopping.enabled and step >= early_stopping.minimum_steps
         )

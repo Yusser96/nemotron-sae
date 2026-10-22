@@ -11,7 +11,7 @@ h = SimpleNamespace(**runpy.run_path(str(Path(__file__).with_name("test_train_st
 from sae_pipeline.config import EarlyStoppingCfg
 from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.objective import coefficients_at, training_loss
-from sae_pipeline.sae.train_streaming import evaluate_site, evaluate_and_update, write_checkpoint
+from sae_pipeline.sae.train_streaming import evaluate_site, evaluate_and_update, write_checkpoint, record_baseline
 from sae_pipeline.sae.validation_stopping import configure_stopping, eligibility_step
 
 
@@ -97,4 +97,30 @@ def test_reconstruction_score_migrates_once_without_resetting_progress(tmp_path)
     configure_stopping(site,rule)
     assert site.early_stop.best==3 and site.early_stop.checks_since_improve==2
     for k,v in before.items():assert torch.equal(v,site.sae.state_dict()[k])
+    site.close()
+
+
+def test_best_full_objective_is_saved_during_warmup_independently_of_reconstruction(tmp_path,monkeypatch):
+    cfg=h._sae_cfg(h._warm_start(tmp_path/'warm.safetensors'),track_reconstruction_selection=True)
+    site=h._site(tmp_path,cfg,h._validation_dirs(tmp_path))
+    evaluation=evaluate_site(site,'cpu')
+    evaluation.objective={'en':3.0,'de':3.0}
+    evaluation.training_objective={'en':6.0,'de':6.0}
+    monkeypatch.setattr('sae_pipeline.sae.train_streaming.evaluate_site',lambda *args:evaluation)
+    rule=EarlyStoppingCfg(enabled=True,mode='objective',score='full_training_loss',minimum_steps=50_000,patience=10,
+                          min_lr_scale=1,divergence_l0_factor=None,divergence_objective_factor=None)
+    configure_stopping(site,rule)
+    record_baseline(site,'cpu')
+    assert site.stopping_state['best_full_objective']['step']==0
+    site.step=1;evaluation.objective={'en':2.0,'de':2.0};evaluation.training_objective={'en':10.0,'de':10.0}
+    assert evaluate_and_update(site,1,'cpu',rule) is None
+    assert site.selection_state['best']['step']==1
+    assert site.stopping_state['best_full_objective']['step']==0
+    site.step=2;evaluation.objective={'en':4.0,'de':4.0};evaluation.training_objective={'en':5.0,'de':5.0}
+    assert evaluate_and_update(site,2,'cpu',rule) is None
+    assert site.selection_state['best']['step']==1
+    assert site.stopping_state['best_full_objective']['step']==2
+    assert site.early_stop.best is None and site.early_stop.checks_since_improve==0
+    assert (site.out_dir/site.stopping_state['best_full_objective']['export']).is_file()
+    assert (site.out_dir/site.selection_state['best']['export']).is_file()
     site.close()
