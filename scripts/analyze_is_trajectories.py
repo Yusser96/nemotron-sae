@@ -17,7 +17,16 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy import stats
+
+
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    order = np.argsort(values, kind="stable")
+    ordered = values[order]
+    starts = np.r_[0, np.flatnonzero(ordered[1:] != ordered[:-1]) + 1]
+    ends = np.r_[starts[1:], len(values)]
+    ranks = np.empty(len(values), dtype=np.float64)
+    ranks[order] = np.repeat((starts + ends - 1) / 2, ends - starts)
+    return ranks
 
 
 def compute_spearman(x: np.ndarray, y: np.ndarray) -> float:
@@ -27,8 +36,9 @@ def compute_spearman(x: np.ndarray, y: np.ndarray) -> float:
     # If all values are constant or zero, correlation is undefined / 0
     if np.all(x == x[0]) or np.all(y == y[0]):
         return 0.0
-    res = stats.spearmanr(x, y)
-    val = res.statistic if hasattr(res, "statistic") else res[0]
+    if np.isnan(x).any() or np.isnan(y).any():
+        return 0.0
+    val = np.corrcoef(_average_ranks(x), _average_ranks(y))[0, 1]
     return float(val) if np.isfinite(val) else 0.0
 
 
@@ -58,8 +68,7 @@ def inactivity_is_correlations(metrics_by_step: dict[int, dict[str, dict]]) -> d
             and not np.all(inactive == inactive[0])
             and not np.all(d_is == d_is[0])
         ):
-            result = stats.spearmanr(inactive, d_is)
-            value = result.statistic if hasattr(result, "statistic") else result[0]
+            value = compute_spearman(inactive, d_is)
             rho = float(value) if np.isfinite(value) else None
         correlations[split] = {"n_checkpoints": int(inactive.size), "rho": rho}
     return correlations

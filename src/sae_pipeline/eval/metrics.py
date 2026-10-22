@@ -12,13 +12,14 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 
-from sae_pipeline.sae.base import SparseAutoencoder
 from sae_pipeline.sae.jumprelu import inverse_simpson_from_mass
+from sae_pipeline.sae.jumprelu import JumpReLUSAE
 
 
 @dataclass
@@ -116,27 +117,6 @@ def firing_concentration(frequency: torch.Tensor) -> FiringConcentration:
     )
 
 
-@torch.no_grad()
-def reconstruction_metrics(
-    sae: SparseAutoencoder,
-    activations: torch.Tensor,
-    dead_threshold_tokens: int = 50_000,
-    return_arrays: bool = False,
-) -> ReconMetrics | tuple[ReconMetrics, ReconArrays]:
-    """Compute L0, FVU, and dead-% on a tensor of activations (n_tokens, d_in).
-
-    With `return_arrays=True`, additionally return per-latent firing frequency,
-    per-token L0, and per-token reconstruction error — all consumed by the
-    plotting module to draw histograms.
-    """
-    return streaming_reconstruction_metrics(
-        sae,
-        (activations,),
-        dead_threshold_tokens=dead_threshold_tokens,
-        return_arrays=return_arrays,
-    )
-
-
 def _gini(values: torch.Tensor) -> float:
     values = values.detach().to(torch.float64).flatten().clamp_min(0)
     if values.numel() == 0 or float(values.sum()) <= 0:
@@ -150,7 +130,7 @@ def _gini(values: torch.Tensor) -> float:
 
 @torch.no_grad()
 def streaming_reconstruction_metrics(
-    sae: SparseAutoencoder,
+    sae: JumpReLUSAE,
     activation_batches,
     *,
     dead_threshold_tokens: int = 50_000,
@@ -274,6 +254,11 @@ def streaming_reconstruction_metrics(
     # sums over the same token set, so n_total cancels -- do not renormalise
     # the numerator and denominator by different divisors here).
     fvu = err_sum / max(float(variance_sum.item()), 1.0e-12)
+    l0_all = torch.cat(l0_parts)
+    l0_p10, l0_p50, l0_p90, l0_p99 = [
+        float(v.item())
+        for v in torch.quantile(l0_all.float(), torch.tensor([0.10, 0.50, 0.90, 0.99]))
+    ]
     metrics = ReconMetrics(
         l0=l0_sum / n_float,
         fvu=fvu,
@@ -299,23 +284,18 @@ def streaming_reconstruction_metrics(
         q99=q99,
         support_n_tokens=support_seen,
         explained_variance=1.0 - max(0.0, err_sum - float(residual_sum.square().sum()) / n_float) / max(float(variance_sum), 1e-12),
-        l0_p10=float(torch.quantile(torch.cat(l0_parts).float(), 0.10)),
-        l0_p50=float(torch.quantile(torch.cat(l0_parts).float(), 0.50)),
-        l0_p90=float(torch.quantile(torch.cat(l0_parts).float(), 0.90)),
-        l0_p99=float(torch.quantile(torch.cat(l0_parts).float(), 0.99)),
+        l0_p10=l0_p10,
+        l0_p50=l0_p50,
+        l0_p90=l0_p90,
+        l0_p99=l0_p99,
         rare_nonzero_lt_1e5=int(((firing_frequency > 0) & (firing_frequency < 1e-5)).sum()),
         rare_nonzero_lt_1e4=int(((firing_frequency > 0) & (firing_frequency < 1e-4)).sum()),
     )
     if not return_arrays:
         return metrics
-    try:
-        arr_firing = firing_frequency.detach().cpu().float().numpy()
-        arr_l0 = torch.cat(l0_parts).numpy() if l0_parts else np.zeros((0,), dtype=np.int32)
-        arr_err = torch.cat(err_parts).numpy() if err_parts else np.zeros((0,), dtype=np.float32)
-    except RuntimeError:
-        arr_firing = np.array(firing_frequency.detach().cpu().float().tolist(), dtype=np.float32)
-        arr_l0 = np.array(torch.cat(l0_parts).tolist(), dtype=np.int32) if l0_parts else np.zeros((0,), dtype=np.int32)
-        arr_err = np.array(torch.cat(err_parts).tolist(), dtype=np.float32) if err_parts else np.zeros((0,), dtype=np.float32)
+    arr_firing = firing_frequency.detach().cpu().float().numpy()
+    arr_l0 = l0_all.numpy()
+    arr_err = torch.cat(err_parts).numpy() if err_parts else np.zeros((0,), dtype=np.float32)
     arrays = ReconArrays(
         firing_frequency=arr_firing,
         l0_per_token=arr_l0,
@@ -325,33 +305,19 @@ def streaming_reconstruction_metrics(
 
 
 @torch.no_grad()
-def delta_ce(
-    model,
-    tokenizer,
-    sae: SparseAutoencoder,
-    sequences: torch.Tensor,           # (B, T) token ids
-    hook_register,                     # callable: (model, sae) -> contextmanager
-) -> dict[str, float]:
-    """Run the model with and without the SAE patched in; return CE delta.
-
-    `hook_register` should install a forward hook that replaces the activation at
-    the target site with sae.decode(sae.encode(activation)). The exact wiring
-    depends on the component, so it's passed in.
-    """
+def delta_ce(model, sae, sequences: torch.Tensor, hook_register) -> dict[str, float]:
+    """Compare next-token cross entropy with and without a temporary SAE patch."""
+    model_training, sae_training = model.training, sae.training
+    model.eval()
     sae.eval()
     sequences = sequences.to(next(model.parameters()).device)
-
-    # Baseline: clean forward pass
-    out_clean = model(sequences, labels=sequences)
-    ce_clean = float(out_clean.loss)
-
-    # Patched: SAE in the loop
-    with hook_register(model, sae):
-        out_patched = model(sequences, labels=sequences)
-        ce_patched = float(out_patched.loss)
-
-    return {
-        "ce_clean": ce_clean,
-        "ce_patched": ce_patched,
-        "delta_ce": ce_patched - ce_clean,
-    }
+    try:
+        ce_clean = float(model(sequences, labels=sequences).loss)
+        with hook_register(model, sae):
+            ce_patched = float(model(sequences, labels=sequences).loss)
+        if not math.isfinite(ce_clean) or not math.isfinite(ce_patched):
+            raise FloatingPointError("Nonfinite behavioural fidelity loss")
+        return {"ce_clean": ce_clean, "ce_patched": ce_patched, "delta_ce": ce_patched - ce_clean}
+    finally:
+        model.train(model_training)
+        sae.train(sae_training)

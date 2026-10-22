@@ -5,7 +5,7 @@
 #   1. Verifies CUDA (nvidia-smi + nvcc)
 #   2. Clones / updates Yusser96/nemotron-sae
 #   3. Materializes env.sh from inherited HF_TOKEN [+ OPENAI_API_KEY]
-#   4. Sets up .venv (full requirements.txt → installs mamba_ssm + causal-conv1d;
+#   4. Sets up .venv (pyproject dependencies plus source-built mamba_ssm + causal-conv1d;
 #      can take 10–30 min the first time as those packages compile CUDA kernels)
 #   5. Runs sanity_check.sh — proves the install works end-to-end
 #   6. Dumps model_topology.json — confirms our regex classifier matches the real

@@ -20,7 +20,7 @@ from sae_pipeline.cache.manifest import (
     validation_manifest_path_for,
 )
 from sae_pipeline.config import PipelineCfg
-from sae_pipeline.cli._site import add_site_arguments, cli_site
+from sae_pipeline.cli._site import add_site_arguments, cli_site, sae_variant, variant_stem
 from sae_pipeline.hooks.components import ComponentSpec
 from sae_pipeline.sae.train import train_sae
 
@@ -94,9 +94,7 @@ def main() -> None:
 
     cfg = PipelineCfg.from_yaml(args.config)
     spec, _site = cli_site(cfg, args, p)
-    arch = args.arch or (cfg.sae.arch if isinstance(cfg.sae.arch, str) else cfg.sae.arch[0])
-    width = args.width or (cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0])
-    l0_target = args.l0 or (cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0])
+    arch, width, l0_target = sae_variant(cfg, args)
 
     cache_dir = Path(cfg.cache.cache_dir) / cfg.run_id / spec.slug
     manifest_path = manifest_path_for(cfg.cache.cache_dir, cfg.run_id, spec.slug)
@@ -180,58 +178,41 @@ def main() -> None:
         )
 
     out_dir = (
-        Path(cfg.sae.ckpt_dir) / (args.output_id or cfg.run_id) / spec.slug / f"{arch}_w{width}_l0_{l0_target}"
+        Path(cfg.sae.ckpt_dir) / (args.output_id or cfg.run_id) / spec.slug / variant_stem(arch, width, l0_target)
     )
     sae_cfg = cfg.sae
     checkpoint_updates = {}
     if cfg.sae.checkpoint_filename_template is not None:
         checkpoint_updates["checkpoint_filename"] = cfg.sae.checkpoint_filename_template.format(slug=spec.slug)
-    if args.checkpoint_filename is not None:
-        checkpoint_updates["checkpoint_filename"] = args.checkpoint_filename
-    if args.checkpoint_source is not None:
-        checkpoint_updates["checkpoint_source"] = args.checkpoint_source
-    if args.reconstruction_loss is not None:
-        checkpoint_updates["reconstruction_loss"] = args.reconstruction_loss
-    if args.l0_penalty_scale is not None:
-        checkpoint_updates["l0_penalty_scale"] = args.l0_penalty_scale
-    if args.feature_use_strategy is not None:
-        checkpoint_updates["feature_use_strategy"] = args.feature_use_strategy
-    if args.residual_reset_start_step is not None:
-        checkpoint_updates["residual_reset_start_step"] = args.residual_reset_start_step
-    if args.residual_reset_every_steps is not None:
-        checkpoint_updates["residual_reset_every_steps"] = args.residual_reset_every_steps
-    if args.residual_reset_max_features is not None:
-        checkpoint_updates["residual_reset_max_features"] = args.residual_reset_max_features
-    if args.residual_reset_delta_l0 is not None:
-        checkpoint_updates["residual_reset_delta_l0"] = args.residual_reset_delta_l0
-    if args.residual_reset_calibration_tokens is not None:
-        checkpoint_updates["residual_reset_calibration_tokens"] = args.residual_reset_calibration_tokens
-    if args.residual_reset_anneal_steps is not None:
-        checkpoint_updates["residual_reset_anneal_steps"] = args.residual_reset_anneal_steps
-    if args.feature_frequency_penalty_multiplier is not None:
-        checkpoint_updates["feature_frequency_penalty_multiplier"] = args.feature_frequency_penalty_multiplier
-    if args.seed is not None:
-        checkpoint_updates["seed"] = args.seed
-    if args.steps is not None:
-        checkpoint_updates["n_steps"] = args.steps
-    if args.l0 is not None:
-        checkpoint_updates["l0_target"] = args.l0
-    if args.l0_start is not None:
-        checkpoint_updates["l0_target_start"] = args.l0_start
-    if args.l0_warmup_steps is not None:
-        checkpoint_updates["l0_target_warmup_steps"] = args.l0_warmup_steps
-    if args.decoder_freeze_steps is not None:
-        checkpoint_updates["decoder_freeze_steps"] = args.decoder_freeze_steps
-    if args.activation_centering is not None:
-        checkpoint_updates["activation_centering"] = args.activation_centering
-    if args.active_subspace_rank is not None:
-        checkpoint_updates["active_subspace_rank"] = args.active_subspace_rank
-    if args.inverse_simpson_floor is not None:
-        checkpoint_updates["inverse_simpson_floor"] = args.inverse_simpson_floor
-    if args.inverse_simpson_max_scale is not None:
-        checkpoint_updates["inverse_simpson_max_scale"] = args.inverse_simpson_max_scale
-    if args.inverse_simpson_warmup_steps is not None:
-        checkpoint_updates["inverse_simpson_warmup_steps"] = args.inverse_simpson_warmup_steps
+    override_fields = {
+        "checkpoint_filename": "checkpoint_filename",
+        "checkpoint_source": "checkpoint_source",
+        "reconstruction_loss": "reconstruction_loss",
+        "l0_penalty_scale": "l0_penalty_scale",
+        "feature_use_strategy": "feature_use_strategy",
+        "residual_reset_start_step": "residual_reset_start_step",
+        "residual_reset_every_steps": "residual_reset_every_steps",
+        "residual_reset_max_features": "residual_reset_max_features",
+        "residual_reset_delta_l0": "residual_reset_delta_l0",
+        "residual_reset_calibration_tokens": "residual_reset_calibration_tokens",
+        "residual_reset_anneal_steps": "residual_reset_anneal_steps",
+        "feature_frequency_penalty_multiplier": "feature_frequency_penalty_multiplier",
+        "seed": "seed",
+        "steps": "n_steps",
+        "l0": "l0_target",
+        "l0_start": "l0_target_start",
+        "l0_warmup_steps": "l0_target_warmup_steps",
+        "decoder_freeze_steps": "decoder_freeze_steps",
+        "activation_centering": "activation_centering",
+        "active_subspace_rank": "active_subspace_rank",
+        "inverse_simpson_floor": "inverse_simpson_floor",
+        "inverse_simpson_max_scale": "inverse_simpson_max_scale",
+        "inverse_simpson_warmup_steps": "inverse_simpson_warmup_steps",
+    }
+    for argument, field in override_fields.items():
+        value = getattr(args, argument)
+        if value is not None:
+            checkpoint_updates[field] = value
     if checkpoint_updates:
         sae_cfg = type(cfg.sae).model_validate({**cfg.sae.model_dump(), **checkpoint_updates})
     train_sae(

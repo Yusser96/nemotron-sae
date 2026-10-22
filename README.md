@@ -1,14 +1,7 @@
 # nemotron-sae
 
-Sparse-autoencoder (SAE) and transcoder training pipeline for
-[`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16),
-NVIDIA's 30 B-parameter hybrid **Mamba-2 + GQA-Attention + MoE** language model.
-
-The pipeline is configurable per `(layer, component)` so each can be trained as an
-independent parallel job, supports a **dev** preset (smoke test, 100 documents) and
-a **prod** preset (full sweep), and uses a sharded on-disk activation cache so
-a single 30 B-model forward pass can feed an unbounded number of SAE training
-runs without reloading the LM.
+Train and evaluate JumpReLU sparse autoencoders on model activations. The encoder
+is tied to the decoder at initialization and optimized independently afterward.
 
 This repository owns SAE training and evaluation of feature utilisation,
 reconstruction fidelity and behavioural fidelity. Reusable activation-extraction
@@ -16,346 +9,91 @@ strategies belong to `nemotron-extraction`. Downstream autointerpretation,
 multilingual feature exploration and the Web UI belong to a downstream
 interpretation repository, which consumes the trained and evaluated SAEs.
 
-## What it implements
+## Install
 
-- **JumpReLU SAE**: a quadratic target-`L0` penalty, positive
-  log-parameterised thresholds, a ReLU guard before the gate, and a fused
-  rectangular-kernel STE whose encoder gradient is the hard gate. Decoder
-  columns are unit-normalised after every step, with gradients projected
-  orthogonally to the columns; the encoder is tied to the decoder only at
-  initialisation. Optional whole-vector input normalisation, a configurable
-  LR schedule (cosine-decay or warmup-then-constant), and gradient-norm
-  clipping are available for recipe-aligned fine-tuning.
+Use Python 3.10 or newer. On a CUDA host, `bash scripts/setup_venv.sh` creates the
+project environment and installs the CUDA dependencies. In an existing environment:
 
-- **Hookable components** (per layer, where applicable):
-  `resid_pre`, `resid_post`, `mamba_out`, `attn_out`, `attn_out_prelinear`,
-  `attn_head.<h>`, `moe_out`, `expert.<e>`, `shared_expert.<s>`.
-  Module paths are introspected at load time (`model_topology.json`), since the
-  model uses `trust_remote_code` and the modeling file is the source of truth.
-
-- **Shard cache**: safetensors files of shuffled activations + a JSON manifest.
-  `ShardWriter` flushes when the buffer crosses `shard_size_bytes`; `ShardReader`
-  memory-maps shards and stitches them across batch boundaries.
-  `ActivationBuffer` keeps a rolling `n_batches_in_buffer × batch_size` buffer
-  that refills when half-empty.
-
-- **Eval**: held-out reconstruction metrics — L0, FVU and dead-feature rate —
-  plus distributions for plotting. The library exposes a `delta_ce` helper for
-  downstream patching evaluations; it is not run by the cache-only evaluator.
-
-- **Plots**: training and evaluation plots are auto-generated as PNGs after
-  every train + evaluate run; see "Plots" below.
-
-- **Job launcher**: materializes the cartesian product of
-  `layers × components × archs × widths × L0 targets` into shell commands and
-  runs them in parallel via a `ProcessPoolExecutor`, pinning each job to one GPU
-  via `CUDA_VISIBLE_DEVICES`. `--executor dry` just prints the commands.
-
-## Running on a GPU host (one-shot deploy)
-
-```bash
-# On the GPU box (CUDA toolkit + nvcc + git + Python ≥ 3.10 required)
-export HF_TOKEN="hf_..."             # required
-export OPENAI_API_KEY="sk-..."       # optional, for auto-interp
-export GH_TOKEN="ghp_..."            # only if you haven't run `gh auth login`
-
-# cd to wherever you want the project to live, then run:
-cd /netscratch/you/sae_work          # example — pick any writable directory
-curl -fsSL https://raw.githubusercontent.com/Yusser96/nemotron-sae/main/scripts/deploy_gpu.sh | bash
-# or, if already cloned:
-#   bash scripts/deploy_gpu.sh
+```sh
+python -m pip install -e '.[gpu,dev]'
 ```
 
-`WORK_DIR` defaults to `$(pwd)` — exactly the directory you ran the script
-from. Override with `WORK_DIR=/foo/bar` if you want a specific location.
+CPU development uses `python -m pip install -e '.[dev]'`. Hybrid model inference
+also needs the model's compatible Mamba and causal convolution builds; see the
+setup script. Credentials are read from the environment, never from configuration
+values. Set `model.token_env_var` to the name of the environment variable to use.
 
-That script:
+## Train from cached activations
 
-1. Verifies CUDA (`nvidia-smi`, `nvcc`)
-2. Clones / fast-forwards the repo to `~/nemotron-sae` (override with `WORK_DIR=...`)
-3. Materializes `env.sh` from your inherited tokens
-4. Runs `setup_venv.sh` — installs the PyPI `virtualenv` package (so the venv works on minimal containers without `pythonX.Y-venv`), creates `.venv`, then installs `mamba_ssm` + `causal-conv1d` and friends (first-run takes 10–30 min while CUDA kernels compile)
-5. Runs `sanity_check.sh` — confirms torch sees CUDA, `mamba_ssm` imports, `transformers` can read the model config
-6. Dumps `model_topology.json` — catches `trust_remote_code` module-naming drift before any forward pass
-7. Runs `dev_smoke_test.sh` — caches 100 docs at `(layer 25, resid_post)`, trains a `d_sae=4096` JumpReLU SAE for 1 000 steps, evaluates it, generates plots
-8. Packs `outputs/` into `smoke_artifacts_<ts>.tar.gz` so you can rsync results back
-
-Set `SKIP_SETUP=1` to reuse an already-built venv on a re-run; `SKIP_TOPOLOGY=1` to skip the model load in step 6.
-
-## Quick start
-
-```bash
-# 1. Set up the venv (auto-detects macOS vs Linux/CUDA)
-bash scripts/setup_venv.sh
-source .venv/bin/activate
-source env.sh    # HF_TOKEN, OPENAI_API_KEY (gitignored)
-
-# 2. Run the unit-test suite (works on CPU / macOS — covers the full pipeline
-#    end-to-end on synthetic activations; no LM needed)
-pytest tests/ -v
-
-# 3. On a CUDA host: run the dev smoke test (cache → train → eval, ~30 min)
-bash scripts/dev_smoke_test.sh
+```sh
+python -m sae_pipeline.cli.cache_activations --config configs/dev.yaml --layer 25 --component resid_post
+python -m sae_pipeline.cli.train_sae --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30
 ```
 
-The dev smoke test caches activations from
-[`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
-(`sample-10BT` subset, ODC-BY, fully open) at layer 25 component `resid_post`,
-trains a tiny `d_sae=4096` JumpReLU SAE for 1 000 steps, and evaluates it.
-Prod uses
-[`nvidia/Nemotron-CC-v2.1`](https://huggingface.co/datasets/nvidia/Nemotron-CC-v2.1)
-(`High-Quality` subset) to match the model's pretraining distribution — that
-dataset is gated behind an NVIDIA agreement, which is why dev uses the open
-FineWeb-Edu analog.
+For exact model paths, configure `target.sites` and select a `--site` slug instead
+of `--layer` and `--component`. `cache_activations --all-targets` captures all
+configured sites in one forward pass. Build per-language probes with
+`--partition validation --language en` (and each additional configured language).
 
-## Per-(layer, component) jobs
+## Train from a stream
 
-The two phases are decoupled CLIs:
+Set `stream.enabled: true`, configure `target.sites`, and prepare complete bilingual
+or monolingual validation caches under `validation_run_id` before training:
 
-```bash
-# Phase A: extract activations to a sharded cache (one-time per layer/component)
-python -m sae_pipeline.cli.cache_activations \
-    --config configs/dev.yaml --layer 25 --component resid_post
-
-# Phase B: train an SAE on a cache (parameterized over arch / width / L0)
-python -m sae_pipeline.cli.train_sae \
-    --config configs/dev.yaml --layer 25 --component resid_post \
-    --arch jumprelu --width 4096 --l0 30
-
-# Eval
-python -m sae_pipeline.cli.evaluate \
-    --config configs/dev.yaml --layer 25 --component resid_post \
-    --arch jumprelu --width 4096 --l0 30
+```sh
+python -m sae_pipeline.cli.train_sae_streaming --config configs/streaming.example.yml
 ```
 
-Components: `resid_pre`, `resid_post`, `mamba_out`, `attn_out`, `attn_out_prelinear`,
-`moe_out`, `expert.<e>`, `shared_expert.<s>`, `attn_head.<h>`.
+`sae.checkpoint_source` with `sae.initialization_mode: checkpoint` warm-starts a
+released dictionary with a fresh optimizer. `initialization_mode: random` uses
+fresh decoder-derived encoder weights. Configure fixed-LR plateau stopping with
+`early_stopping.mode: objective`, `min_lr_scale: 1.0`, and a suitable minimum step
+count and patience. Numerical safeguards remain active independently of plateau
+stopping. Rerun the identical command to resume the committed stream cursor,
+optimizer, random state and selection state after a time-limited pause.
 
-## Fine-tuning and exact resume
+To train from a separate activation producer, pass `--fills DIR --consumer NAME`,
+with a distinct name for each trainer.
 
-Set an optional checkpoint source under `sae`. Sources may be a local
-`.safetensors` file, a directory containing checkpoints, a Hugging Face repo ID,
-or a standard Hugging Face repository URL. A directory/repository selects its
-latest checkpoint automatically; `checkpoint_filename` selects an older one.
-The same local-path, repo-ID, and repository-URL forms are accepted by
-`model.name` for the source LLM.
+## Evaluate and plot
 
-```yaml
-sae:
-  checkpoint_source: org/my-sae                 # path, repo ID, or repo URL
-  checkpoint_mode: finetune                     # finetune (default) or resume
-  checkpoint_filename: sae_step_0050000.safetensors  # optional
-  checkpoint_revision: main
-  keep_last_checkpoints: 2
+```sh
+python -m sae_pipeline.cli.evaluate --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30
+python -m sae_pipeline.cli.plot --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30
 ```
 
-`finetune` imports only tensor-compatible SAE weights. Dictionary input and
-width dimensions must match, but the source may come from a different model,
-layer, component, or architecture provenance. Optimizer state, schedules,
-logging, dead-feature tracking, activation iteration, and step numbering all
-start afresh.
+Evaluation reports reconstruction, firing sparsity and dictionary utilization.
+Use `--partition validation --language en` for held-out measurements, and add
+`--delta-ce` to measure next-token cross-entropy degradation with the SAE patched
+into the model. That flag loads the language model and uses the configured
+`eval.delta_ce_n_seqs` and `eval.delta_ce_seq_len`; it processes one sequence at a
+time to bound logits memory. Reconstruction-only evaluation does not load it.
 
-`resume` requires a complete checkpoint pair and restores the optimizer, random
-state, dead-feature tracking, and activation-buffer position. Here `n_steps` is
-the final global-step target, not a number of additional steps. Each save writes
-portable weights as `sae_step_<step>.safetensors` and exact-resume data as
-`trainer_state_step_<step>.pt`. After a complete new pair is committed, only the
-newest `keep_last_checkpoints` complete pairs are retained; unpaired legacy or
-fine-tuning source weights are left untouched.
+See the shipped [configuration examples](configs/finetuning.example.yml),
+[streaming example](configs/streaming.example.yml) and [hook sites](docs/hook_sites.md).
+Every CLI also supports `--help`. Installed aliases are `sae-cache`, `sae-train`,
+`sae-train-streaming`, `sae-evaluate`, `sae-plot` and `sae-launch`.
 
-### Raw-activation checkpoint transfer
+## Cache and checkpoint compatibility
 
-A checkpoint released in raw-activation coordinates (`checkpoint_format:
-raw_export`) can be unfolded into normalised training coordinates before
-optimisation via `input_normalization: whole_vector`, then folded back on
-export so downstream inference still runs on raw activations:
+Cache manifests must match model, site, width, partition and language. Keep
+normalization and centering metadata alongside canonical checkpoints. Public raw
+exports already fold these transformations into the weights; select
+`--checkpoint-format raw_export` when evaluating them. Streaming resume requires
+the committed weight/state pair referenced by its stream-state file. Preserve the
+pair and cursor together; a raw export alone cannot resume an optimizer.
 
-```yaml
-sae:
-  input_normalization: whole_vector  # c = 1 / sqrt(E[||x||²]) per site
-  checkpoint_format: raw_export      # released SAE-Lens-style input
-  lr_schedule: warmup_constant
-  gradient_clip_norm: 1.0
+`extraction.backend` defaults to `hf_hooks`; `vllm` and `vllm_remote` are also
+built in. The optional `extraction` extra pins `nemotron-extraction==1.1.0` and
+adds the `nemotron_extraction_hf` and `nemotron_extraction_vllm` backends. Check
+them with `python -m sae_pipeline.cli.compare_activations` on your model and sites
+before switching an existing experiment.
+
+## Development
+
+```sh
+python -m pytest -q -m 'not cuda' -p no:cacheprovider -n 6
+python -m ruff check --no-cache --select F src tests
 ```
 
-## Sweep launcher
-
-```bash
-# Print the full prod sweep (15 cache jobs + 270 train+eval jobs = 285 total)
-python -m sae_pipeline.cli.launch --config configs/prod.yaml --executor dry
-
-# Run them locally, one process per visible GPU
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-  python -m sae_pipeline.cli.launch --config configs/prod.yaml --executor local
-```
-
-## Plots
-
-Every `train_sae` run writes `train_log.jsonl` and emits an 8-panel PNG to
-`<ckpt_dir>/plots/training_overview.png`:
-
-- total loss · MSE · L0-penalty · hard L0 vs. target line
-- dead-feature % · LR schedule · sparsity coefficient λ schedule
-- MSE-vs-L0 trajectory (color-coded by step, shows the path training took
-  through the sparsity-fidelity plane — invaluable for spotting collapse,
-  oscillation, or "stuck at high L0" failure modes)
-
-Every `evaluate` run writes a `*_eval.json` summary and an `*_eval_arrays.npz`
-companion (per-latent firing frequency, per-token L0, per-token recon error),
-then emits a 3-panel PNG to `<log_dir>/.../<arch_w_l0>_plots/eval_histograms.png`:
-
-- latent firing frequency histogram (log-log, Gemma Scope 2 Fig. 2 style)
-- L0 distribution per token (with target-L0 reference line)
-- reconstruction error per token (auto-detects log-x for fat-tailed runs)
-
-Re-plot existing artifacts without retraining:
-
-```bash
-python -m sae_pipeline.cli.plot \
-    --config configs/dev.yaml \
-    --layer 25 --component resid_post \
-    --arch jumprelu --width 4096 --l0 30
-```
-
-`matplotlib` runs on the headless `Agg` backend, so plots are produced even on
-training boxes with no display.
-
-The packed-sweep workers write a `worker_manifest.json` containing job, GPU,
-site, timing, exit-code, checkpoint, and log metadata.
-
-## Configs
-
-`configs/dev.yaml` and `configs/prod.yaml` differ only in:
-
-| Knob               | Dev                | Prod                          |
-| ------------------ | ------------------ | ----------------------------- |
-| `n_documents`      | 100                | (uses `total_tokens` instead) |
-| `total_tokens`     | —                  | 200 B                         |
-| `seq_len`          | 1024               | 2048                          |
-| `n_steps`          | 1 000              | 200 000                       |
-| `d_sae`            | 4096               | sweep `[16k, 64k, 256k]`      |
-| `l0_target`        | 30                 | sweep `[10, 50, 100]`         |
-| `target.layer`     | 25                 | `[5, 12, 25, 38, 51]`         |
-| `target.component` | `resid_post`       | `[resid_post, moe_out, attn_out_prelinear]` |
-
-The same code path serves both — only the budget knobs differ — so any
-data-induced bug surfaces in dev too.
-
-## Architecture (verified from the Nemotron 3 Nano technical report)
-
-| Property                      | Value                                  |
-| ----------------------------- | -------------------------------------- |
-| Total layers                  | 52 (23 Mamba-2 + 6 Attn + 23 MoE)      |
-| `d_model`                     | 2688                                   |
-| Q-heads / KV-heads / head dim | 32 / 2 / 128                           |
-| Mamba state / heads / head dim| 128 / 64 / 64 (8 groups)               |
-| MoE experts (routed / shared) | 128 / 2                                |
-| MoE active per token          | 6 routed                               |
-| Expert intermediate dim       | 1856                                   |
-| Total / active params         | 31.6 B / 3.2 B (3.6 B w/ embeddings)   |
-| Loader requirements           | `transformers ≥ 4.57.3`, `mamba_ssm`, `causal-conv1d`, `trust_remote_code=True` |
-
-## Library stack
-
-- **Model load**: `transformers` + `mamba_ssm` + `causal-conv1d` (the model
-  has real Mamba-2 mixer layers, so the SSM kernels are required).
-- **Hooking**: raw PyTorch forward hooks via the `extractor` module
-  (works with any `nn.Module`, including `trust_remote_code` custom architectures).
-  `nnsight` is also installed as a fallback / alternative.
-- **SAE math**: hand-written, mirroring Gemma Scope 2 conventions.
-  The activation function is pluggable; `topk`, `batchtopk`, and `matryoshka`
-  are reserved as future drop-ins.
-- **Cache**: `safetensors` shards + a JSON manifest.
-- **Data**: HF `datasets` streaming.
-  - **Dev**: [`HuggingFaceFW/fineweb-edu`](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
-    `sample-10BT` (ODC-BY, no gating) — for fast smoke-test iteration.
-  - **Prod**: [`nvidia/Nemotron-CC-v2.1`](https://huggingface.co/datasets/nvidia/Nemotron-CC-v2.1)
-    `High-Quality` — matches the model's pretraining distribution (gated behind an
-    NVIDIA data agreement; accept it on the dataset page before running prod).
-
-## Memory & GPU efficiency
-
-- LM weights live on GPU only (`device_map="auto"`); BF16 by default,
-  FP8 sibling repo or 4-bit `bitsandbytes` for ≤ 24 GB GPUs.
-- Activation buffer is bounded:
-  `n_batches_in_buffer × batch_size × d_model × 4 B` ≈ 360 MB at defaults.
-- Shards are memory-mapped, never fully loaded.
-- Diagnostic per-expert captures keep only routed-token activations. Dense
-  cache materialization rejects routed-expert hooks until sparse resume
-  accounting is implemented.
-- One SAE training process per `(layer, component, arch, width, L0)` combination,
-  pinned to a single GPU; the launcher spreads jobs across visible GPUs.
-
-## References
-
-- McDougall, Conmy, Kramár, Lieberum, Rajamanoharan, Nanda. *Gemma Scope 2 — Technical Paper.* Google DeepMind, Sept 2025. ([PDF](https://storage.googleapis.com/deepmind-media/DeepMind.com/Blog/gemma-scope-2-helping-the-ai-safety-community-deepen-understanding-of-complex-language-model-behavior/Gemma_Scope_2_Technical_Paper.pdf))
-- Lieberum et al. *Gemma Scope: Open Sparse Autoencoders Everywhere All At Once on Gemma 2.* arXiv:2408.05147, ICLR 2025.
-- Rajamanoharan et al. *Improving SAEs by training with JumpReLU activation.* 2024.
-- He et al. *Llama Scope.* arXiv:2410.20526, 2024.
-- Dunefsky et al. *Transcoders find interpretable LLM feature circuits.* NeurIPS 2024.
-- Gao et al. *Scaling and evaluating sparse autoencoders* (TopK). arXiv:2406.04093.
-- NVIDIA. *Nemotron 3 Nano — Technical Report.* arXiv:2512.20848, Dec 2025.
-
-## Project layout
-
-```
-.
-├── configs/                # dev.yaml, prod.yaml
-├── scripts/                # setup_venv.sh, dev_smoke_test.sh
-├── src/sae_pipeline/
-│   ├── config.py           # Pydantic schemas
-│   ├── model/              # loader, topology
-│   ├── hooks/              # ComponentSpec, forward-hook extractor
-│   ├── data/               # streaming + tokenized packing
-│   ├── cache/              # safetensors shard writer / reader / manifest
-│   ├── sae/                # base, jumprelu, training loop
-│   ├── eval/               # L0, FVU, dead %, ΔCE
-│   └── cli/                # cache_activations, train_sae, evaluate, launch
-└── tests/                  # 15 unit tests; full synthetic end-to-end pipeline
-```
-
-### Attention hook semantics and compatibility
-
-`attn_out` captures the attention module output after its output projection.
-`attn_out_prelinear` captures the projection input; HF `attn_head.<h>` selects
-one verified head from that input. vLLM prelinear extraction currently requires
-`tensor_parallel_size: 1`, and indexed expert/head hooks are rejected by vLLM.
-The fine-tuning and benchmark examples retain their published site slugs but use
-`component: attn_out` for their existing projected-output SAE checkpoints. Old
-prelinear-labelled caches must not be reused for the corrected prelinear hook.
-
-Preprocessing metadata now records cache identity and scale. Legacy metadata
-without this provenance must be regenerated in a fresh metadata directory before
-use with cached training; existing model weights remain usable for fine-tuning.
-
-Exact sites can be selected consistently with `--site <slug>` in cache, train,
-evaluate and plot CLIs; the sweep launcher preserves configured slugs and hook
-paths. Routed-expert cache materialization is explicitly unsupported because
-its sparse row count cannot safely use the dense cache's resume offset.
-
-### Audit fixes and migration
-
-The [audit fix ledger](docs/audit-fixes.md) maps each finding to its focused
-commit and regression coverage. Cache manifests now identify the hook path,
-backend, quantization and storage dtype. Legacy manifests cannot establish that
-identity: build caches under a fresh run ID instead of relabelling old shards.
-
-Streaming resumes select the exact site pairs named in `stream_state*.pt`.
-Checkpoints carry a snapshot suffix, and retention runs only after all pairs and
-the token cursor are published. Legacy stream states lack this transaction
-marker and are rejected for exact resume; their weights can still be used as a
-warm start for a new run. A token cap must be divisible by `sae.batch_size` and
-may stop within a forward pass. Whole-vector streaming checkpoints and best
-weights include `normalization.json`; resuming rejects a changed scale.
-
-Cached training supports stability early stopping; objective stopping is
-available in streaming training. Disabling early stopping disables plateau
-learning-rate adaptation. Streaming still checks configured divergence limits.
-Streaming honors `sae.seed` and the scheduled L0 target. Explicit residual reset
-firing frequencies override the bounded batch-derived default; the unused
-`dead_freq_threshold` setting is rejected with its replacement setting named.
-
-Evaluation can read more tokens for feature support than for reconstruction.
-The plot CLI accepts the same `--partition`, `--language`, `--output-id` and
-`--output-tag` selectors as evaluation. Activation comparisons require all sites
-unless `--allow-missing-sites` explicitly requests an intersection comparison.
+The adapter tests skip unless `nemotron-extraction` is installed (`.[dev,extraction]`).

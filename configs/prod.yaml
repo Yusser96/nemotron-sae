@@ -53,9 +53,6 @@ eval:
   delta_ce_seq_len: 1024
   fvu_n_tokens: 65536
   dead_n_tokens: 50000
-  interp_enabled: false
 
 log:
-  use_wandb: true
-  wandb_project: nemotron-sae
   log_dir: outputs/logs

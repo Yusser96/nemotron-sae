@@ -156,7 +156,8 @@ def test_live_tensor_alias_is_read_without_reprojecting(tmp_path):
 def test_completed_publication_recovers_in_place_and_missing_tail_is_released(tmp_path):
     import runpy
     from types import SimpleNamespace
-    publication=runpy.run_path(str(Path(__file__).parents[1]/'internal_docs/studies/warm14_20261021/publication.py'))
+    from sae_pipeline.extraction import publication as module
+    publication=vars(module)
     pool,cache,first=setup(tmp_path,consumers=('a',))
     with (pool.root/'pool.json').open() as f:
         import json
@@ -205,8 +206,10 @@ def test_real_training_resume_matches_uninterrupted_weights(tmp_path,monkeypatch
     import runpy
     from sae_pipeline.config import StreamCfg,EarlyStoppingCfg
     from sae_pipeline.sae.train_streaming import run_streaming_training
-    from sae_pipeline.sae.checkpoint import load_trainer_state,resolve_checkpoint
-    h=SimpleNamespace(**runpy.run_path(str(Path(__file__).with_name('test_train_streaming.py'))))
+    from sae_pipeline.sae.checkpoint import load_trainer_state
+    from sae_pipeline.sae.checkpoint_source import resolve_checkpoint
+    from tests.sae import streaming_fakes as f
+    h=SimpleNamespace(_sae_cfg=f.make_sae_cfg,_warm_start=f.write_warm_start,_site=f.make_site,_validation_dirs=f.make_validation_dirs)
     import sae_pipeline.sae.train_streaming as training
     monkeypatch.setattr(training,'refresh_plot',lambda *a,**k:None)
     results=[]

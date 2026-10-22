@@ -62,10 +62,6 @@ def manifest_path_for(cache_dir: Path | str, run_id: str, slug: str) -> Path:
     return Path(cache_dir) / run_id / slug / "manifest.json"
 
 
-def shards_dir_for(cache_dir: Path | str, run_id: str, slug: str) -> Path:
-    return Path(cache_dir) / run_id / slug
-
-
 def validation_dir_for(cache_dir: Path | str, run_id: str, language: str, slug: str) -> Path:
     """Directory for one language's validation-partition shards.
 

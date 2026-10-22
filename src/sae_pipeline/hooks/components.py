@@ -6,9 +6,7 @@ from the model-internal module paths, which depend on trust_remote_code internal
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from pathlib import Path
 
 from sae_pipeline.model.topology import HookSite
 
@@ -85,12 +83,6 @@ def select_sites(sites, slugs: list[str] | None) -> list:
     if unknown:
         raise ValueError(f"Sites {unknown} are not in target.sites")
     return [target for target in sites if target.slug in slugs]
-
-
-def load_topology(path: str | Path) -> list[HookSite]:
-    with open(path, "r") as f:
-        payload = json.load(f)
-    return [HookSite(**s) for s in payload["sites"]]
 
 
 def resolve(spec: ComponentSpec, sites: list[HookSite]) -> HookSite:

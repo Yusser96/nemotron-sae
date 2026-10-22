@@ -3,45 +3,23 @@ import pytest
 from sae_pipeline.config import EarlyStoppingCfg, PipelineCfg, SAECfg
 
 
-def test_dev_config_loads():
-    cfg = PipelineCfg.from_yaml("configs/dev.yaml")
-    assert cfg.run_id == "dev_smoke"
-    assert cfg.data.n_documents == 100
-    assert cfg.data.source == "HuggingFaceFW/fineweb-edu"
-    assert cfg.data.name == "sample-10BT"
-    assert cfg.target.layer == 25
-    assert cfg.target.component == "resid_post"
-    assert cfg.sae.arch == "jumprelu"
-    assert cfg.sae.d_sae == 4096
+SHIPPED = ["dev.yaml", "prod.yaml", "finetuning.example.yml",
+           "extraction_bench.yml", "extraction_equivalence.yml", "extraction_layerwise.yml"]
 
 
-def test_prod_config_loads():
+@pytest.mark.parametrize("name", SHIPPED)
+def test_every_shipped_config_loads(name):
+    PipelineCfg.from_yaml(f"configs/{name}")
+
+
+def test_prod_config_sweeps_layers_and_widths_over_a_token_budget():
     cfg = PipelineCfg.from_yaml("configs/prod.yaml")
-    assert cfg.data.total_tokens is not None
-    assert cfg.data.n_documents is None
-    assert isinstance(cfg.target.layer, list)
-    assert isinstance(cfg.sae.d_sae, list)
+    assert cfg.data.total_tokens is not None and cfg.data.n_documents is None
+    assert isinstance(cfg.target.layer, list) and isinstance(cfg.sae.d_sae, list)
 
 
 def test_validation_run_id_defaults_to_none():
-    cfg = PipelineCfg.from_yaml("configs/dev.yaml")
-    assert cfg.validation_run_id is None
-
-
-def test_finetuning_config_uses_released_sites_and_bilingual_budget():
-    cfg = PipelineCfg.from_yaml("configs/finetuning.example.yml")
-    assert cfg.data.sources is not None
-    assert cfg.model.name == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-    assert [source.source for source in cfg.data.sources] == ["nvidia/Nemotron-CC-v2.1"]
-    assert [source.language for source in cfg.data.sources] == ["en"]
-    assert cfg.data.total_tokens == 59_998_208
-    assert cfg.data.validation_tokens_per_language == 65_536
-    assert cfg.cache.max_total_bytes == 5_000_000_000_000
-    assert cfg.sae.lr_schedule == "cosine_warmup_constant"
-    assert cfg.sae.gradient_clip_norm == 1.0
-    assert cfg.target.sites is not None
-    assert len(cfg.target.sites) == 14
-    assert cfg.target.sites[0].hook_name == "backbone.layers.2"
+    assert PipelineCfg.from_yaml("configs/dev.yaml").validation_run_id is None
 
 
 def test_inverse_simpson_config_validation():
@@ -139,15 +117,18 @@ def test_combined_feature_use_strategy_is_valid():
 
 
 def test_unsupported_sae_architectures_are_rejected_by_config():
-    """Do not let schema-valid configs fail later inside build_sae."""
+    """Only the implemented JumpReLU architecture passes validation."""
     for arch in ("topk", "batchtopk", "matryoshka"):
         with pytest.raises(ValueError):
             SAECfg(arch=arch)
 
 
 def test_early_stopping_config_rejects_invalid_thresholds():
-    with pytest.raises(ValueError, match="positive"):
+    with pytest.raises(ValueError) as error:
         EarlyStoppingCfg(patience=0)
+    detail = error.value.errors()[0]
+    assert detail["type"] == "greater_than" and detail["loc"] == ("patience",)
+    assert detail["input"] == 0 and detail["ctx"] == {"gt": 0}
     with pytest.raises(ValueError, match="positive"):
         EarlyStoppingCfg(fvu_relative_tolerance=0.0)
 

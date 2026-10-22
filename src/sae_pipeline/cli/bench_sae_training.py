@@ -33,6 +33,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import load_file
 
+from sae_pipeline.cli._site import sae_variant
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.sae.train import build_sae_and_optimizer
 from sae_pipeline.sae.train_streaming import StreamingSite, streaming_step
@@ -40,9 +41,8 @@ from sae_pipeline.sae.train_streaming import StreamingSite, streaming_step
 
 def _site(slug: str, cfg: PipelineCfg, d_in: int, device: str, out_dir: Path, scale: float = 1.0) -> StreamingSite:
     sae_cfg = cfg.sae
-    d_sae = sae_cfg.d_sae if isinstance(sae_cfg.d_sae, int) else sae_cfg.d_sae[0]
-    l0_target = sae_cfg.l0_target if isinstance(sae_cfg.l0_target, int) else sae_cfg.l0_target[0]
-    sae, optim = build_sae_and_optimizer(sae_cfg, arch="jumprelu", d_in=d_in, d_sae=d_sae, device=device)
+    _, d_sae, l0_target = sae_variant(cfg)
+    sae, optim = build_sae_and_optimizer(sae_cfg, d_in=d_in, d_sae=d_sae, device=device)
     return StreamingSite(
         slug=slug,
         cfg=sae_cfg,

@@ -16,10 +16,10 @@ import logging
 import math
 import os
 import time
-from time import time_ns
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from time import time_ns
 from typing import IO, Protocol
 
 import torch
@@ -28,43 +28,46 @@ from safetensors.torch import save_file
 from sae_pipeline.cache.reader import ShardReader
 from sae_pipeline.config import EarlyStoppingCfg, SAECfg, StreamCfg
 from sae_pipeline.eval.metrics import ReconMetrics, streaming_reconstruction_metrics
-from sae_pipeline.eval.plots import plot_training_curves, plot_validation_curves, refresh_plot
-from sae_pipeline.extraction.base import ActivationExtractor
-from sae_pipeline.sae.base import SparseAutoencoder
-from sae_pipeline.sae.checkpoint import (
-    capture_random_state,
-    load_sae_weights,
-    load_trainer_state,
-    resolve_checkpoint,
-    restore_random_state,
-    save_checkpoint_pair,
-    prune_checkpoints,
-    write_raw_export,
+from sae_pipeline.eval.plots import (
+    plot_training_curves,
+    plot_validation_curves,
+    refresh_plot,
 )
+from sae_pipeline.extraction.base import ActivationExtractor
+from sae_pipeline.sae.checkpoint import (capture_random_state, load_sae_weights, load_trainer_state, prune_checkpoints, restore_random_state, save_checkpoint_pair, write_raw_export, write_text_atomic)
+from sae_pipeline.sae.checkpoint_source import (resolve_checkpoint)
+from sae_pipeline.sae.early_stopping import ObjectiveEarlyStop
 from sae_pipeline.sae.jumprelu import JumpReLUSAE
-from sae_pipeline.sae.normalization import load_whole_vector_normalization, normalization_path, write_normalization
+from sae_pipeline.sae.normalization import (
+    load_whole_vector_normalization,
+    normalization_path,
+    write_normalization,
+)
 from sae_pipeline.sae.objective import (
     LossCoefficients,
     coefficients_at,
     optimizer_step,
+    scheduled_l0_target,
     training_loss,
 )
-from sae_pipeline.sae.train import (
-    ObjectiveEarlyStop,
-    StepLog,
-    _probe_cache_signature,
-    _seed_training,
-    _scheduled_l0_target,
-    _validation_batches,
-    build_sae_and_optimizer,
-    record_firing,
+from sae_pipeline.sae.initialization import initialize_sae
+from sae_pipeline.sae.resets import (
     resample_underused_features,
     reset_l0_allowance,
     residual_reset_due,
-    step_log,
 )
+from sae_pipeline.sae.selection import observe_selection, prune_selection
+from sae_pipeline.sae.step_log import StepLog, record_firing, step_log
+from sae_pipeline.sae.train import build_sae_and_optimizer, seed_training
+from sae_pipeline.sae.validation import probe_cache_signature, validation_batches
 
 log = logging.getLogger(__name__)
+
+# Plateau rule the reconstruction-selection observer replays when early stopping does not supply one.
+_SELECTION_RULE = EarlyStoppingCfg(mode="objective", patience=10)
+# Validation L0 and objective multiples that are logged as warnings without stopping the site.
+_L0_WARNING_FACTOR = 3.0
+_OBJECTIVE_WARNING_FACTOR = 10.0
 
 
 @dataclass
@@ -73,7 +76,7 @@ class StreamingSite:
 
     slug: str
     cfg: SAECfg
-    sae: SparseAutoencoder
+    sae: JumpReLUSAE
     optim: torch.optim.Optimizer
     arch: str
     l0_target: int
@@ -169,10 +172,10 @@ def init_streaming_site(
         if not math.isfinite(normalization_scale) or normalization_scale <= 0:
             raise ValueError(f"{slug}: normalization scale must be finite and positive")
 
-    _seed_training(sae_cfg.seed)
-    sae, optim = build_sae_and_optimizer(sae_cfg, arch=arch, d_in=d_in, d_sae=d_sae, device=device)
+    seed_training(sae_cfg.seed)
+    sae, optim = build_sae_and_optimizer(sae_cfg, d_in=d_in, d_sae=d_sae, device=device)
     validation_readers = {lang: ShardReader(path) for lang, path in sorted(validation_cache_dirs.items())}
-    validation_cache_signature = _probe_cache_signature(validation_readers)
+    validation_cache_signature = probe_cache_signature(validation_readers)
     ever_fired = torch.zeros(d_sae, dtype=torch.bool, device=device)
     feature_frequency = torch.zeros(d_sae, dtype=torch.float32, device=device)
     inverse_simpson_usage = torch.zeros(d_sae, dtype=torch.float32, device=device)
@@ -217,7 +220,6 @@ def init_streaming_site(
         last_reset_step = state.get("last_reset_step")
         log.info("%s: resumed at step %d", slug, step)
     else:
-        from sae_pipeline.sae.initialization import initialize_sae
         receipt = initialize_sae(
             sae, sae_cfg, normalization_scale=normalization_scale,
             checkpoint_filename=checkpoint_filename,
@@ -241,12 +243,11 @@ def init_streaming_site(
                     try:
                         row = json.loads(line)
                     except json.JSONDecodeError:
-                        break  # discard an interrupted last write
+                        log.warning("%s: dropping an interrupted line and the rest of %s", slug, path)
+                        break
                     if int(row["step"]) <= step:
                         rows.append(line)
-                temporary = path.with_suffix(".tmp")
-                temporary.write_text("".join(line + "\n" for line in rows))
-                os.replace(temporary, path)
+                write_text_atomic(path, "".join(line + "\n" for line in rows))
     mode = "a" if resume_checkpoint is not None else "w"
     return StreamingSite(
         slug=slug,
@@ -288,7 +289,7 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     if site.normalization_scale != 1.0:
         x = x * site.normalization_scale
 
-    target_l0 = _scheduled_l0_target(step, site.l0_target, cfg) + reset_l0_allowance(cfg, step, site.last_reset_step)
+    target_l0 = scheduled_l0_target(step, site.l0_target, cfg) + reset_l0_allowance(cfg, step, site.last_reset_step)
     terms = training_loss(
         site.sae,
         x,
@@ -310,7 +311,6 @@ def streaming_step(site: StreamingSite, x_raw: torch.Tensor, step: int) -> StepL
     if residual_reset_due(cfg, step):
         # No cache to calibrate on (residual_reset_calibration_tokens is for
         # train_sae): new directions and thresholds come from this batch.
-        assert isinstance(site.sae, JumpReLUSAE)
         site.feature_resets += resample_underused_features(
             site.sae,
             site.optim,
@@ -368,7 +368,7 @@ def evaluate_site(site: StreamingSite, device: str) -> SiteEvaluation:
     """Score fixed probes without mutating training statistics, RNG or model mode."""
     metrics, objective, full_objective, components = {}, {}, {}, {}
     coefficients = coefficients_at(site.cfg, site.step)
-    target = _scheduled_l0_target(site.step, site.l0_target, site.cfg) + reset_l0_allowance(
+    target = scheduled_l0_target(site.step, site.l0_target, site.cfg) + reset_l0_allowance(
         site.cfg, site.step, site.last_reset_step
     )
     rng = capture_random_state()
@@ -399,7 +399,7 @@ def evaluate_site(site: StreamingSite, device: str) -> SiteEvaluation:
                     n_rows += x.shape[0]
                     yield x
 
-            batches = _validation_batches(reader, n_tokens=site.probe_tokens, batch_size=site.cfg.batch_size,
+            batches = validation_batches(reader, n_tokens=site.probe_tokens, batch_size=site.cfg.batch_size,
                                           input_scale=site.normalization_scale, input_center=None, device=device)
             result = streaming_reconstruction_metrics(site.sae, scored(batches), dead_threshold_tokens=site.probe_tokens)
             if n_rows != site.probe_tokens:
@@ -432,7 +432,6 @@ def record_baseline(site: StreamingSite, device: str) -> None:
         if site.step == 0 and (reconstruction_missing or full_missing):
             evaluation=evaluate_site(site, device)
             if reconstruction_missing:
-                from sae_pipeline.sae.selection import observe_selection
                 observe_selection(site, evaluation, EarlyStoppingCfg(mode="objective", patience=10))
             if full_missing:
                 from sae_pipeline.sae.validation_stopping import observe_full_best
@@ -452,8 +451,7 @@ def record_baseline(site: StreamingSite, device: str) -> None:
         from sae_pipeline.sae.validation_stopping import observe_full_best
         observe_full_best(site,evaluation)
     if site.cfg.track_reconstruction_selection:
-        from sae_pipeline.sae.selection import observe_selection
-        observe_selection(site, evaluation, EarlyStoppingCfg(mode="objective", patience=10))
+        observe_selection(site, evaluation, _SELECTION_RULE)
     log.info("%s: warm-start baseline %s", site.slug, site.baseline)
 
 
@@ -469,10 +467,7 @@ def _write_diagnostic(site: StreamingSite, evaluation: SiteEvaluation, phase: st
                     for language, metrics in evaluation.metrics.items()},
         **extra,
     }
-    path = site.out_dir / f"{phase}_metrics.json"
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(payload))
-    os.replace(temporary, path)
+    write_text_atomic(site.out_dir / f"{phase}_metrics.json", json.dumps(payload))
 
 
 def _plot_title(site: StreamingSite) -> str:
@@ -480,8 +475,8 @@ def _plot_title(site: StreamingSite) -> str:
 
 
 def write_export(site: StreamingSite, path: Path) -> Path | None:
-    """Raw-activation export, for whole-vector-normalised JumpReLU sites only."""
-    if site.cfg.input_normalization != "whole_vector" or not isinstance(site.sae, JumpReLUSAE):
+    """Raw-activation export, for whole-vector-normalised sites only."""
+    if site.cfg.input_normalization != "whole_vector":
         return None
     return write_raw_export(site.sae, path, input_scale=site.normalization_scale)
 
@@ -566,10 +561,10 @@ def threshold_warnings(site, evaluation, step):
         return ()
     warnings = []
     l0 = max(metrics.l0 for metrics in evaluation.metrics.values())
-    if step >= site.cfg.l0_warmup_steps and l0 > 3.0 * site.l0_target:
+    if step >= site.cfg.l0_warmup_steps and l0 > _L0_WARNING_FACTOR * site.l0_target:
         warnings.append('l0')
     best = site.early_stop.best
-    if best is not None and evaluation.mixed_objective > 10.0 * best:
+    if best is not None and evaluation.mixed_objective > _OBJECTIVE_WARNING_FACTOR * best:
         warnings.append('objective')
     return tuple(warnings)
 
@@ -611,7 +606,6 @@ def evaluate_and_update(
     if warnings:
         log.warning("%s finite diagnostic threshold warnings at step %d: %s", site.slug, step, ",".join(warnings))
     if site.cfg.track_reconstruction_selection and divergence is None:
-        from sae_pipeline.sae.selection import observe_selection
         observe_selection(site, evaluation, early_stopping)
     selection_minimum = eligibility_step(site.cfg, early_stopping)
     selection_eligible = step >= selection_minimum
@@ -716,8 +710,7 @@ def _finish(sites: list[StreamingSite], reason: str, *, final_export: bool = Tru
             _write_diagnostic(site, evaluation, "terminal", reason=reason,
                               diverged=divergence, healthy=export_healthy)
             if site.cfg.track_reconstruction_selection and export_healthy:
-                from sae_pipeline.sae.selection import observe_selection
-                observe_selection(site, evaluation, early_stopping or EarlyStoppingCfg(mode="objective", patience=10))
+                observe_selection(site, evaluation, early_stopping or _SELECTION_RULE)
         site.stopped = True
         if export_healthy:
             write_export(site, site.out_dir / f"sae_export_step_{site.step:07d}_final.safetensors")
@@ -814,7 +807,6 @@ def run_streaming_training(
             from sae_pipeline.sae.validation_stopping import prune_full_best
             prune_full_best(site)
             if site.cfg.track_reconstruction_selection:
-                from sae_pipeline.sae.selection import prune_selection
                 prune_selection(site)
 
     from sae_pipeline.sae.validation_stopping import configure_stopping

@@ -21,15 +21,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
+from safetensors.torch import load_file
 
-from sae_pipeline.config import PipelineCfg
+from sae_pipeline.config import ActivationSinkCfg, PipelineCfg
 from sae_pipeline.extraction.base import ActivationBatch
 from sae_pipeline.extraction.fills import FillQueue, fill_dir, published_fills, write_header
 from sae_pipeline.extraction.remote import CALL_SIZE_KEY, open_store, take_tokens
-from sae_pipeline.extraction.sink import ActivationSink
 from sae_pipeline.extraction.vllm_worker import assemble_rows, hookable
 from sae_pipeline.hooks.components import ComponentSpec
-from sae_pipeline.sae.checkpoint import load_trainer_state, normalize_hf_source
+from sae_pipeline.sae.checkpoint import (load_trainer_state)
+from sae_pipeline.sae.checkpoint_source import (normalize_hf_source)
 
 if TYPE_CHECKING:
     from sae_pipeline.sae.train_streaming import TokenStream
@@ -121,6 +122,36 @@ def _sequences_per_call(llm: Any, cfg: PipelineCfg, sampling_params: Any) -> int
     return fits
 
 
+class _ActivationSink:
+    """The step files the worker hooks write to ``extraction.sink``; ``consume`` deletes each once read."""
+
+    def __init__(self, cfg: ActivationSinkCfg) -> None:
+        self.path = cfg.resolved_path()
+        self.lifecycle = cfg.lifecycle
+
+    def prepare(self) -> Path:
+        self.path.mkdir(parents=True, exist_ok=True)
+        return self.path
+
+    def read(self, step_paths: list[str]) -> list[dict[str, torch.Tensor]]:
+        """Load step files in order; ``consume`` deletes each once loaded."""
+        steps = []
+        for step_path in step_paths:
+            steps.append(load_file(step_path))
+            if self.lifecycle == "consume":
+                Path(step_path).unlink()
+        return steps
+
+    def cleanup(self) -> None:
+        """Remove files a consuming run left behind (e.g. after an interruption)."""
+        if self.lifecycle != "consume" or not self.path.exists():
+            return
+        for leftover in self.path.glob("*.safetensors"):
+            leftover.unlink()
+        if not any(self.path.iterdir()):
+            self.path.rmdir()
+
+
 class VLLMExtractor:
     def __init__(
         self,
@@ -136,7 +167,7 @@ class VLLMExtractor:
         if cfg.extraction.vllm.sequences_per_call == "auto":
             raise ValueError("sequences_per_call: auto sizes captures kept on the GPU; the file sink needs a number")
         self.slugs = list(specs)
-        self.sink = ActivationSink(cfg.extraction.sink)
+        self.sink = _ActivationSink(cfg.extraction.sink)
         self.capture_device = capture_device
         self.sequences_per_call = cfg.extraction.vllm.sequences_per_call
         self.llm = _start_engine(cfg, sites, out_dir=str(self.sink.prepare()), engine_factory=engine_factory)

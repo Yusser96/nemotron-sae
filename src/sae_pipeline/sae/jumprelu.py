@@ -19,8 +19,6 @@ import math
 import torch
 import torch.nn as nn
 
-from sae_pipeline.sae.base import SparseAutoencoder, init_encoder_from_decoder
-
 
 def _log_theta_ste_gradient(
     z: torch.Tensor,
@@ -103,7 +101,7 @@ class _JumpReLUGate(torch.autograd.Function):
         return None, grad_log_theta, None
 
 
-class JumpReLUSAE(SparseAutoencoder):
+class JumpReLUSAE(nn.Module):
     def __init__(
         self,
         d_in: int,
@@ -130,15 +128,13 @@ class JumpReLUSAE(SparseAutoencoder):
         nn.init.kaiming_uniform_(self.W_dec, a=math.sqrt(5))
         with torch.no_grad():
             self.W_dec.div_(self.W_dec.norm(dim=0, keepdim=True).clamp_min(1e-8))
-        init_encoder_from_decoder(self.W_dec, self.W_enc)
+            # Tied at initialisation only; the encoder trains independently afterwards.
+            self.W_enc.copy_(self.W_dec)
 
     @property
     def theta(self) -> torch.Tensor:
         """Positive JumpReLU threshold, exposed for metrics and diagnostics."""
         return self.log_theta.exp()
-
-    def _decoder_weight(self) -> nn.Parameter:
-        return self.W_dec
 
     def encode_pre(self, x: torch.Tensor) -> torch.Tensor:
         if self.pre_encoder_bias:
@@ -154,6 +150,21 @@ class JumpReLUSAE(SparseAutoencoder):
 
     def decode(self, f: torch.Tensor) -> torch.Tensor:
         return f @ self.W_dec.T + self.b_dec
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        f = self.encode(x)
+        return self.decode(f), f
+
+    @torch.no_grad()
+    def renormalize_decoder(self) -> None:
+        """Rescale every decoder column to unit norm."""
+        self.W_dec.div_(self.W_dec.norm(dim=0, keepdim=True).clamp_min(1e-8))
+
+    @torch.no_grad()
+    def project_decoder_grad(self) -> None:
+        """Remove each decoder column's gradient component along the column itself."""
+        if self.W_dec.grad is not None:
+            self.W_dec.grad.sub_((self.W_dec.grad * self.W_dec).sum(dim=0, keepdim=True) * self.W_dec)
 
     def l0(self, x: torch.Tensor) -> torch.Tensor:
         return _L0.apply(self.gate_input(x), self.log_theta, self.bandwidth)
@@ -232,13 +243,3 @@ def inverse_simpson_from_mass(
     raw_d_is = 1.0 / (probabilities.square().sum() + eps)
     d_is = torch.where(total > 0, raw_d_is, torch.zeros_like(raw_d_is))
     return d_is, d_is / float(d_sae), probabilities
-
-
-def compute_inverse_simpson(
-    firing_frequency: torch.Tensor,
-    d_sae: int,
-    eps: float = 1e-12,
-) -> tuple[float, float]:
-    """Compute ``(D_IS, u_IS)`` from feature firing frequencies or counts."""
-    d_is, u_is, _ = inverse_simpson_from_mass(firing_frequency, d_sae, eps)
-    return float(d_is.item()), float(u_is.item())

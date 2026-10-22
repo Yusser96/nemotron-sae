@@ -11,9 +11,15 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # shellcheck disable=SC1091
-source "$REPO_ROOT/.venv/bin/activate"
+if [ -f "$REPO_ROOT/.venv/bin/activate" ]; then
+    source "$REPO_ROOT/.venv/bin/activate"
+elif ! command -v python >/dev/null 2>&1; then
+    echo 'Activate a Python environment or create .venv before running this script.' >&2
+    exit 1
+fi
+# Optional: export the token variable named by model.token_env_var.
 # shellcheck disable=SC1091
-source "$REPO_ROOT/env.sh"   # HF_TOKEN, OPENAI_API_KEY
+if [ -f "$REPO_ROOT/env.sh" ]; then source "$REPO_ROOT/env.sh"; fi
 
 CONFIG="${CONFIG:-configs/dev.yaml}"
 LAYER="${LAYER:-25}"
@@ -37,6 +43,21 @@ python -m sae_pipeline.cli.evaluate \
     --arch "$ARCH" --width "$WIDTH" --l0 "$L0"
 
 echo ">>> Done. Artifacts:"
-ls -la outputs/caches/dev_smoke/L${LAYER:?}_${COMPONENT}/manifest.json
-ls -la outputs/checkpoints/dev_smoke/L${LAYER:?}_${COMPONENT}/${ARCH}_w${WIDTH}_l0_${L0}/
-ls -la outputs/logs/dev_smoke/L${LAYER:?}_${COMPONENT}/
+python - "$CONFIG" "$LAYER" "$COMPONENT" "$ARCH" "$WIDTH" "$L0" <<'PY'
+import sys
+from pathlib import Path
+from sae_pipeline.config import PipelineCfg
+
+config, layer, component, arch, width, l0 = sys.argv[1:]
+cfg = PipelineCfg.from_yaml(config)
+slug, stem = f"L{layer}_{component}", f"{arch}_w{width}_l0_{l0}"
+paths = [
+    Path(cfg.cache.cache_dir) / cfg.run_id / slug / "manifest.json",
+    Path(cfg.sae.ckpt_dir) / cfg.run_id / slug / stem,
+    Path(cfg.log.log_dir) / cfg.run_id / slug / "train" / f"{stem}_eval.json",
+]
+for path in paths:
+    if not path.exists():
+        raise SystemExit(f"Missing smoke-test artifact: {path}")
+    print(path)
+PY

@@ -1,0 +1,84 @@
+# Prepare the configured validation cache before launching the stream.
+run_id: streaming_example
+model:
+  name: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+  dtype: bfloat16
+  load_quant: auto
+  trust_remote_code: true
+  device_map: auto
+data:
+  sources:
+  - source: nvidia/Nemotron-CC-v2.1
+    name: High-Quality
+    language: en
+  split: train
+  streaming: true
+  total_tokens: 3999997952
+  seq_len: 2048
+  shuffle_buffer: 8192
+  seed: 42
+  validation_fraction: 0.05
+  validation_tokens_per_language: 65536
+cache:
+  shard_size_bytes: 1073741824
+  shuffle_seed: 42
+  tokens_per_fwd: 8192
+  cache_dir: outputs/caches/nemotron-finetuning
+  max_total_bytes: 5000000000000
+sae:
+  arch: jumprelu
+  d_sae: 16384
+  l0_target: 10
+  lr: 7.0e-05
+  batch_size: 4096
+  n_steps: 120000
+  warmup_steps: 1000
+  l0_warmup_steps: 50000
+  bandwidth: 0.001
+  adam_beta1: 0.0
+  adam_beta2: 0.999
+  adam_eps: 1.0e-08
+  decoder_unit_norm: true
+  pre_encoder_bias: true
+  input_normalization: none
+  checkpoint_format: native
+  lr_schedule: warmup_constant
+  gradient_clip_norm: 1.0
+  n_batches_in_buffer: 8
+  ckpt_every: 2442
+  eval_interval_steps: 2442
+  log_every: 100
+  ckpt_dir: outputs/checkpoints
+  checkpoint_source: null
+  checkpoint_mode: finetune
+  checkpoint_revision: main
+  keep_last_checkpoints: 2
+  initialization_mode: random
+target:
+  sites:
+  - slug: L2_resid_post
+    layer: 2
+    component: resid_post
+    hook_name: backbone.layers.2
+eval:
+  delta_ce_n_seqs: 2048
+  delta_ce_seq_len: 1024
+  fvu_n_tokens: 65536
+  dead_n_tokens: 50000
+  trajectory_n_tokens: 50000
+log:
+  log_dir: outputs/logs
+validation_run_id: streaming_example
+stream:
+  enabled: true
+  model_device: cuda:0
+  sae_device: cuda:0
+  token_cap: 3999997952
+  stop_after_seconds: 3600
+early_stopping:
+  enabled: true
+  mode: objective
+  minimum_steps: 50000
+  patience: 10
+  lr_plateau_patience: 3
+  min_lr_scale: 1.0

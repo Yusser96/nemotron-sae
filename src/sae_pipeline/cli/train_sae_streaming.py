@@ -34,17 +34,17 @@ import torch
 
 from sae_pipeline.cache.manifest import CacheManifest, validation_dir_for, validation_manifest_path_for
 from sae_pipeline.cli._process import run_then_hard_exit
+from sae_pipeline.cli._site import sae_variant
 from sae_pipeline.config import PipelineCfg
 from sae_pipeline.data.streaming import ResumableTokenStream
 from sae_pipeline.extraction.base import ActivationExtractor
 from sae_pipeline.extraction.fills import FillStream, mark_done
-from sae_pipeline.extraction.hf import HFHookExtractor
+from sae_pipeline.extraction.build import HF_BACKENDS, build_extractor
 from sae_pipeline.extraction.remote import RemoteExtractor
 from sae_pipeline.extraction.vllm_worker import hookable
 from sae_pipeline.hooks.components import select_sites, site_requests
-from sae_pipeline.model.loader import load_model_and_tokenizer, load_tokenizer
+from sae_pipeline.model.loader import load_tokenizer
 from sae_pipeline.model.topology import dump_topology, enumerate_hooks
-from sae_pipeline.sae.checkpoint import resolve_checkpoint
 from sae_pipeline.sae.train_streaming import committed_stream_checkpoints, TokenStream, init_streaming_site, run_streaming_training, state_paths
 
 log = logging.getLogger(__name__)
@@ -126,9 +126,7 @@ def main() -> None:
             mark_done(args.fills, args.consumer)
         return
 
-    arch = cfg.sae.arch if isinstance(cfg.sae.arch, str) else cfg.sae.arch[0]
-    d_sae = cfg.sae.d_sae if isinstance(cfg.sae.d_sae, int) else cfg.sae.d_sae[0]
-    l0_target = cfg.sae.l0_target if isinstance(cfg.sae.l0_target, int) else cfg.sae.l0_target[0]
+    arch, d_sae, l0_target = sae_variant(cfg)
 
     resume_checkpoints = committed_stream_checkpoints(
         out_root, {target.slug: out_root / target.slug for target in targets}, args.consumer
@@ -139,7 +137,7 @@ def main() -> None:
     backend = "fills" if args.fills is not None else cfg.extraction.backend
     extractor: ActivationExtractor
     token_stream: TokenStream | None = None
-    if backend in ("vllm", "vllm_remote"):
+    if backend in ("vllm", "vllm_remote", "nemotron_extraction_vllm"):
         # Fail before loading anything if a site has no module boundary in vLLM.
         unsupported = [slug for slug, (spec, _site) in requests.items() if not hookable(spec)]
         if unsupported:
@@ -169,23 +167,16 @@ def main() -> None:
             dtype=getattr(torch, cfg.model.dtype),
             device=cfg.stream.sae_device,
         )
-    elif backend == "vllm":
-        from sae_pipeline.extraction.vllm import VLLMExtractor
-
-        # Start the engine before the SAEs allocate: vLLM sizes itself from
-        # extraction.vllm.gpu_memory_utilization at startup.
-        specs = {slug: spec for slug, (spec, _site) in requests.items()}
-        extractor = VLLMExtractor(cfg, specs, capture_device=cfg.stream.sae_device)
     else:
-        # Pin the whole model to one device: with several GPUs visible, a plain
-        # "auto" device_map would spread its layers across all of them.
-        model_cfg = cfg.model.model_copy(update={"device_map": {"": cfg.stream.model_device}})
-        model, tokenizer = load_model_and_tokenizer(model_cfg)
-        model.eval()
-        dump_topology(enumerate_hooks(model), out_root / "model_topology.json")
-        extractor = HFHookExtractor(
-            model, requests, model_device=cfg.stream.model_device, capture_device=cfg.stream.sae_device
+        # Start a vLLM engine before the SAEs allocate: it sizes itself from
+        # extraction.vllm.gpu_memory_utilization at startup.
+        extractor, loaded_tokenizer = build_extractor(
+            cfg, backend, requests=requests, device=cfg.stream.model_device, capture_device=cfg.stream.sae_device
         )
+        if loaded_tokenizer is not None:
+            tokenizer = loaded_tokenizer
+        if backend in HF_BACKENDS:
+            dump_topology(enumerate_hooks(extractor.model), out_root / "model_topology.json")
 
     sites = {}
     try:

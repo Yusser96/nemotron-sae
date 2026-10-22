@@ -7,9 +7,10 @@ import torch
 import runpy
 from pathlib import Path
 from types import SimpleNamespace
-h = SimpleNamespace(**runpy.run_path(str(Path(__file__).with_name("test_train_streaming.py"))))
+from tests.sae import streaming_fakes as f
+h = SimpleNamespace(_sae_cfg=f.make_sae_cfg, _warm_start=f.write_warm_start, _site=f.make_site, _validation_dirs=f.make_validation_dirs, BATCH=f.BATCH, D_SAE=f.D_SAE)
 from sae_pipeline.config import EarlyStoppingCfg
-from sae_pipeline.sae.checkpoint import resolve_checkpoint
+from sae_pipeline.sae.checkpoint_source import resolve_checkpoint
 from sae_pipeline.sae.objective import coefficients_at, training_loss
 from sae_pipeline.sae.train_streaming import evaluate_site, evaluate_and_update, write_checkpoint, record_baseline
 from sae_pipeline.sae.validation_stopping import configure_stopping, eligibility_step
@@ -37,8 +38,8 @@ def test_full_objective_matches_training_terms_and_does_not_mutate_state(tmp_pat
     for language,reader in site.validation_readers.items():
         usage=tensors['inverse_simpson_usage'].clone();dead=tensors['tokens_since_fired'].clone()
         total=rows=0
-        from sae_pipeline.sae.train import _validation_batches
-        for x in _validation_batches(reader,n_tokens=site.probe_tokens,batch_size=cfg.batch_size,input_scale=site.normalization_scale,input_center=None,device='cpu'):
+        from sae_pipeline.sae.validation import validation_batches
+        for x in validation_batches(reader,n_tokens=site.probe_tokens,batch_size=cfg.batch_size,input_scale=site.normalization_scale,input_center=None,device='cpu'):
             with torch.no_grad():terms=training_loss(site.sae,x,cfg,coefficients,target_l0=float(site.l0_target),usage=usage,tokens_since_fired=dead)
             total+=float(terms.total)*len(x);rows+=len(x)
         assert got.training_objective[language]==pytest.approx(total/rows)

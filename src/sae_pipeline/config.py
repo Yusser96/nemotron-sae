@@ -14,7 +14,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-Quant = Literal["auto", "bf16", "fp8", "nf4"]
+Quant = Literal["auto", "bf16", "nf4"]
 # Only JumpReLU has a trainer.
 SAEArch = Literal["jumprelu"]
 CheckpointMode = Literal["finetune", "resume"]
@@ -29,7 +29,7 @@ FeatureUseStrategy = Literal[
     "frequency_residual_reset",
 ]
 ActivationCentering = Literal["none", "mean"]
-ExtractionBackend = Literal["hf_hooks", "vllm", "vllm_remote"]
+ExtractionBackend = Literal["hf_hooks", "vllm", "vllm_remote", "nemotron_extraction_hf", "nemotron_extraction_vllm"]
 SinkLifecycle = Literal["consume", "cache"]
 
 
@@ -123,46 +123,46 @@ class SAECfg(BaseModel):
     l0_penalty_scale: float = 1.0
     seed: int = 42
     l0_target_start: float | None = None
-    l0_target_warmup_steps: int = 0
-    decoder_freeze_steps: int = 0
+    l0_target_warmup_steps: int = Field(default=0, ge=0)
+    decoder_freeze_steps: int = Field(default=0, ge=0)
     activation_centering: ActivationCentering = "none"
-    centering_sample_tokens: int = 1_000_000
+    centering_sample_tokens: int = Field(default=1_000_000, gt=0)
     centering_dir: Path | None = None
-    active_subspace_rank: int | None = None
-    active_subspace_sample_tokens: int = 100_000
+    active_subspace_rank: int | None = Field(default=None, gt=0)
+    active_subspace_sample_tokens: int = Field(default=100_000, gt=0)
     # Optional controls for the long repair sweep.  They are deliberately
     # explicit in the config so an intervention is reproducible and auditable.
     feature_use_strategy: FeatureUseStrategy = "none"
-    feature_frequency_start_step: int = 50_000
+    feature_frequency_start_step: int = Field(default=50_000, gt=0)
     feature_frequency_ema_decay: float = 0.999
     feature_frequency_threshold: float = 0.05
     feature_frequency_penalty_fraction: float = 0.1
-    residual_reset_start_step: int = 50_000
-    residual_reset_every_steps: int = 30_000
-    residual_reset_max_features: int = 512
+    residual_reset_start_step: int = Field(default=50_000, gt=0)
+    residual_reset_every_steps: int = Field(default=30_000, gt=0)
+    residual_reset_max_features: int = Field(default=512, gt=0)
     residual_reset_frequency_threshold: float = 1.0e-6
-    residual_reset_pool_size: int = 8_192
+    residual_reset_pool_size: int = Field(default=8_192, gt=0)
     # None distributes residual_reset_delta_l0 over the replaced features.
     residual_reset_target_frequency: float | None = None
     residual_reset_delta_l0: float = 2.0
-    residual_reset_calibration_tokens: int = 1_048_576
-    residual_reset_anneal_steps: int = 10_000
+    residual_reset_calibration_tokens: int = Field(default=1_048_576, gt=0)
+    residual_reset_anneal_steps: int = Field(default=10_000, gt=0)
     feature_frequency_penalty_multiplier: float = 1.0
     inverse_simpson_floor: float = 0.0
     inverse_simpson_max_scale: float = 0.0
     # None follows l0_warmup_steps so both firing-pattern terms ramp together.
-    inverse_simpson_warmup_steps: int | None = None
+    inverse_simpson_warmup_steps: int | None = Field(default=None, ge=0)
     # Batches the firing rates behind the floor are averaged over (an EMA);
     # 1: each batch on its own. Longer windows apply to streaming training.
-    inverse_simpson_window_steps: int = 1
+    inverse_simpson_window_steps: int = Field(default=1, gt=0)
     # AuxK (Gao et al. 2024, §2.4): dead latents reconstruct the main residual.
     # auxk_scale is α, applied to the variance-normalised auxiliary error times
     # the current reconstruction loss, so it is the same fraction of that loss
     # under either reconstruction_loss; 0 disables it. Streaming training only.
     auxk_scale: float = 0.0
-    auxk_k: int = 512
+    auxk_k: int = Field(default=512, gt=0)
     # Tokens without a main-path firing before a latent counts as dead.
-    auxk_dead_tokens: int = 10_000_000
+    auxk_dead_tokens: int = Field(default=10_000_000, gt=0)
     # "high" runs float32 matmuls on TF32 tensor cores (10-bit mantissa), several
     # times faster on Ampere and later; "highest" keeps full float32.
     matmul_precision: Literal["highest", "high"] = "highest"
@@ -170,7 +170,7 @@ class SAECfg(BaseModel):
     ckpt_every: int = 5_000
     # Fixed-probe diagnostics cadence. Validation-based stopping has its own
     # minimum-step and patience settings.
-    eval_interval_steps: int | None = 10_000
+    eval_interval_steps: int | None = Field(default=10_000, gt=0)
     log_every: int = 100
     ckpt_dir: Path = Path("outputs/checkpoints")
     checkpoint_source: str | Path | None = None
@@ -180,7 +180,7 @@ class SAECfg(BaseModel):
     # that site's file in checkpoint_source, e.g. "{slug}/sae_weights.safetensors".
     checkpoint_filename_template: str | None = None
     checkpoint_revision: str = "main"
-    keep_last_checkpoints: int = 2
+    keep_last_checkpoints: int = Field(default=2, gt=0)
 
     @field_validator("d_sae")
     @classmethod
@@ -189,13 +189,6 @@ class SAECfg(BaseModel):
         for w in widths:
             if w <= 0:
                 raise ValueError(f"d_sae must be positive, got {w}")
-        return v
-
-    @field_validator("keep_last_checkpoints")
-    @classmethod
-    def _keep_last_checkpoints_positive(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("keep_last_checkpoints must be positive")
         return v
 
     @field_validator("gradient_clip_norm")
@@ -253,58 +246,6 @@ class SAECfg(BaseModel):
             raise ValueError("dead_freq_threshold was unused; use feature_frequency_threshold")
         return values
 
-    @field_validator(
-        "feature_frequency_start_step",
-        "residual_reset_start_step",
-        "residual_reset_every_steps",
-        "residual_reset_max_features",
-        "residual_reset_pool_size",
-        "inverse_simpson_window_steps",
-        "auxk_k",
-        "auxk_dead_tokens",
-    )
-    @classmethod
-    def _intervention_counts_positive(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("intervention step and count values must be positive")
-        return v
-
-    @field_validator(
-        "l0_target_warmup_steps", "decoder_freeze_steps", "inverse_simpson_warmup_steps"
-    )
-    @classmethod
-    def _optional_intervention_steps_nonnegative(cls, v: int | None) -> int | None:
-        if v is not None and v < 0:
-            raise ValueError("intervention step values must be non-negative")
-        return v
-
-    @field_validator("eval_interval_steps")
-    @classmethod
-    def _eval_interval_steps_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("eval_interval_steps must be positive when set")
-        return v
-
-    @field_validator(
-        "centering_sample_tokens",
-        "active_subspace_sample_tokens",
-        "residual_reset_calibration_tokens",
-        "residual_reset_anneal_steps",
-    )
-    @classmethod
-    def _sample_counts_positive(cls, v: int) -> int:
-        if v <= 0:
-            raise ValueError("diagnostic sample counts must be positive")
-        return v
-
-    @field_validator("active_subspace_rank")
-    @classmethod
-    def _subspace_rank_valid(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("active_subspace_rank must be positive when set")
-        return v
-
-
 class HookTargetCfg(BaseModel):
     """A released SAE site, addressed by its exact model module path."""
 
@@ -337,21 +278,12 @@ class TargetCfg(BaseModel):
 
 
 class EvalCfg(BaseModel):
-    delta_ce_n_seqs: int = 2048
-    delta_ce_seq_len: int = 1024
-    fvu_n_tokens: int = 65_536
-    dead_n_tokens: int = 50_000
+    delta_ce_n_seqs: int = Field(default=2048, gt=0)
+    delta_ce_seq_len: int = Field(default=1024, gt=1)
+    fvu_n_tokens: int = Field(default=65_536, gt=0)
+    dead_n_tokens: int = Field(default=50_000, gt=0)
     # Training trajectories use one fixed sample for every metric and split.
-    trajectory_n_tokens: int = 50_000
-    interp_enabled: bool = False  # auto-interp via OPENAI_API_KEY
-
-    @field_validator("fvu_n_tokens", "dead_n_tokens", "trajectory_n_tokens")
-    @classmethod
-    def _evaluation_token_counts_positive(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("evaluation token counts must be positive")
-        return value
-
+    trajectory_n_tokens: int = Field(default=50_000, gt=0)
 
 EarlyStoppingMode = Literal["stability", "objective"]
 
@@ -368,9 +300,9 @@ class EarlyStoppingCfg(BaseModel):
     """
 
     enabled: bool = False
-    evaluation_interval_steps: int = 10_000
-    minimum_steps: int = 50_000
-    patience: int = 2
+    evaluation_interval_steps: int = Field(default=10_000, gt=0)
+    minimum_steps: int = Field(default=50_000, ge=0)
+    patience: int = Field(default=2, gt=0)
     fvu_relative_tolerance: float = 0.01
     ev_absolute_tolerance: float = 0.005
     l0_relative_tolerance: float = 0.10
@@ -382,7 +314,7 @@ class EarlyStoppingCfg(BaseModel):
     # rate by ``lr_reduce_factor`` (floored at ``min_lr_scale``), and
     # ``patience`` non-improving evaluations stop the run.
     improvement_rel_tol: float = 0.005
-    lr_plateau_patience: int = 3
+    lr_plateau_patience: int = Field(default=3, gt=0)
     lr_reduce_factor: float = 0.5
     min_lr_scale: float = 0.05
     # Streaming only, and whether or not ``enabled``: a site whose validation L0
@@ -397,20 +329,6 @@ class EarlyStoppingCfg(BaseModel):
     def _divergence_factors_above_one(cls, value: float | None) -> float | None:
         if value is not None and value <= 1.0:
             raise ValueError("divergence factors must be above 1")
-        return value
-
-    @field_validator("evaluation_interval_steps", "patience", "lr_plateau_patience")
-    @classmethod
-    def _positive_early_stop_counts(cls, value: int) -> int:
-        if value <= 0:
-            raise ValueError("early-stopping intervals and patience must be positive")
-        return value
-
-    @field_validator("minimum_steps")
-    @classmethod
-    def _nonnegative_early_stop_minimum(cls, value: int) -> int:
-        if value < 0:
-            raise ValueError("early-stopping minimum_steps cannot be negative")
         return value
 
     @field_validator(
@@ -449,6 +367,28 @@ class EarlyStoppingCfg(BaseModel):
         return self
 
 
+class GPUBufferCfg(BaseModel):
+    """GPU activation queue ceilings, fitted to each allocated device's live VRAM."""
+
+    max_frames: int = Field(default=128, ge=4, strict=True)
+    max_gib: float = Field(default=16.0, gt=0, allow_inf_nan=False)
+    max_vram_fraction: float = Field(default=0.20, gt=0, le=1, allow_inf_nan=False)
+    workspace_reserve_gib: float = Field(default=12.0, ge=0, allow_inf_nan=False)
+    worker_reserve_gib: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    high_water_fraction: float = Field(default=0.75, gt=0, lt=1, allow_inf_nan=False)
+    low_water_fraction: float = Field(default=0.25, gt=0, lt=1, allow_inf_nan=False)
+    producer_workspace_reserve_gib: float = Field(default=6.0, ge=0, allow_inf_nan=False)
+    producer_inflight_frames: int = Field(default=3, ge=1, le=16, strict=True)
+    helper_max_frames: int = Field(default=8, ge=4, strict=True)
+    helper_max_gib: float = Field(default=0.5, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _ordered_watermarks(self):
+        if self.low_water_fraction >= self.high_water_fraction:
+            raise ValueError("GPU buffer low watermark must be below its high watermark")
+        return self
+
+
 class StreamCfg(BaseModel):
     """Training from live model activations instead of an activation cache.
 
@@ -457,6 +397,8 @@ class StreamCfg(BaseModel):
     ``cache.tokens_per_fwd`` activations per site, split into whole
     ``sae.batch_size`` batches, so resuming needs only the token stream state.
     """
+
+    gpu_buffer: GPUBufferCfg = Field(default_factory=GPUBufferCfg)
 
     enabled: bool = False
     model_device: str = "cuda:0"
@@ -582,8 +524,6 @@ class ExtractionCfg(BaseModel):
 
 
 class LogCfg(BaseModel):
-    use_wandb: bool = False
-    wandb_project: str = "nemotron-sae"
     log_dir: Path = Path("outputs/logs")
 
 

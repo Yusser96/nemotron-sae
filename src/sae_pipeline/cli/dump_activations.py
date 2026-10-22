@@ -24,7 +24,7 @@ from safetensors.torch import load_file, save_file
 
 from sae_pipeline.cli._process import run_then_hard_exit
 from sae_pipeline.config import PipelineCfg
-from sae_pipeline.extraction.build import build_extractor
+from sae_pipeline.extraction.build import LOCAL_BACKENDS, build_extractor
 
 log = logging.getLogger(__name__)
 
@@ -50,11 +50,11 @@ def sample_validation_token_ids(cfg: PipelineCfg, tokenizer, n_sequences: int) -
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--backend", choices=["hf_hooks", "vllm"], default=None)
+    parser.add_argument("--backend", choices=LOCAL_BACKENDS, default=None)
     parser.add_argument("--token-ids", required=True, help="safetensors file with token_ids [sequences, seq_len]")
     parser.add_argument("--n-sequences", type=int, default=None, help="sample this many if --token-ids is missing")
     parser.add_argument("--out", required=True)
-    parser.add_argument("--device", default="cuda:0", help="model device for the hf_hooks backend")
+    parser.add_argument("--device", default="cuda:0", help="model device for the HF backends")
     parser.add_argument("--batch-sequences", type=int, default=4, help="sequences per extraction call")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

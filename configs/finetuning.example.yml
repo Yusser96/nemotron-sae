@@ -83,9 +83,6 @@ eval:
   fvu_n_tokens: 65_536
   dead_n_tokens: 50_000
   trajectory_n_tokens: 50_000
-  interp_enabled: false
 
 log:
-  use_wandb: false
-  wandb_project: nemotron-sae
   log_dir: outputs/logs

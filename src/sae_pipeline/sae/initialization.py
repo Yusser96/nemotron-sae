@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import math
 import torch
-from sae_pipeline.sae.checkpoint import load_sae_weights, resolve_checkpoint
-from sae_pipeline.sae.jumprelu import JumpReLUSAE
+from sae_pipeline.sae.checkpoint import (load_sae_weights)
+from sae_pipeline.sae.checkpoint_source import (resolve_checkpoint)
 
 
 def parameter_digest(sae):
@@ -23,10 +23,6 @@ def initialize_sae(sae, cfg, *, normalization_scale=1.0, checkpoint_filename=Non
     The checkpoint is unfolded into normalized training coordinates first.
     """
     mode = cfg.initialization_mode
-    if mode not in ("checkpoint", "random", "partial_reset"):
-        raise ValueError(f"Unsupported initialization mode {mode}")
-    if not isinstance(sae, JumpReLUSAE):
-        raise ValueError("Explicit streaming initialization requires JumpReLU")
     indices = torch.empty(0, dtype=torch.long)
     source = None
     fresh = None
@@ -59,9 +55,6 @@ def initialize_sae(sae, cfg, *, normalization_scale=1.0, checkpoint_filename=Non
                 getattr(sae, key)[:, selected] = fresh[key][:, selected]
             for key in ("b_enc", "log_theta"):
                 getattr(sae, key)[selected] = fresh[key][selected]
-    for name, parameter in sae.named_parameters():
-        if not torch.isfinite(parameter).all():
-            raise ValueError(f"non-finite checkpoint parameter {name}")
     return dict(mode=mode, checkpoint=source, reset_seed=cfg.initialization_reset_seed,
                 reset_count=len(indices), reset_indices=indices.tolist(),
                 preserved_global_decoder_bias=mode != "random", optimizer="fresh",
