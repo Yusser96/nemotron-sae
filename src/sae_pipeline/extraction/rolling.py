@@ -1,39 +1,33 @@
 """Bounded activation publication with immutable ranges and durable-consumer backpressure."""
-from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import time
 import uuid
+from sae_pipeline.shared_lock import file_lock
 
 
 def atomic_json(path, value):
-    path=Path(path);temporary=path.with_name(path.name+'.new')
-    with temporary.open('w') as f:
-        json.dump(value,f);f.write('\n');f.flush();os.fsync(f.fileno())
-    os.replace(temporary,path)
+    path=Path(path);temporary=path.with_name(path.name+'.'+uuid.uuid4().hex+'.new')
+    try:
+        with temporary.open('x') as f:
+            json.dump(value,f);f.write('\n');f.flush();os.fsync(f.fileno())
+        for attempt in range(50):
+            try:
+                os.replace(temporary,path)
+                break
+            except PermissionError:
+                # Windows can briefly deny a replace while a reader is closing.
+                # Do not hide any cluster filesystem or permissions failure.
+                if os.name!='nt' or attempt==49:raise
+                time.sleep(0.01)
+    finally:
+        temporary.unlink(missing_ok=True)
     if os.name!='nt':
         fd=os.open(path.parent,os.O_RDONLY)
         try:os.fsync(fd)
         finally:os.close(fd)
-
-
-@contextmanager
-def file_lock(path):
-    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    with path.open('a+b') as f:
-        if os.name=='nt':
-            import msvcrt
-            if f.tell()==0:f.write(b'0');f.flush()
-            f.seek(0);msvcrt.locking(f.fileno(),msvcrt.LK_LOCK,1)
-        else:
-            import fcntl
-            fcntl.flock(f,fcntl.LOCK_EX)
-        try:yield
-        finally:
-            if os.name=='nt':f.seek(0);msvcrt.locking(f.fileno(),msvcrt.LK_UNLCK,1)
-            else:fcntl.flock(f,fcntl.LOCK_UN)
 
 
 class RollingPool:
@@ -61,9 +55,16 @@ class RollingPool:
             atomic_json(pool.path,value)
         return pool
 
-    def read(self):return json.loads(self.path.read_text())
+    def read(self):
+        for attempt in range(50):
+            try:return json.loads(self.path.read_text())
+            except PermissionError:
+                if os.name!='nt' or attempt==49:raise
+                time.sleep(0.01)
 
-    def _save(self,v):atomic_json(self.path,v)
+    def _save(self,v):
+        v['revision']=v.get('revision',0)+1
+        atomic_json(self.path,v)
 
     def _delete(self,v,entry):
         p=Path(entry['path'])
@@ -101,7 +102,10 @@ class RollingPool:
 
     def publish(self,reservation,entry):
         with file_lock(self.root/'pool.lock'):
-            v=self.read();r=v['reservations'][reservation]
+            v=self.read()
+            if reservation not in v['reservations']:
+                raise RuntimeError('Publication reservation is missing: possible lost shared-state update or duplicate receipt; preserve output and inspect')
+            r=v['reservations'][reservation]
             if entry['start_frame']!=r['start_frame'] or entry['frame_count']!=r['frame_count'] or entry['start_frame']!=v['next_frame']:
                 raise RuntimeError('Out-of-order or mismatched durable publication')
             if entry['bytes']>r['bytes'] or Path(entry['path']).stat().st_size!=entry['bytes']:

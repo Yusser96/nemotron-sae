@@ -73,6 +73,70 @@ def test_bad_publication_does_not_advance_or_drop_reserved_bytes(tmp_path):
     assert pool.read()['next_frame']==1 and r in pool.read()['reservations']
 
 
+def test_duplicate_publication_fails_without_changing_pool(tmp_path):
+    pool,cache,e=setup(tmp_path)
+    following=entry(cache,1)
+    key=pool.reserve(1,1,following['bytes'])
+    pool.publish(key,following)
+    before=pool.read()
+    with pytest.raises(RuntimeError,match='reservation is missing'):
+        pool.publish(key,following)
+    assert pool.read()==before
+
+
+def test_atomic_json_concurrent_writers_use_independent_temporaries(tmp_path,monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import json
+    import threading
+    import sae_pipeline.extraction.rolling as rolling
+    path=tmp_path/'receipt.json'
+    barrier=threading.Barrier(2)
+    replace=rolling.os.replace
+    sources=[]
+    def simultaneous(source,destination):
+        if source not in sources:
+            sources.append(source)
+            barrier.wait(timeout=10)
+        replace(source,destination)
+    monkeypatch.setattr(rolling.os,'replace',simultaneous)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures=[executor.submit(rolling.atomic_json,path,{'writer':index}) for index in (1,2)]
+        for future in futures:future.result(timeout=15)
+    assert len(set(sources))==2
+    assert json.loads(path.read_text())['writer'] in (1,2)
+    assert not list(tmp_path.glob('*.new'))
+
+
+def test_simultaneous_publications_and_durable_commits_keep_reservations(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    from sae_pipeline.extraction.rolling import file_lock
+    pool,cache,first=setup(tmp_path)
+    with file_lock(pool.root/'pool.lock'):
+        state=pool.read();state['cap_bytes']=1_000_000;pool._save(state)
+    def publisher():
+        for frame in range(1,21):
+            following=entry(cache,frame)
+            key=pool.reserve(frame,1,following['bytes'])
+            time.sleep(0.002)
+            pool.publish(key,following)
+    def consumer(name):
+        frame=0
+        while frame<21:
+            target=pool.read()['next_frame']
+            if target>frame:
+                commit(pool,tmp_path,name,target)
+                frame=target
+            else:time.sleep(0.002)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures=[executor.submit(publisher),executor.submit(consumer,'a'),executor.submit(consumer,'b')]
+        for future in futures:future.result(timeout=30)
+    final=pool.read()
+    assert final['next_frame']==final['reserved_frontier']==21
+    assert final['reservations']=={}
+    assert all(c['frame']==21 for c in final['consumers'].values())
+
+
 def test_live_tensor_alias_is_read_without_reprojecting(tmp_path):
     cache=tmp_path/'cache';cache.mkdir()
     ids=torch.arange(8).reshape(4,2).long();rows=torch.arange(16).reshape(8,2).float()
