@@ -97,3 +97,7 @@ python -m ruff check --no-cache --select F src tests
 ```
 
 The adapter tests skip unless `nemotron-extraction` is installed (`.[dev,extraction]`).
+
+### Independent activation producers and SAE consumers
+
+The maintained vLLM extractor can publish version-2 per-site receipts with device finite validation and parallel file writers. `sae_pipeline.extraction.publication.entry_from_receipt` registers those receipts without reading activation payloads again. The rolling reader accepts both per-site and legacy monolithic caches, verifies tensor checksums during prefetch, and reclaims data only after durable consumer commits. Missing shared metadata is retried for up to five seconds; persistent failures preserve state and stop the affected run.
