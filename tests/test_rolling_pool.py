@@ -207,6 +207,30 @@ def test_reader_reads_the_shared_manifest_only_past_its_snapshot(tmp_path, monke
     stream.close()
 
 
+def test_trusted_device_publications_skip_only_the_activation_rehash(tmp_path):
+    pool, cache, e = setup(tmp_path, consumers=("a",))
+    state = pool.read()
+    state["entries"][0].update(finite_validation="device", site_sha256={"S": "0" * 64})
+    pool._save(state)
+    trusted = RollingCacheStream(
+        pool.root, ["S"], "cpu", idle_seconds=0, verify_activation_checksums=False
+    )
+    trusted.next_batch(4)
+    trusted.close()
+    verified = RollingCacheStream(pool.root, ["S"], "cpu", idle_seconds=0)
+    with pytest.raises(RuntimeError, match="Activation checksum differs"):
+        verified.next_batch(4)
+    verified.close()
+    state["entries"][0]["token_ids_sha256"] = "0" * 64
+    pool._save(state)
+    trusted = RollingCacheStream(
+        pool.root, ["S"], "cpu", idle_seconds=0, verify_activation_checksums=False
+    )
+    with pytest.raises(RuntimeError, match="Token archive identity differs"):
+        trusted.next_batch(4)
+    trusted.close()
+
+
 def test_bad_publication_does_not_advance_or_drop_reserved_bytes(tmp_path):
     pool, cache, e = setup(tmp_path)
     r = pool.reserve(1, 1, e["bytes"])

@@ -22,8 +22,13 @@ class RollingCacheStream:
         deadline=None,
         stop=None,
         attention_projections=None,
+        verify_activation_checksums=True,
     ):
+        """``verify_activation_checksums=False`` trusts the writer hashes of
+        device-validated publications instead of re-hashing every read on the
+        CPU; token identity is still checked on every load."""
         self.pool = RollingPool(root)
+        self.verify_activation_checksums = verify_activation_checksums
         self._entries = deque()
         self.pool_id = self.pool.read()["pool_id"]
         self.slugs = list(slugs)
@@ -67,13 +72,17 @@ class RollingCacheStream:
                         )
                 else:
                     value = f.get_tensor(entry.get("tensor_keys", {}).get(site, site))
-                digest = hashlib.sha256(
-                    memoryview(value.contiguous().view(torch.uint8).numpy())
-                ).hexdigest()
-                if digest != entry["site_sha256"][site]:
-                    raise RuntimeError("Activation checksum differs: " + site)
+                if value.shape[0] != ids.numel():
+                    raise RuntimeError("Activation rows differ from token IDs: " + site)
+                device_validated = entry.get("finite_validation") == "device"
+                if self.verify_activation_checksums or not device_validated:
+                    digest = hashlib.sha256(
+                        memoryview(value.contiguous().view(torch.uint8).numpy())
+                    ).hexdigest()
+                    if digest != entry["site_sha256"][site]:
+                        raise RuntimeError("Activation checksum differs: " + site)
                 # Bounded finite checks, including all rows before use.
-                if entry.get("finite_validation") != "device":
+                if not device_validated:
                     for chunk in value.split(8192):
                         if not torch.isfinite(chunk).all():
                             raise FloatingPointError("Nonfinite cached activations")
