@@ -2,6 +2,7 @@
 
 import hashlib
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import torch
@@ -23,6 +24,7 @@ class RollingCacheStream:
         attention_projections=None,
     ):
         self.pool = RollingPool(root)
+        self._entries = deque()
         self.pool_id = self.pool.read()["pool_id"]
         self.slugs = list(slugs)
         self.device = device
@@ -82,6 +84,28 @@ class RollingCacheStream:
                 )
         return entry, ids, values, time.monotonic() - started
 
+    def _lookup(self, frame):
+        """Published ranges are immutable and reclaimed only behind every durable
+        cursor, so the shared manifest is re-read only past the cached snapshot."""
+        while self._entries and (
+            self._entries[0]["start_frame"] + self._entries[0]["frame_count"]
+            <= self.frame
+        ):
+            self._entries.popleft()
+        for entry in self._entries:
+            if entry["start_frame"] > frame:
+                break
+            if frame < entry["start_frame"] + entry["frame_count"]:
+                return entry
+        state = self.pool.read()
+        entry = RollingPool.find(state, frame)
+        self._entries = deque(
+            e
+            for e in state["entries"]
+            if e["start_frame"] + e["frame_count"] > self.frame
+        )
+        return entry
+
     def next_batch(self, count):
         if count != 4:
             raise ValueError("Rolling training preserves four-sequence archive frames")
@@ -91,7 +115,7 @@ class RollingCacheStream:
                 self.deadline is not None and time.monotonic() >= self.deadline
             ):
                 raise TimeoutError("Allocation is ending")
-            entry = self.pool.lookup(self.frame)
+            entry = self._lookup(self.frame)
             if entry is not None:
                 break
             if time.monotonic() - began >= self.idle_seconds:
@@ -115,7 +139,7 @@ class RollingCacheStream:
             )
             following = entry["start_frame"] + entry["frame_count"]
             try:
-                future = self.pool.lookup(following)
+                future = self._lookup(following)
             except FileNotFoundError:
                 future = None
             if future is not None:

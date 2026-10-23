@@ -182,6 +182,31 @@ def test_reader_refresh_exact_resume_and_pinned_prefix(tmp_path):
     second.close()
 
 
+def test_reader_reads_the_shared_manifest_only_past_its_snapshot(tmp_path, monkeypatch):
+    pool, cache, e = setup(tmp_path, consumers=("a",))
+    state = pool.read()
+    state["cap_bytes"] *= 4
+    pool._save(state)
+    for start in (1, 3):
+        published = entry(cache, start, count=2)
+        pool.publish(pool.reserve(start, 2, published["bytes"]), published)
+    stream = RollingCacheStream(pool.root, ["S"], "cpu", idle_seconds=0)
+    reads = []
+    original = stream.pool.read
+    monkeypatch.setattr(
+        stream.pool, "read", lambda: reads.append(1) or original()
+    )
+    for frame in range(5):
+        ids = stream.next_batch(4)
+        rows = stream.extract(ids).activations["S"]
+        assert torch.equal(rows[:, 0], torch.arange(frame * 8, frame * 8 + 8).float())
+    # One snapshot, then one probe for the unpublished range after frame 4.
+    assert len(reads) == 2
+    with pytest.raises(TimeoutError):
+        stream.next_batch(4)
+    stream.close()
+
+
 def test_bad_publication_does_not_advance_or_drop_reserved_bytes(tmp_path):
     pool, cache, e = setup(tmp_path)
     r = pool.reserve(1, 1, e["bytes"])

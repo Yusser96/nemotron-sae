@@ -224,7 +224,10 @@ class RollingPool:
             self._save(v)
 
     def lookup(self, frame):
-        v = self.read()
+        return self.find(self.read(), frame)
+
+    @staticmethod
+    def find(v, frame):
         for e in v["entries"]:
             if e["start_frame"] <= frame < e["start_frame"] + e["frame_count"]:
                 if not Path(e["path"]).exists():
