@@ -149,9 +149,19 @@ class RollingPool:
             v["gc_pending"].extend(reclaim)
             v["entries"] = [e for e in v["entries"] if e not in reclaim]
             self._save(v)
-        for e in list(v["gc_pending"]):
+        # Keep every staged deletion durable until the whole batch succeeds.
+        # Saving the complete pool manifest after each reclaimed frame made a
+        # large catch-up checkpoint rewrite an O(n^2) amount of metadata while
+        # holding the cross-node pool lock. Other consumers then timed out
+        # waiting for that lock and incorrectly marked the campaign failed.
+        pending = list(v["gc_pending"])
+        for e in pending:
             self._delete(v, e)
-            v["gc_pending"].remove(e)
+        if pending:
+            # Deletion is idempotent, so a crash before this final publication
+            # safely retries the remaining paths from the durable gc_pending
+            # list on the next pool operation.
+            v["gc_pending"] = []
             self._save(v)
 
     @staticmethod

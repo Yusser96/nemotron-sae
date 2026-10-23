@@ -64,6 +64,68 @@ def commit(pool, tmp_path, consumer, frame):
     pool.commit(consumer, path)
 
 
+def reclaimable_pool(tmp_path, count=4):
+    cache = tmp_path / "gc-cache"
+    cache.mkdir()
+    entries = [entry(cache, i) for i in range(count)]
+    pool = RollingPool.create(
+        tmp_path / "gc-pool",
+        cap_bytes=sum(item["bytes"] for item in entries),
+        owned_roots=[cache],
+        consumers={"a": dict(checkpoint_dir=tmp_path / "a")},
+        initial_entries=entries,
+        frame_tokens=8,
+    )
+    state = pool.read()
+    state["consumers"]["a"]["frame"] = count
+    return pool, entries, state
+
+
+def test_gc_batches_manifest_updates_after_reclaiming_many_frames(
+    tmp_path, monkeypatch
+):
+    pool, entries, state = reclaimable_pool(tmp_path)
+    saves = []
+    original_save = pool._save
+
+    def counted_save(value):
+        saves.append(value.get("revision", 0))
+        original_save(value)
+
+    monkeypatch.setattr(pool, "_save", counted_save)
+    pool._gc(state)
+
+    assert len(saves) == 2  # stage all deletes, then publish the completed batch
+    assert state["entries"] == []
+    assert state["gc_pending"] == []
+    assert all(not Path(item["path"]).exists() for item in entries)
+
+
+def test_gc_retries_idempotently_after_interrupted_delete_batch(tmp_path, monkeypatch):
+    pool, entries, state = reclaimable_pool(tmp_path)
+    original_delete = pool._delete
+    failed = [False]
+
+    def interrupt_once(value, item):
+        if item["start_frame"] == 1 and not failed[0]:
+            failed[0] = True
+            raise OSError("simulated interruption during garbage collection")
+        original_delete(value, item)
+
+    monkeypatch.setattr(pool, "_delete", interrupt_once)
+    with pytest.raises(OSError, match="simulated interruption"):
+        pool._gc(state)
+
+    staged = pool.read()
+    assert staged["entries"] == []
+    assert len(staged["gc_pending"]) == len(entries)
+
+    monkeypatch.setattr(pool, "_delete", original_delete)
+    pool._gc(staged)
+    assert staged["gc_pending"] == []
+    assert all(not Path(item["path"]).exists() for item in entries)
+
+
 def test_backpressure_waits_for_both_durable_consumers(tmp_path):
     pool, cache, e = setup(tmp_path)
     e1 = entry(cache, 1)
