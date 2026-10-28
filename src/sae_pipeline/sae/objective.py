@@ -147,7 +147,11 @@ def training_loss(
     usage: torch.Tensor | None = None,
     tokens_since_fired: torch.Tensor | None = None,
 ) -> LossTerms:
-    """Reconstruction + λ_L0·quadratic L0 penalty + λ_IS·Inverse-Simpson floor penalty + α·AuxK.
+    """Reconstruction + λ_L0·quadratic L0 penalty + Inverse-Simpson floor penalty + α·AuxK.
+
+    The Inverse-Simpson penalty is λ_IS·(1 − u/floor)² or, with
+    ``inverse_simpson_form="log_ratio"``, λ_IS·R·log(floor/u) with R the
+    detached reconstruction loss; both are zero once u reaches the floor.
 
     ``usage`` holds each feature's firing rate averaged over the last
     ``inverse_simpson_window_steps`` batches; it is updated in place and the
@@ -179,10 +183,14 @@ def training_loss(
         d_is_tensor, u_is_tensor, _ = inverse_simpson_from_mass(firing, sae.d_sae)
         d_is = float(d_is_tensor.detach().item())
         u_is = float(u_is_tensor.detach().item())
-        gap = torch.clamp(
-            (cfg.inverse_simpson_floor - u_is_tensor) / max(cfg.inverse_simpson_floor, 1.0e-8), min=0.0
-        )
-        inverse_simpson_penalty = coefficients.lambda_is * gap.square()
+        if cfg.inverse_simpson_form == "log_ratio":
+            shortfall = torch.log(cfg.inverse_simpson_floor / u_is_tensor.clamp_min(1.0e-12)).clamp_min(0.0)
+            inverse_simpson_penalty = coefficients.lambda_is * reconstruction.detach() * shortfall
+        else:
+            gap = torch.clamp(
+                (cfg.inverse_simpson_floor - u_is_tensor) / max(cfg.inverse_simpson_floor, 1.0e-8), min=0.0
+            )
+            inverse_simpson_penalty = coefficients.lambda_is * gap.square()
 
     auxk_penalty = reconstruction.new_zeros(())
     if cfg.auxk_scale > 0 and tokens_since_fired is not None:

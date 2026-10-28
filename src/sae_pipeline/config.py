@@ -150,6 +150,10 @@ class SAECfg(BaseModel):
     feature_frequency_penalty_multiplier: float = 1.0
     inverse_simpson_floor: float = 0.0
     inverse_simpson_max_scale: float = 0.0
+    # "quadratic": λ·(1 − u/floor)², whose push weakens as the floor rises.
+    # "log_ratio": λ·log(floor/u) times the current reconstruction loss (like
+    # AuxK), pushing harder the lower u falls; the floor only switches it off.
+    inverse_simpson_form: Literal["quadratic", "log_ratio"] = "quadratic"
     # None follows l0_warmup_steps so both firing-pattern terms ramp together.
     inverse_simpson_warmup_steps: int | None = Field(default=None, ge=0)
     # Batches the firing rates behind the floor are averaged over (an EMA);

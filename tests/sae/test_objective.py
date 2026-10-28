@@ -106,6 +106,44 @@ def test_a_one_batch_window_measures_each_batch_on_its_own():
     torch.testing.assert_close(windowed.inverse_simpson_penalty, alone.inverse_simpson_penalty)
 
 
+def test_log_ratio_inverse_simpson_scales_the_reconstruction_by_the_log_shortfall():
+    torch.manual_seed(0)
+    sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+    x = torch.randn(32, 6)
+    coefficients = LossCoefficients(lr=1.0, lambda_l0=0.0, lambda_is=0.5)
+
+    below = training_loss(
+        sae, x, SAECfg(inverse_simpson_floor=1.0, inverse_simpson_max_scale=0.5, inverse_simpson_form="log_ratio"),
+        coefficients, target_l0=4.0,
+    )
+    reached = training_loss(
+        sae, x, SAECfg(inverse_simpson_floor=below.u_is, inverse_simpson_max_scale=0.5,
+                       inverse_simpson_form="log_ratio"),
+        coefficients, target_l0=4.0,
+    )
+
+    expected = 0.5 * float(below.reconstruction) * torch.log(torch.tensor(1.0 / below.u_is))
+    assert float(below.inverse_simpson_penalty.detach()) == pytest.approx(float(expected), rel=1e-5)
+    assert float(reached.inverse_simpson_penalty.detach()) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_higher_log_ratio_floor_keeps_the_same_push():
+    torch.manual_seed(0)
+    x = torch.randn(32, 6)
+    gradients = []
+    for floor in (0.99, 1.0):
+        torch.manual_seed(1)
+        sae = JumpReLUSAE(d_in=6, d_sae=12, bandwidth=0.05)
+        cfg = SAECfg(inverse_simpson_floor=floor, inverse_simpson_max_scale=0.5, inverse_simpson_form="log_ratio")
+        terms = training_loss(sae, x, cfg, LossCoefficients(lr=1.0, lambda_l0=0.0, lambda_is=0.5), target_l0=4.0)
+        assert terms.u_is < 0.99
+        terms.inverse_simpson_penalty.backward()
+        gradients.append(sae.log_theta.grad.clone())
+
+    assert gradients[0].abs().sum() > 0
+    torch.testing.assert_close(gradients[0], gradients[1])
+
+
 def test_training_loss_skips_inverse_simpson_without_a_floor():
     sae = JumpReLUSAE(d_in=4, d_sae=8)
     terms = training_loss(

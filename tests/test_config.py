@@ -36,6 +36,10 @@ def test_inverse_simpson_config_validation():
     assert cfg.inverse_simpson_max_scale == 0.05
     assert cfg.inverse_simpson_warmup_steps == 50000
     assert cfg.eval_interval_steps == 10000
+    assert cfg.inverse_simpson_form == "quadratic"
+    assert SAECfg(inverse_simpson_form="log_ratio").inverse_simpson_form == "log_ratio"
+    with pytest.raises(ValueError):
+        SAECfg(inverse_simpson_form="linear")
 
     # Floor must be in [0, 1]
     with pytest.raises(ValueError):
