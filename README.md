@@ -1,103 +1,95 @@
 # nemotron-sae
 
-Train and evaluate JumpReLU sparse autoencoders on model activations. The encoder
-is tied to the decoder at initialization and optimized independently afterward.
-
-This repository owns SAE training and evaluation of feature utilisation,
-reconstruction fidelity and behavioural fidelity. Reusable activation-extraction
-strategies belong to `nemotron-extraction`. Downstream autointerpretation,
-multilingual feature exploration and the Web UI belong to a downstream
-interpretation repository, which consumes the trained and evaluated SAEs.
+Train and evaluate JumpReLU sparse autoencoders (SAEs) on the activations of Nemotron 3 Nano and similar hybrid Mamba–attention–MoE models. The repository covers training, and evaluation of reconstruction fidelity, behavioural fidelity (cross-entropy with the SAE patched in) and how many latents are actually used. Extracting activations at scale is delegated to [nemotron-extraction](https://github.com/alobo01/nemotron-extraction). Interpreting the trained features is left to downstream tools.
 
 ## Install
 
-Use Python 3.10 or newer. On a CUDA host, `bash scripts/setup_venv.sh` creates the
-project environment and installs the CUDA dependencies. In an existing environment:
+Python 3.10 or later.
 
 ```sh
-python -m pip install -e '.[gpu,dev]'
+python -m pip install -e '.[dev]'           # CPU: training on caches, tests, the toy below
+python -m pip install -e '.[gpu,dev]'       # CUDA host: model inference as well
 ```
 
-CPU development uses `python -m pip install -e '.[dev]'`. Hybrid model inference
-also needs the model's compatible Mamba and causal convolution builds; see the
-setup script. Credentials are read from the environment, never from configuration
-values. Set `model.token_env_var` to the name of the environment variable to use.
+Hybrid models also need compatible `mamba-ssm` and `causal-conv1d` builds; `bash scripts/setup_venv.sh` installs them on a CUDA host. Access tokens are read from the environment variable named by `model.token_env_var`, never from configuration files.
 
-## Train from cached activations
+## Try it on a CPU
+
+[`examples/toy_sae.py`](examples/toy_sae.py) builds activations from a known sparse dictionary: each token mixes 3 of 64 random directions in 32 dimensions. It writes them as an activation cache, trains an SAE with the same trainer used for real models, and checks how much of the dictionary it recovered. It takes under a minute.
+
+```sh
+python examples/toy_sae.py outputs/toy_sae
+```
+
+```text
+FVU 0.125, L0 3.00 (target 3), recovered 44/64 directions
+```
+
+FVU is the fraction of variance left unexplained, and L0 is the number of active latents per token. A direction counts as recovered when a decoder direction points the same way (cosine above 0.9).
+
+## Train on a model
+
+Every SAE belongs to one **site**: a layer and a component, named like `L26_resid_post`. See [hook sites](docs/hook_sites.md) for the model layout and the available components. Each command below takes a YAML configuration and has `--help`.
+
+**From an activation cache.** This is the simplest path: one forward pass writes shards, then each SAE trains from disk.
 
 ```sh
 python -m sae_pipeline.cli.cache_activations --config configs/dev.yaml --layer 25 --component resid_post
 python -m sae_pipeline.cli.train_sae --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30
 ```
 
-For exact model paths, configure `target.sites` and select a `--site` slug instead
-of `--layer` and `--component`. `cache_activations --all-targets` captures all
-configured sites in one forward pass. Build per-language probes with
-`--partition validation --language en` (and each additional configured language).
-
-## Train from a stream
-
-Set `stream.enabled: true`, configure `target.sites`, and prepare complete bilingual
-or monolingual validation caches under `validation_run_id` before training:
+**From a stream.** This path never stores the training activations, and trains many sites from the same forward passes:
 
 ```sh
 python -m sae_pipeline.cli.train_sae_streaming --config configs/streaming.example.yml
 ```
 
-`sae.checkpoint_source` with `sae.initialization_mode: checkpoint` warm-starts a
-released dictionary with a fresh optimizer. `initialization_mode: random` uses
-fresh decoder-derived encoder weights. Configure fixed-LR plateau stopping with
-`early_stopping.mode: objective`, `min_lr_scale: 1.0`, and a suitable minimum step
-count and patience. Numerical safeguards remain active independently of plateau
-stopping. Rerun the identical command to resume the committed stream cursor,
-optimizer, random state and selection state after a time-limited pause.
+To run the model and the trainers on different GPUs or nodes, start one producer, `produce_activations --out DIR --consumers NAME...`, and one trainer per consumer with `--fills DIR --consumer NAME`. Rerunning the same command resumes a stopped run from its last committed state.
 
-To train from a separate activation producer, pass `--fills DIR --consumer NAME`,
-with a distinct name for each trainer.
-
-## Evaluate and plot
+**Evaluate and plot:**
 
 ```sh
-python -m sae_pipeline.cli.evaluate --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30
+python -m sae_pipeline.cli.evaluate --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30 --delta-ce
 python -m sae_pipeline.cli.plot --config configs/dev.yaml --layer 25 --component resid_post --width 4096 --l0 30
 ```
 
-Evaluation reports reconstruction, firing sparsity and dictionary utilization.
-Use `--partition validation --language en` for held-out measurements, and add
-`--delta-ce` to measure next-token cross-entropy degradation with the SAE patched
-into the model. That flag loads the language model and uses the configured
-`eval.delta_ce_n_seqs` and `eval.delta_ce_seq_len`; it processes one sequence at a
-time to bound logits memory. Reconstruction-only evaluation does not load it.
+`--delta-ce` loads the model and measures how much next-token cross-entropy rises with the SAE in place. Without it, evaluation reads only the cache. Use `--partition validation --language en` for held-out data. [`configs/`](configs) holds annotated examples for fine-tuning a released SAE and for streaming.
 
-See the shipped [configuration examples](configs/finetuning.example.yml),
-[streaming example](configs/streaming.example.yml) and [hook sites](docs/hook_sites.md).
-Every CLI also supports `--help`. Installed aliases are `sae-cache`, `sae-train`,
-`sae-train-streaming`, `sae-evaluate`, `sae-plot` and `sae-launch`.
+## How it works
 
-## Cache and checkpoint compatibility
+- **Objective.** The SAE encodes with a JumpReLU: a latent fires only above its learned threshold. It is trained on reconstruction error plus a quadratic penalty that keeps L0 near a target. The threshold learns through a straight-through estimator with a window set by `bandwidth`. Two optional terms address unused latents:
+  - an inverse-Simpson penalty that spreads activation mass across latents;
+  - an AuxK loss that trains dead latents to explain the residual error.
 
-Cache manifests must match model, site, width, partition and language. Keep
-normalization and centering metadata alongside canonical checkpoints. Public raw
-exports already fold these transformations into the weights; select
-`--checkpoint-format raw_export` when evaluating them. Streaming resume requires
-the committed weight/state pair referenced by its stream-state file. Preserve the
-pair and cursor together; a raw export alone cannot resume an optimizer.
+  The penalties ramp in over a configurable number of steps (`objective.py`, `jumprelu.py`).
+- **Initialisation.** A run starts from random weights, from a released SAE (warm start, fresh optimiser) or from a partial reset of one.
+- **Validation and selection.** Fixed held-out probes, per language, are scored at intervals. The cached trainer stops when FVU, explained variance and L0 are stable. The streaming trainer stops when the held-out reconstruction loss plateaus. Separately, it exports the checkpoint with the best full validation objective. That export can date from the penalty ramp, so compare it with the final export before choosing one.
+- **Durability.** Checkpoints are weight and state pairs written atomically. Resuming restores weights, optimiser, random state, stream cursor and selection state. Raw exports fold normalisation into the weights for public release.
 
-`extraction.backend` defaults to `hf_hooks`; `vllm` and `vllm_remote` are also
-built in. The optional `extraction` extra pins `nemotron-extraction==1.1.0` and
-adds the `nemotron_extraction_hf` and `nemotron_extraction_vllm` backends. Check
-them with `python -m sae_pipeline.cli.compare_activations` on your model and sites
-before switching an existing experiment.
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/sae_pipeline/config.py` | Typed configuration for every stage |
+| `src/sae_pipeline/model/` | Model loading and the topology map from site names to modules |
+| `src/sae_pipeline/hooks/` | Component hooks, attention pre-projection capture, SAE patching for cross-entropy |
+| `src/sae_pipeline/extraction/` | Extraction backends behind one interface (PyTorch hooks, vLLM, nemotron-extraction adapters), plus the producer/consumer fill directory and rolling activation pool |
+| `src/sae_pipeline/data/` | Token streams from Hugging Face datasets |
+| `src/sae_pipeline/cache/` | Activation shard writer, reader and manifest |
+| `src/sae_pipeline/sae/` | The SAE, objective, cached and streaming trainers, initialisation, validation, stopping, checkpoints and resets |
+| `src/sae_pipeline/eval/` | Reconstruction, utilisation and cross-entropy metrics; plots |
+| `src/sae_pipeline/cli/` | Command-line entry points (cache, train, evaluate, plot, produce, compare, benchmarks) |
+| `examples/` | The CPU toy above |
+| `configs/` | Example configurations |
+| `scripts/`, `slurm/` | Environment set-up and generic cluster launchers |
+| `docs/hook_sites.md` | Model layout and site naming |
+| `tests/` | CPU tests on synthetic activations; GPU tests are marked `cuda` |
 
 ## Development
 
 ```sh
-python -m pytest -q -m 'not cuda' -p no:cacheprovider -n 6
-python -m ruff check --no-cache --select F src tests
+python -m pytest -q -m 'not cuda' -n 6
+python -m ruff check src tests examples
 ```
 
-The adapter tests skip unless `nemotron-extraction` is installed (`.[dev,extraction]`).
-
-### Independent activation producers and SAE consumers
-
-The maintained vLLM extractor can publish version-2 per-site receipts with device finite validation and parallel file writers. `sae_pipeline.extraction.publication.entry_from_receipt` registers those receipts without reading activation payloads again. The rolling reader accepts both per-site and legacy monolithic caches, verifies tensor checksums during prefetch, and reclaims data only after durable consumer commits. Missing shared metadata is retried for up to five seconds; persistent failures preserve state and stop the affected run.
+Tests of the nemotron-extraction adapters run only when that package is installed (`.[dev,extraction]`).
